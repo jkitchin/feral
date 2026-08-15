@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-15T19:31:04Z
+Generated: 2026-08-15T21:30:01Z
 
 ## Latest Session
 File: dev/sessions/2026-08-14-03.md
@@ -59,26 +59,26 @@ crates.io still served 0.15.1, so none of it had reached discopt.
 
 ## Git Status
 ```
-810080d docs: session checkpoint 2026-08-14-03 (0.16.0 released)
-6fc92d6 Merge pull request #173 from jkitchin/release/0.16.0
-c681c2a release: feral v0.16.0
-c9c3adc docs: session checkpoint 2026-08-14-02 (161-168 closed, #171 landed)
-ec67e85 Merge pull request #172 from jkitchin/feat/171-lu-defaults
+45c80f3 perf(scaling): keep the router's symmetric pass off the common path
+e9470ca fix(scaling): count symmetric degree in the router's head gate (#134B)
+8acb1be docs(scaling): research + plan for router permutation-invariance (#134B)
+14b3865 diag: size the KR warm-start lever against steady-state routes
+e78f29e diag: probe the two open scaling levers (#153, #134B)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
@@ -86,7 +86,7 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 423 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.43s
+test result: ok. 427 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.44s
 
 ```
 
@@ -161,26 +161,26 @@ Evidence: issue #171; `dev/research/markowitz-fill-measurement.md`;
 `dev/journal/2026-08-14-01.org`; the #166 and #168 arm harnesses.
 
 ## Recent Tried-and-Rejected
-two discopt worktrees pinned at `bce881ff` via `[patch.crates-io]`, two
-extension `.so`s with distinct md5s loaded by `PYTHONPATH`, each arm
-asserting its own module path before solving. Slower to build, but it
-measures the thing the issue is about.
 
-## 2026-08-14 — #171: plain `cargo test` as the verification gate
+**Also:** this hypothesis had already been falsified six days earlier in
+`dev/research/scaling-warm-start-2026-08-09.md` (zero iteration reduction on
+6 fixtures; "lower the cap" ranked worst on risk/benefit, cap 5 giving
+3.7e-1 vs 1.4e-2 — 26x worse). That note was not read before recommending
+the work, which is the protocol step — read `dev/research/` and this file
+*before* writing code — that exists to prevent exactly this.
 
-**Tried.** Verifying the Markowitz-default change with `cargo test`.
+**Sizing was also wrong.** The lever was first sized off what
+`pick_scaling_strategy` returns, but the sticky-`Auto` pin (#51/#65) means
+the steady-state route can differ: `mc64_cache_hit_count()` shows dtoc1nd at
+14/20 hits and marine at 12/18, i.e. both run MC64, not InfNorm. Only 2 of
+the 6 #153 fixtures (clnlbeam, steering_12800) actually run KR, so the lever
+was ~7-12%, not the 10-20% first reported. Size scaling levers off the
+observed route, not the picker.
 
-**Why it failed.** `cargo test` stops after the first failing test *target*.
-Four consecutive runs each reported exactly one failing binary, so the same
-"the suite is green except X" conclusion was drawn — and was wrong — three
-times. Run 5's log contains zero occurrences of `lu_sparse_rhs`: that binary
-never executed. The true blast radius was seven test sites across five
-files.
-
-**Replaced with.** `cargo test --no-fail-fast`, which surfaced all of them
-in one pass (864 passed, 0 failed). For any change to a default that every
-test inherits, fail-fast turns one measurement into N sequential ones and
-hides the scope.
+**Not rejected:** warm@10 — the same sweep budget, better conditioning
+(geomean 3x-100x lower final deviation). That is free quality, not a
+speedup, and would need downstream iterative-refinement counts to justify.
+Recorded as option 2 in the 2026-08-09 note; still open.
 
 ## Source Files
 ```

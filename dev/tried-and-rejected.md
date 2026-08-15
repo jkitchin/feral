@@ -5403,3 +5403,53 @@ files.
 in one pass (864 passed, 0 failed). For any change to a default that every
 test inherits, fail-fast turns one measurement into N sequential ones and
 hides the scope.
+
+## 2026-08-15 — #153: warm-starting Knight-Ruiz to save scaling sweeps
+
+**Tried.** Seeding `compute_infnorm`'s equilibration vector `d` from the
+previous IPM iterate's converged `d` instead of `d = 1`, and cutting the
+10-sweep cap to 2/3/5 on the strength of the warm start. Motivation: KR is
+cap-bound, not tolerance-bound — measured this session, only iterate-0 KKTs
+reach `tol = 1e-8` (dtoc1nd 6 sweeps → 4.4e-16, steering 4 → 7.7e-12,
+dtoc2 5 → 2.2e-16); from iterate 1 on all six fixtures burn the full 10 and
+exit at dev 1e-2 to 3e-2, so the tolerance is unreachable by construction.
+
+**Why it failed.** Warm-starting at a *reduced* cap loses. Chain experiment
+over full runs — every iterate warm-started from its predecessor, scored
+against a cold `d = 1` run at cap 10, counting per-iterate wins:
+
+| matrix                   | k=2  | k=3  | k=5   | k=10  |
+|--------------------------|------|------|-------|-------|
+| steering_12800 [InfNorm] | 0/2  | 0/2  | 0/2   | 2/2   |
+| TWIRISM1                 | 0/6  | 0/6  | 4/6   | 5/6   |
+| marine_1600 [MC64]       | 9/16 | 9/16 | 14/16 | 16/16 |
+
+Only warm@10 — the same cost as today — wins consistently. Every reduced
+cap loses on the one fixture that actually routes to `InfNorm`
+(steering_12800: 0/2 at k=2, 3 and 5), which is the only fixture where the
+lever could pay at all.
+
+An earlier reading that "warm@5 beats cold@10" came from a **single iterate
+pair** and did not replicate over full runs. The geometric-mean statistic
+that produced it is contaminated by iterate 0, which converges under both
+schedules; the per-iterate win count is the clean statistic.
+
+**Also:** this hypothesis had already been falsified six days earlier in
+`dev/research/scaling-warm-start-2026-08-09.md` (zero iteration reduction on
+6 fixtures; "lower the cap" ranked worst on risk/benefit, cap 5 giving
+3.7e-1 vs 1.4e-2 — 26x worse). That note was not read before recommending
+the work, which is the protocol step — read `dev/research/` and this file
+*before* writing code — that exists to prevent exactly this.
+
+**Sizing was also wrong.** The lever was first sized off what
+`pick_scaling_strategy` returns, but the sticky-`Auto` pin (#51/#65) means
+the steady-state route can differ: `mc64_cache_hit_count()` shows dtoc1nd at
+14/20 hits and marine at 12/18, i.e. both run MC64, not InfNorm. Only 2 of
+the 6 #153 fixtures (clnlbeam, steering_12800) actually run KR, so the lever
+was ~7-12%, not the 10-20% first reported. Size scaling levers off the
+observed route, not the picker.
+
+**Not rejected:** warm@10 — the same sweep budget, better conditioning
+(geomean 3x-100x lower final deviation). That is free quality, not a
+speedup, and would need downstream iterative-refinement counts to justify.
+Recorded as option 2 in the 2026-08-09 note; still open.
