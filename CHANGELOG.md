@@ -4,6 +4,37 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — scaling router no longer routes on index order (issue #134 item B)
+
+- `pick_scaling_strategy`'s dense-head gate now counts the **symmetric degree**
+  of each index rather than the length of its stored lower-triangle column.
+  `CscMatrix` stores one triangle, so a stored column length measures couplings
+  to one side of `j` only — a property of the index order, not of the matrix.
+- **The bug.** Under the pure relabeling `P(i) = n-1-i`, VESUVIO's arrow head
+  reports a stored max degree of 1026 one way and 11 the other, and the route
+  flips `Mc64Symmetric` → `InfNorm`, forfeiting the documented 6x–243x MC64 win.
+  The IPOPT variable convention puts the duals last, so this is the shape POUNCE
+  and discopt actually emit. Measured over the 1004-family KKT corpus, the old
+  router was permutation-invariant on 841; the new one on 890.
+- **Monotone, so nothing loses MC64.** Symmetric degree is never less than
+  stored degree, so the gate can only become easier to pass: 15 families change
+  route and all 15 gain `Mc64Symmetric` (MSS1, BIGBANK, BLOWEYA/B/C, C-RELOAD,
+  CHAIN, CLEUVEN2, CMPC1, LEUVEN1, LEUVEN2, SOSQP1, SOSQP2, arki0003, arki0009).
+  Inertia is identical under both routes on all 15; factor-time ratio median
+  0.98 (range 0.95–1.19); accuracy neutral or better on 14 (CHAIN 5.02e-6 →
+  1.42e-8, SOSQP1 8.49e-6 → 1.95e-6). MSS1 is the exception — 0.872 → 1.037 ms
+  and 1.43e-1 → 6.15e-1 forward error — but at 1e-1 neither route solves it, and
+  the Policy 4 fallback already covers it.
+- The 2026-05-17 threshold panel is preserved: clnlbeam's symmetric max degree
+  is 5 and ACOPP30's is 29, both still under the `32` gate.
+- Cost: one `n`-length degree accumulator; the router is no longer
+  allocation-free.
+- **Not fixed:** the slack-mass gate is still order-dependent, leaving 114 of
+  1004 families routing on index order. Every invariant reformulation measured
+  strips `Mc64Symmetric` from 89 families including `marine_1600` and
+  `rocket_12800`, so it needs IPM-outcome evidence rather than a routing-parity
+  argument. See `dev/research/router-permutation-invariance-2026-08-15.md`.
+
 ## [0.16.0] - 2026-08-14
 
 ### Changed — `SparseLu::factor` now defaults to threshold-Markowitz pivoting (issue #171)

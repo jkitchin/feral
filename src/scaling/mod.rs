@@ -672,10 +672,28 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 ///
 /// `32` sits an order of magnitude above ACOPP30's max (29) and an
 /// order of magnitude below MUONSINE's (512), giving the widest
-/// possible margin on either side of the validation panel.
+/// possible margin on either side of the validation panel. The panel
+/// is unchanged by the symmetric-degree switch below: clnlbeam's
+/// symmetric max degree is 5 and ACOPP30's is 29, so neither can
+/// cross 32, while every YES row keeps a head in the hundreds.
 ///
-/// One O(n+nnz) pass over the column pointers and row indices.
-/// No allocations.
+/// **Permutation invariance (issue #134 item B).** Gate (b) counts
+/// the symmetric degree of each index, not the stored lower-triangle
+/// column length. A stored column length measures couplings to one
+/// side of `j` only, so it depends on the index order: under the pure
+/// relabeling `P(i) = n-1-i`, VESUVIO's head reports 1026 one way and
+/// 11 the other, and the route flips to `InfNorm`. That is the
+/// duals-last shape the IPOPT variable convention produces. Measured
+/// over the 1004-family corpus, the stored form is invariant on 841
+/// and the symmetric form on 890; the switch is monotone (symmetric
+/// degree >= stored degree) so it moves 15 families and all 15 gain
+/// MC64 — inertia identical on all 15, factor time ratio median 0.98.
+/// Gate (a) is knowingly still order-dependent; see the comment at
+/// its use below and
+/// `dev/research/router-permutation-invariance-2026-08-15.md`.
+///
+/// One O(n+nnz) pass over the column pointers and row indices, plus
+/// an `n`-length degree accumulator.
 pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     /// Maximum stored column nnz for the Auto policy to consider the
     /// matrix "banded enough" that InfNorm is the safe choice even
@@ -686,8 +704,18 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     if n == 0 {
         return ScalingStrategy::InfNorm;
     }
+    // Issue #134 item B: gate (b) counts *symmetric* degree — the
+    // degree of index `j` in the full matrix — not the stored
+    // lower-triangle column length. `CscMatrix` stores only one
+    // triangle, so a stored column length answers "how many couplings
+    // does `j` have to indices on one side of it", which is a property
+    // of the index order rather than of the matrix. Under the pure
+    // relabeling `P(i) = n-1-i` a leading arrow head of size 1026
+    // reports a stored max of 11 and the route flips. The IPOPT
+    // variable convention (duals last) puts the head at the trailing
+    // end, so this is the shape POUNCE and discopt actually emit.
+    let mut deg = vec![0usize; n];
     let mut diag_only = 0usize;
-    let mut max_col_nnz = 0usize;
     for j in 0..n {
         let start = matrix.col_ptr[j];
         let end = matrix.col_ptr[j + 1];
@@ -705,17 +733,30 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
                 continue;
             }
             nnz_col += 1;
-            if matrix.row_idx[k] == j {
+            let i = matrix.row_idx[k];
+            deg[j] += 1;
+            if i == j {
                 diag_nonzero = true;
+            } else {
+                // The mirrored entry is not stored; credit it to the
+                // other index so both ends of the coupling see it.
+                deg[i] += 1;
             }
         }
-        if nnz_col > max_col_nnz {
-            max_col_nnz = nnz_col;
-        }
+        // Gate (a) is deliberately left on stored counting. The
+        // invariant reading ("symmetric degree <= 2 plus a diagonal")
+        // is correct for textbook arrow KKTs and wrong for the corpus:
+        // the slack columns this gate counts have symmetric degrees
+        // spanning 2 (ROCKET) to 64 (MSQRTA) to 379 (LEUVEN3), so no
+        // single threshold reproduces it, and every candidate strips
+        // MC64 from 89 families including marine_1600 and
+        // rocket_12800. See
+        // `dev/research/router-permutation-invariance-2026-08-15.md`.
         if nnz_col == 1 && diag_nonzero {
             diag_only += 1;
         }
     }
+    let max_col_nnz = deg.iter().copied().max().unwrap_or(0);
     let has_arrow_head = max_col_nnz > MAX_COL_NNZ_FOR_INFNORM;
     let has_slack_mass = diag_only as f64 / n as f64 >= 0.3;
     if has_arrow_head && has_slack_mass {
@@ -743,6 +784,36 @@ mod tests {
     /// enough that `1 + dense_off > MAX_COL_NNZ_FOR_INFNORM` (= 32),
     /// the non-slack columns form an "arrow head" that triggers the
     /// dense-column gate in `pick_scaling_strategy`.
+    /// Build a genuinely banded KKT: `diag_only` diagonal-only slack
+    /// columns followed by `n - diag_only` columns carrying the
+    /// diagonal plus couplings to the next `bandwidth` indices. Every
+    /// index has symmetric degree at most `2 * bandwidth + 1`, so the
+    /// shape stays under the head gate however it is relabeled.
+    fn banded_csc(n: usize, diag_only: usize, bandwidth: usize) -> CscMatrix {
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(2.0);
+            if j >= diag_only {
+                for d in 1..=bandwidth {
+                    if j + d < n {
+                        row_idx.push(j + d);
+                        values.push(0.5);
+                    }
+                }
+            }
+            col_ptr.push(row_idx.len());
+        }
+        CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
     fn shape_csc(n: usize, diag_only: usize, dense_off: usize) -> CscMatrix {
         assert!(diag_only <= n);
         let n_dense = n - diag_only;
@@ -880,12 +951,19 @@ mod tests {
 
     #[test]
     fn pick_scaling_strategy_picks_infnorm_for_banded_high_diag_only() {
-        // The clnlbeam shape: large n, high diag_only ratio (0.40)
-        // but narrow band (max_col_nnz=5). Must route to InfNorm —
-        // this is the entire motivation for adding the dense-column
-        // gate. See `dev/journal/2026-05-17-01.org` §14:30.
-        // 60 slack cols + 40 banded cols (diag + 4 earlier rows).
-        let csc = shape_csc(100, 60, 4);
+        // The clnlbeam shape: large n, high diag_only ratio but
+        // narrow band. Must route to InfNorm — this is the entire
+        // motivation for adding the dense-column gate. See
+        // `dev/journal/2026-05-17-01.org` §14:30.
+        //
+        // 60 slack cols + 40 banded cols (diag + the 4 *following*
+        // indices). This fixture used to be `shape_csc(100, 60, 4)`,
+        // which coupled all 40 non-slack columns to the same 4 row
+        // indices — a 4-spoke star of symmetric degree 41, not a band.
+        // Stored-column counting could not tell the difference (both
+        // report 5); symmetric counting can, and the real clnlbeam has
+        // symmetric max degree 5, so the band is the faithful fixture.
+        let csc = banded_csc(100, 60, 4);
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
     }
 
@@ -910,13 +988,22 @@ mod tests {
 
     #[test]
     fn pick_scaling_strategy_max_col_nnz_threshold_boundary() {
-        // diag_only/n satisfied for both (50/100=0.50 ≥ 0.30).
-        // Only the dense-column degree varies across the boundary at 32.
-        // 50 slacks + 50 cols of (1 diag + 31 off) = 32 nnz → fails gate.
-        let at32 = shape_csc(100, 50, 31);
+        // diag_only/n satisfied for both (99/100 = 0.99 ≥ 0.30).
+        // Only the head degree varies across the boundary at 32.
+        //
+        // `arrow_leading(n, head)` gives index 0 a symmetric degree of
+        // exactly `head` — its own diagonal plus `head - 1` couplings
+        // — and every other index a degree of 1 or 2. The degree is
+        // therefore fixed by construction and checkable by hand, which
+        // the previous `shape_csc` fixture's was not: its symmetric
+        // degree depended on how many non-slack columns happened to
+        // reach a given row.
+        //
+        // head = 32 → max symmetric degree 32, not > 32 → fails gate.
+        let at32 = arrow_leading(100, 32);
         assert_eq!(pick_scaling_strategy(&at32), ScalingStrategy::InfNorm);
-        // 50 slacks + 50 cols of (1 diag + 32 off) = 33 nnz → passes.
-        let at33 = shape_csc(100, 50, 32);
+        // head = 33 → max symmetric degree 33 → passes.
+        let at33 = arrow_leading(100, 33);
         assert_eq!(pick_scaling_strategy(&at33), ScalingStrategy::Mc64Symmetric);
     }
 
@@ -1526,6 +1613,181 @@ mod tests {
         assert!(
             relres <= 1e-6,
             "Auto solve relres {relres:.3e} exceeds 1e-6"
+        );
+    }
+
+    // ---- issue #134 item B: permutation-invariant head gate ----
+
+    /// A leading-border arrow KKT stored as the lower triangle:
+    /// column 0 carries the diagonal plus `head - 1` couplings, every
+    /// other column carries its diagonal alone. Symmetric degree of
+    /// index 0 is `head`; every other index has degree 1 or 2.
+    fn arrow_leading(n: usize, head: usize) -> CscMatrix {
+        assert!(head <= n);
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(1.0);
+            if j == 0 {
+                for i in 1..head {
+                    row_idx.push(i);
+                    values.push(0.1);
+                }
+            }
+            col_ptr.push(row_idx.len());
+        }
+        CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
+    /// Relabel by `P(i) = n-1-i`. This is a pure renaming of the
+    /// indices — the matrix is the same operator up to a symmetric
+    /// permutation, so the scaling router must not change its mind.
+    /// An entry `(i, j)` with `i >= j` maps to `(n-1-j, n-1-i)`, which
+    /// is again lower-triangular.
+    fn reverse_labels(m: &CscMatrix) -> CscMatrix {
+        let n = m.n;
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for j in 0..n {
+            for k in m.col_ptr[j]..m.col_ptr[j + 1] {
+                let i = m.row_idx[k];
+                let (ni, nj) = (n - 1 - j, n - 1 - i);
+                cols[nj].push((ni, m.values[k]));
+            }
+        }
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        for c in cols.iter_mut() {
+            c.sort_by_key(|e| e.0);
+            for (i, v) in c.iter() {
+                row_idx.push(*i);
+                values.push(*v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
+    /// Issue #134 item B. The head gate must see the arrow head
+    /// whichever end of the index range it sits at. Before the
+    /// symmetric-degree fix the reversed form reported
+    /// `max_col_nnz = 2` and routed to `InfNorm`, forfeiting the
+    /// documented 6×–243× MC64 win on the duals-last KKTs that the
+    /// IPOPT variable convention produces.
+    #[test]
+    fn route_is_invariant_under_index_reversal() {
+        let a = arrow_leading(200, 40);
+        let b = reverse_labels(&a);
+        assert_eq!(pick_scaling_strategy(&a), ScalingStrategy::Mc64Symmetric);
+        assert_eq!(
+            pick_scaling_strategy(&b),
+            ScalingStrategy::Mc64Symmetric,
+            "reversing the index order is a pure relabeling; the route must not change"
+        );
+    }
+
+    /// The trailing-border shape directly: the dense coupling lives in
+    /// the *last* index, so the stored lower triangle spreads it one
+    /// entry per earlier column and no stored column is dense.
+    #[test]
+    fn trailing_border_routes_to_mc64() {
+        let m = reverse_labels(&arrow_leading(300, 64));
+        let max_stored = (0..m.n)
+            .map(|j| m.col_ptr[j + 1] - m.col_ptr[j])
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_stored <= 2,
+            "fixture should hide the head from stored counting, got {max_stored}"
+        );
+        assert_eq!(pick_scaling_strategy(&m), ScalingStrategy::Mc64Symmetric);
+    }
+
+    /// The clnlbeam guard. A banded KKT has a high diag_only ratio but
+    /// small degree by construction; MC64 hurts it 4.36× in iterations
+    /// (Mittelmann sweep 2026-05-16). Widening gate (b) to symmetric
+    /// degree must not let a banded matrix through — symmetric degree
+    /// is still far under 32 — in either index order.
+    #[test]
+    fn banded_stays_infnorm_under_both_orderings() {
+        let n = 400;
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(2.0);
+            for d in 1..=2 {
+                if j + d < n {
+                    row_idx.push(j + d);
+                    values.push(0.5);
+                }
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let m = CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        assert_eq!(pick_scaling_strategy(&m), ScalingStrategy::InfNorm);
+        assert_eq!(
+            pick_scaling_strategy(&reverse_labels(&m)),
+            ScalingStrategy::InfNorm
+        );
+    }
+
+    /// Issue #47 against the symmetric counter: an explicit stored
+    /// `0.0` is not coupling, so padding the head with zeros must not
+    /// change the route in either index order.
+    #[test]
+    fn explicit_zeros_do_not_change_route_either_ordering() {
+        let base = arrow_leading(200, 40);
+        // Pad column 1 with 40 explicit zeros. Value-blind counting
+        // would make it a second "dense" column.
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        for j in 0..base.n {
+            for k in base.col_ptr[j]..base.col_ptr[j + 1] {
+                row_idx.push(base.row_idx[k]);
+                values.push(base.values[k]);
+            }
+            if j == 1 {
+                for i in 2..42 {
+                    row_idx.push(i);
+                    values.push(0.0);
+                }
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let padded = CscMatrix {
+            n: base.n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        assert_eq!(
+            pick_scaling_strategy(&padded),
+            pick_scaling_strategy(&base),
+            "explicit zeros must not move the route"
+        );
+        assert_eq!(
+            pick_scaling_strategy(&reverse_labels(&padded)),
+            pick_scaling_strategy(&reverse_labels(&base))
         );
     }
 }
