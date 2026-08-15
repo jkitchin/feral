@@ -1,109 +1,127 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-15T22:04:50Z
+Generated: 2026-08-15T22:22:29Z
 
 ## Latest Session
-File: dev/sessions/2026-08-15-01.md
+File: dev/sessions/2026-08-15-02.md
 ```
-# Session 2026-08-15-01
+# Session 2026-08-15-02
 
-## Benchmark note (mandatory unfavorable-comparison section)
+## BENCHMARK NUMBERS ARE WORSE THAN LAST SESSION
 
-The first bench run of this session **regressed both dense buckets** against
-the 2026-08-14-03 baseline. It was chased to root cause and fixed, not filed
-as noise. Final numbers beat the baseline:
+Reported first, per the hard rule in CLAUDE.md.
 
-| bucket                       | 08-13-04 | 08-14-02 | 08-14-03 | this session (first) | **this session (final)** | target | verdict |
-|------------------------------|----------|----------|----------|----------------------|--------------------------|--------|---------|
-| dense small-frontal (<200) p90 | 1.61   | 1.57     | 1.58     | **1.66**             | **1.54**                 | ≤ 2.0  | PASS    |
-| dense medium (<500) p90        | 2.09   | 1.96     | 2.00     | **2.13**             | **1.91**                 | ≤ 3.0  | PASS    |
-| sparse small-frontal (<200) p90| 1.54   | 1.50     | 1.54     | 1.50                 | 1.50                     | ≤ 2.0  | PASS    |
-| sparse medium (<500) p90       | 1.54   | 1.50     | 1.54     | 1.51                 | 1.51                     | ≤ 3.0  | PASS    |
+    partition                  2026-08-15-01   this session   delta
+    dense  small-frontal (<200)     1.54           1.61        +0.07
+    dense  medium (<500)            1.91           2.00        +0.09
+    sparse small-frontal (<200)     1.50           1.67        +0.17
+    sparse medium (<500)            1.51           1.67        +0.16
 
-Cause of the regression: the first cut of the #134B fix allocated an
-`n`-length degree accumulator on every `pick_scaling_strategy` call. The
-router runs per factor and the dense partition is ~148k sub-millisecond
-factorizations, so an unconditional per-call allocation is visible (+5%
-small-frontal, +6.5% medium) even though it is O(n+nnz) against an
-O(n^1.5+) factorization. Fixed in `45c80f3` by ordering the gates so the
-allocation stays off the common path.
+All four partitions regressed. All four still PASS their targets.
+
+**No Rust source changed this session.** `git diff --stat fbb1a9d HEAD
+-- src/ crates/ tests/` is empty; the only changes are `dev/`
+documents. So this is not a code regression — it is run-to-run
+variance on the same binary.
+
+That conclusion is itself worth recording, because it bears on a claim
+made last session. 2026-08-15-01 reported a dense small-frontal
+sequence of 1.58 (baseline) -> 1.66 (regression I introduced) -> 1.54
+(after the gate reordering), and I described the final number as
+"beating the baseline". Today's run puts the same unchanged code at
+1.61. A +0.07 swing with zero code change means the bench's noise
+floor on this metric is at least as large as the 1.58 -> 1.54
+"improvement" I claimed. **The gate-reordering fix should be regarded
+as having removed the 1.66 regression, not as having beaten the
+baseline.** The 1.66 measurement is still meaningful (it exceeded the
+noise band), but the final 0.04 is not.
+
+Action for a future session: establish the bench's noise floor by
+running it N times on an unchanged binary, and record a
+minimum-detectable-difference so per-session comparisons stop
+over-reading sub-0.1 movements. Until then, treat p90 deltas under
+~0.15 as noise.
+
+Also note the worst-ratio table is now **6 of 10 KIRBY2 iterates**
+(worst 9.22, up from 8.95), plus GROUPING_0205 — i.e. the outlier
+family this session diagnosed dominates the tail more clearly than
+before.
 
 ## Goal
 
-Pick up issue #153 (KR scaling warm-start) and issue #134 item B (the
-scaling router's lower-triangle-blind gates). Both were carried in from
-triage with a stated premise; measure both before implementing either.
+Investigate the two items carried out of 2026-08-15-01, both approved
+by the user:
 
-## Accomplished
-
-### #134 item B — router permutation-invariance (shipped)
-
-`pick_scaling_strategy`'s dense-head gate now counts **symmetric degree**
-instead of stored lower-triangle column length.
-
-- **Bug confirmed and resized.** Under the pure relabeling `P(i) = n-1-i`,
-  VESUVIO's head reports stored max degree 1026 one way and 11 the other and
-  the route flips `Mc64Symmetric` → `InfNorm`. Over the full 1004-family
-  corpus (`kkt` + `kkt-mittelmann` + `kkt-expansion`) the old router was
-  permutation-invariant on only **841**.
-- **Fix measured against the shipped router**, not a reimplementation:
-  invariance **841 → 890**, **15 route changes, 15 gains, 0 losses**. The
-  change is monotone — symmetric degree is never below stored degree — so no
-  family can lose MC64.
-- **Movers priced** over every iterate: inertia identical under both routes
-  on all 15; factor-time ratio median 0.98 (range 0.95–1.19); accuracy
-  neutral or better on 14 (CHAIN 5.02e-6 → 1.42e-8, SOSQP1 8.49e-6 →
-  1.95e-6). MSS1 is the one unfavorable mover (+19% time, 1.43e-1 → 6.15e-1
-  forward error) but neither route solves it and the Policy 4 fallback test
+1. **#153 remainder** — MC64 warm-cache miss cost. marine_1600 spends
+   ~19% of a 1784 ms solve in cache-missed MC64 recomputes. Decide
+   whether `GROWTH_FACTOR`/`GROWTH_COUNT` can be tightened without
 ```
 
 ## Git Status
 ```
+3029905 docs(compress): localize the KIRBY2 factor-ratio outlier to LdltCompress
 fbb1a9d docs: session checkpoint 2026-08-15-01 (#134B shipped, #153 falsified)
 45c80f3 perf(scaling): keep the router's symmetric pass off the common path
 e9470ca fix(scaling): count symmetric degree in the router's head gate (#134B)
 8acb1be docs(scaling): research + plan for router permutation-invariance (#134B)
-14b3865 diag: size the KR warm-start lever against steady-state routes
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 427 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.57s
+test result: ok. 427 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.85s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-15-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-15-02.md)
 
+
+**No Rust source changed this session** (`git diff --stat fbb1a9d HEAD
+-- src/ crates/ tests/` is empty; the only changes are `dev/`
+documents). The run below is therefore a re-measurement of unchanged
+code and is expected to reproduce 2026-08-15-01.
+
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(us)    mumps(us)      ratio
+KIRBY2_0007                    458         1097          119       9.22
+KIRBY2_0006                    458         1075          127       8.46
+KIRBY2_0008                    458          971          122       7.96
+KIRBY2_0010                    458          992          133       7.46
+LAKES_0144                     168          372           54       6.89
+KIRBY2_0009                    458          879          128       6.87
+KIRBY2_0011                    458          820          120       6.83
+LAKES_0146                     168          350           54       6.48
+GROUPING_0205                  225          700          111       6.31
+QPCBLEND_0030                  157          362           60       6.03
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.54     <= 2.0     PASS
-medium (<500)            152145     1.91     <= 3.0     PASS
+small-frontal (<200)     147982     1.61     <= 2.0     PASS
+medium (<500)            152145     2.00     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.50     <= 2.0     PASS
-medium (<500)            153560     1.51     <= 3.0     PASS
+small-frontal (<200)     153455     1.67     <= 2.0     PASS
+medium (<500)            153560     1.67     <= 3.0     PASS
 
 ```
 
@@ -140,26 +158,26 @@ Evidence: issue #171; `dev/research/markowitz-fill-measurement.md`;
 `dev/journal/2026-08-14-01.org`; the #166 and #168 arm harnesses.
 
 ## Recent Tried-and-Rejected
+**Refuted by measurement.** `diag_symbolic_stages_argv` on
+KIRBY2_0007:
 
-**Also:** this hypothesis had already been falsified six days earlier in
-`dev/research/scaling-warm-start-2026-08-09.md` (zero iteration reduction on
-6 fixtures; "lower the cap" ranked worst on risk/benefit, cap 5 giving
-3.7e-1 vs 1.4e-2 — 26x worse). That note was not read before recommending
-the work, which is the protocol step — read `dev/research/` and this file
-*before* writing code — that exists to prevent exactly this.
+    TOTAL 1182 us
+      ldlt_compress   972   82.2%
+      renumber         57    4.8%
+      ordering         32    2.7%
 
-**Sizing was also wrong.** The lever was first sized off what
-`pick_scaling_strategy` returns, but the sticky-`Auto` pin (#51/#65) means
-the steady-state route can differ: `mc64_cache_hit_count()` shows dtoc1nd at
-14/20 hits and marine at 12/18, i.e. both run MC64, not InfNorm. Only 2 of
-the 6 #153 fixtures (clnlbeam, steering_12800) actually run KR, so the lever
-was ~7-12%, not the 10-20% first reported. Size scaling levers off the
-observed route, not the picker.
+Ordering is 32 us — 2.7% of symbolic and ~3% of the reported
+`factor_us`. Eliminating AMD cost entirely could not move the ratio.
+The cost is `ldlt_compress` (the MC64 matching feeding Duff-Pralet
+compression), which is a different subsystem from the one the
+hypothesis named.
 
-**Not rejected:** warm@10 — the same sweep budget, better conditioning
-(geomean 3x-100x lower final deviation). That is free quality, not a
-speedup, and would need downstream iterative-refinement counts to justify.
-Recorded as option 2 in the 2026-08-09 note; still open.
+A second prediction in the same hypothesis — that feral was producing
+more fill than MUMPS — is also refuted: the numeric driver is 127 us
+and `num_c ~ num_n` (149 vs 143 us), so the factorization is not the
+problem in either time or fill.
+
+Superseded by `dev/research/ldlt-compress-cost-benefit-2026-08-15.md`.
 
 ## Source Files
 ```
