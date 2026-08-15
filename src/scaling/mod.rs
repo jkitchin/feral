@@ -692,8 +692,10 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 /// its use below and
 /// `dev/research/router-permutation-invariance-2026-08-15.md`.
 ///
-/// One O(n+nnz) pass over the column pointers and row indices, plus
-/// an `n`-length degree accumulator.
+/// One O(n+nnz) allocation-free pass decides both gates for every
+/// matrix whose densest stored column already clears the threshold, or
+/// which fails the slack-mass gate. Only the ambiguous remainder pays
+/// a second pass and an `n`-length degree accumulator.
 pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     /// Maximum stored column nnz for the Auto policy to consider the
     /// matrix "banded enough" that InfNorm is the safe choice even
@@ -704,18 +706,8 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     if n == 0 {
         return ScalingStrategy::InfNorm;
     }
-    // Issue #134 item B: gate (b) counts *symmetric* degree — the
-    // degree of index `j` in the full matrix — not the stored
-    // lower-triangle column length. `CscMatrix` stores only one
-    // triangle, so a stored column length answers "how many couplings
-    // does `j` have to indices on one side of it", which is a property
-    // of the index order rather than of the matrix. Under the pure
-    // relabeling `P(i) = n-1-i` a leading arrow head of size 1026
-    // reports a stored max of 11 and the route flips. The IPOPT
-    // variable convention (duals last) puts the head at the trailing
-    // end, so this is the shape POUNCE and discopt actually emit.
-    let mut deg = vec![0usize; n];
     let mut diag_only = 0usize;
+    let mut max_stored = 0usize;
     for j in 0..n {
         let start = matrix.col_ptr[j];
         let end = matrix.col_ptr[j + 1];
@@ -733,15 +725,12 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
                 continue;
             }
             nnz_col += 1;
-            let i = matrix.row_idx[k];
-            deg[j] += 1;
-            if i == j {
+            if matrix.row_idx[k] == j {
                 diag_nonzero = true;
-            } else {
-                // The mirrored entry is not stored; credit it to the
-                // other index so both ends of the coupling see it.
-                deg[i] += 1;
             }
+        }
+        if nnz_col > max_stored {
+            max_stored = nnz_col;
         }
         // Gate (a) is deliberately left on stored counting. The
         // invariant reading ("symmetric degree <= 2 plus a diagonal")
@@ -756,10 +745,49 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
             diag_only += 1;
         }
     }
-    let max_col_nnz = deg.iter().copied().max().unwrap_or(0);
-    let has_arrow_head = max_col_nnz > MAX_COL_NNZ_FOR_INFNORM;
-    let has_slack_mass = diag_only as f64 / n as f64 >= 0.3;
-    if has_arrow_head && has_slack_mass {
+    // Gate (a) first: it is allocation-free and rejects most of the
+    // corpus, so deciding it here keeps the symmetric pass off the
+    // common path.
+    if (diag_only as f64) / (n as f64) < 0.3 {
+        return ScalingStrategy::InfNorm;
+    }
+    // Gate (b), issue #134 item B: the head gate counts *symmetric*
+    // degree — the degree of index `j` in the full matrix — not the
+    // stored lower-triangle column length. `CscMatrix` stores only one
+    // triangle, so a stored column length answers "how many couplings
+    // does `j` have to indices on one side of it", which is a property
+    // of the index order rather than of the matrix. Under the pure
+    // relabeling `P(i) = n-1-i` a leading arrow head of size 1026
+    // reports a stored max of 11 and the route flips. The IPOPT
+    // variable convention (duals last) puts the head at the trailing
+    // end, so this is the shape POUNCE and discopt actually emit.
+    //
+    // Symmetric degree is never below stored degree, so a stored
+    // column that already clears the threshold settles the gate and
+    // the second pass can be skipped. The `n`-length accumulator is
+    // therefore only allocated for matrices that pass the slack-mass
+    // gate *and* have no stored column above the threshold — the
+    // genuinely ambiguous case, which is where the trailing-border
+    // KKTs live.
+    if max_stored > MAX_COL_NNZ_FOR_INFNORM {
+        return ScalingStrategy::Mc64Symmetric;
+    }
+    let mut deg = vec![0usize; n];
+    for j in 0..n {
+        for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+            if matrix.values[k] == 0.0 {
+                continue;
+            }
+            let i = matrix.row_idx[k];
+            deg[j] += 1;
+            if i != j {
+                // The mirrored entry is not stored; credit it to the
+                // other index so both ends of the coupling see it.
+                deg[i] += 1;
+            }
+        }
+    }
+    if deg.iter().copied().max().unwrap_or(0) > MAX_COL_NNZ_FOR_INFNORM {
         ScalingStrategy::Mc64Symmetric
     } else {
         ScalingStrategy::InfNorm

@@ -27,8 +27,14 @@ All notable changes to FERAL will be documented in this file.
   the Policy 4 fallback already covers it.
 - The 2026-05-17 threshold panel is preserved: clnlbeam's symmetric max degree
   is 5 and ACOPP30's is 29, both still under the `32` gate.
-- Cost: one `n`-length degree accumulator; the router is no longer
-  allocation-free.
+- Cost: none measurable. The gates are ordered so the symmetric pass stays
+  off the common path — the allocation-free pass decides every matrix that
+  fails the slack-mass gate or whose densest stored column already clears
+  `32` (sound because symmetric degree is never below stored degree), so only
+  the genuinely ambiguous remainder allocates an `n`-length accumulator. A
+  first cut that allocated unconditionally cost +5% on the dense
+  small-frontal p90 (1.58 → 1.66) and +6.5% on dense medium (2.00 → 2.13);
+  with the ordering both buckets beat the previous baseline (1.54 and 1.91).
 - **Not fixed:** the slack-mass gate is still order-dependent, leaving 114 of
   1004 families routing on index order. Every invariant reformulation measured
   strips `Mc64Symmetric` from 89 families including `marine_1600` and
