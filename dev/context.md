@@ -1,157 +1,127 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-14T18:06:07Z
+Generated: 2026-08-15T22:22:29Z
 
 ## Latest Session
-File: dev/sessions/2026-08-14-02.md
+File: dev/sessions/2026-08-15-02.md
 ```
-# Session 2026-08-14-02
+# Session 2026-08-15-02
+
+## BENCHMARK NUMBERS ARE WORSE THAN LAST SESSION
+
+Reported first, per the hard rule in CLAUDE.md.
+
+    partition                  2026-08-15-01   this session   delta
+    dense  small-frontal (<200)     1.54           1.61        +0.07
+    dense  medium (<500)            1.91           2.00        +0.09
+    sparse small-frontal (<200)     1.50           1.67        +0.17
+    sparse medium (<500)            1.51           1.67        +0.16
+
+All four partitions regressed. All four still PASS their targets.
+
+**No Rust source changed this session.** `git diff --stat fbb1a9d HEAD
+-- src/ crates/ tests/` is empty; the only changes are `dev/`
+documents. So this is not a code regression — it is run-to-run
+variance on the same binary.
+
+That conclusion is itself worth recording, because it bears on a claim
+made last session. 2026-08-15-01 reported a dense small-frontal
+sequence of 1.58 (baseline) -> 1.66 (regression I introduced) -> 1.54
+(after the gate reordering), and I described the final number as
+"beating the baseline". Today's run puts the same unchanged code at
+1.61. A +0.07 swing with zero code change means the bench's noise
+floor on this metric is at least as large as the 1.58 -> 1.54
+"improvement" I claimed. **The gate-reordering fix should be regarded
+as having removed the 1.66 regression, not as having beaten the
+baseline.** The 1.66 measurement is still meaningful (it exceeded the
+noise band), but the final 0.04 is not.
+
+Action for a future session: establish the bench's noise floor by
+running it N times on an unchanged binary, and record a
+minimum-detectable-difference so per-session comparisons stop
+over-reading sub-0.1 movements. Until then, treat p90 deltas under
+~0.15 as noise.
+
+Also note the worst-ratio table is now **6 of 10 KIRBY2 iterates**
+(worst 9.22, up from 8.95), plus GROUPING_0205 — i.e. the outlier
+family this session diagnosed dominates the tail more clearly than
+before.
 
 ## Goal
-Fix the open issues in the 161-168 range rather than commenting on them:
-land #167 (threshold-Markowitz LU), resolve #161 (kernel vs SuperLU), and
-settle #166 (QPLIB_3225 under the triangularized ordering).
 
-## Accomplished
+Investigate the two items carried out of 2026-08-15-01, both approved
+by the user:
 
-### #167 threshold-Markowitz LU -- implemented, merged, closed
-`SparseLu::factor_markowitz` picks each pivot to minimise `(r_i-1)(c_j-1)`
-subject to `|a_ij| >= u*max_k|a_kj|`. On 16 preserved LP bases,
-`factor_nnz()/nnz(B)` geomean **2.77x -> 1.06x** vs AMD-full, zero fill on
-10 of 16. Wall geomean vs AMD-full 4.92x (was 3.50x before the in-place
-rank-1 update, which was the real lever -- the original per-column Vec
-rebuild cost one allocation per (pivot, column) pair).
-Reported honestly, and repeated here: the Suhl-Suhl singleton fast path
-**failed** at its stated purpose (fill 1.07x -> 1.06x, wall 3.43x -> 3.50x,
-i.e. slightly worse) and was kept only because Markowitz subsumes it at
-cost 0. Markowitz also **loses** to the cheap peel on near-triangular bases
-(QPLIB_0911_rlt0, bump 29: peel 1.10ms vs Markowitz 4.32ms) and wins on
-bump-heavy ones (QPLIB_1143_rlt1, bump 624: 4.87ms vs peel 31.77ms).
-Commits 04756ac, 48382c7, 0e8e976; PR #170 merged as bd78bad.
-
-### #161 kernel vs SuperLU -- re-measured on merged main, closed
-SuperLU reproduced its original numbers exactly (213,132 factor-nnz, 7.26x
-fill, 11.13ms on QPLIB_1157), so old and new numbers are comparable.
-Both named defects are fixed:
-- factorization: dense-bump 10.91ms = parity with SuperLU's 11.13ms;
-  Markowitz 6.73ms at fill 1.74x = **1.65x faster at 4.2x less fill**.
-- solve: at the SHIPPED `hyper_sparse_max_density=0.10`, ftran p50
-  88.42us -> 7.92us = **11.17x**; btran 0.98x (neutral).
-Two reframings recorded:
-- SuperLU's own solve is **not** work-proportional either: same factor,
-  unit rhs 107.2us vs dense rhs 106.0us. #161 measured feral against
-  itself on that axis; against the reference it was never a feral-specific
-  defect, and at 7.92us it is now a feral advantage.
-- #161's premise "the ordering is not the problem, our fill matches
-  COLAMD" was a true observation with a false conclusion. AMD-on-A^T A and
-  COLAMD are the same algorithm class; matching the reference *inside* a
-  class cannot detect that the class leaves 4x on the table. That premise
-  is what made this expensive to find.
-Opened **#171** for what remains: all three measured levers (dense bump,
-Markowitz, AMF) are off by default and the shipped config is still 4.03x
-SuperLU on QPLIB_1157. That is a defaults decision, not a kernel defect.
-
-### #166 QPLIB_3225 under the triangularized ordering -- closed, not reproducible
-Two feral worktrees off `3209fad` differing in **exactly one line**
-(`analyze` -> `analyze_with(default)` vs `analyze` -> `analyze_triangularized`),
-verified by `diff -r --brief`; two discopt worktrees pinned at `bce881ff`
+1. **#153 remainder** — MC64 warm-cache miss cost. marine_1600 spends
+   ~19% of a 1784 ms solve in cache-missed MC64 recomputes. Decide
+   whether `GROWTH_FACTOR`/`GROWTH_COUNT` can be tightened without
 ```
 
 ## Git Status
 ```
-6fc92d6 Merge pull request #173 from jkitchin/release/0.16.0
-c681c2a release: feral v0.16.0
-c9c3adc docs: session checkpoint 2026-08-14-02 (161-168 closed, #171 landed)
-ec67e85 Merge pull request #172 from jkitchin/feat/171-lu-defaults
-d5048b9 feat(lu)!: default SparseLu::factor to threshold-Markowitz pivoting
+3029905 docs(compress): localize the KIRBY2 factor-ratio outlier to LdltCompress
+fbb1a9d docs: session checkpoint 2026-08-15-01 (#134B shipped, #153 falsified)
+45c80f3 perf(scaling): keep the router's symmetric pass off the common path
+e9470ca fix(scaling): count symmetric degree in the router's head gate (#134B)
+8acb1be docs(scaling): research + plan for router permutation-invariance (#134B)
 ```
 
 ## Test Status
 ```
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 423 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.45s
+test result: ok. 427 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.85s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-14-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-15-02.md)
 
 
-No regression to report. All four exit-partition buckets are equal or
-better than session 2026-08-13-04, the last session that actually ran the
-bench:
-
-| bucket | 08-13-04 | this session |
-|---|---|---|
-| dense small-frontal (<200) p90 | 1.61 | **1.57** |
-| dense medium (<500) p90 | 2.09 | **1.96** |
-| sparse small-frontal (<200) p90 | 1.54 | **1.50** |
-| sparse medium (<500) p90 | 1.54 | **1.50** |
-
-Read this as run-to-run variation, not as a benefit of this session's
-work: `bin/bench` measures the LDL^T/KKT path, and #171 changed only the
-LU basis factorization, which that harness does not exercise. The
-practical content is that session 04's reported dense p90 regression
-(1.57 -> 1.61, 1.96 -> 2.09) did not persist.
-
-MCONCON                  3000       0.85       0.89       1.62
-HATFLDH                  3000       0.42       0.45       0.55
-CONCON                   3000       0.82       0.88       1.66
-PALMER7A                 3000       0.27       0.30       0.33
-DJTL                     3000       0.09       0.10       0.22
-PALMER5A                 3000       0.29       0.30       0.33
-HS90                     3000       0.20       0.20       0.30
-SSI                      3000       0.20       0.22       0.27
-HATFLDBNE                3000       0.38       0.40       0.82
-MGH10LS                  3000       0.20       0.22       0.25
-HS92                     3000       0.35       0.40       0.44
-AVION2                   2682       1.41       1.46       1.92
-CERI651ALS               2331       0.27       0.27       0.40
-PFIT4                    2286       0.23       0.25       0.30
-CERI651C                 2233       0.28       0.30       0.40
-CERI651CLS               2227       0.26       0.27       0.40
-BATCH                    2054       1.28       1.34       1.66
+**No Rust source changed this session** (`git diff --stat fbb1a9d HEAD
+-- src/ crates/ tests/` is empty; the only changes are `dev/`
+documents). The run below is therefore a re-measurement of unchanged
+code and is expected to reproduce 2026-08-15-01.
 
 Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-KIRBY2_0007                    458         1065          119       8.95
-KIRBY2_0006                    458         1003          127       7.90
-KIRBY2_0008                    458          930          122       7.62
-KIRBY2_0009                    458          847          128       6.62
-KIRBY2_0010                    458          776          133       5.83
-KIRBY2_0011                    458          670          120       5.58
-GROUPING_0243                  225          591          111       5.32
-GROUPING_0031                  225          564          109       5.17
-GROUPING_0045                  225          563          113       4.98
-GROUPING_0231                  225          556          113       4.92
+name                             n    feral(us)    mumps(us)      ratio
+KIRBY2_0007                    458         1097          119       9.22
+KIRBY2_0006                    458         1075          127       8.46
+KIRBY2_0008                    458          971          122       7.96
+KIRBY2_0010                    458          992          133       7.46
+LAKES_0144                     168          372           54       6.89
+KIRBY2_0009                    458          879          128       6.87
+KIRBY2_0011                    458          820          120       6.83
+LAKES_0146                     168          350           54       6.48
+GROUPING_0205                  225          700          111       6.31
+QPCBLEND_0030                  157          362           60       6.03
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.57     <= 2.0     PASS
-medium (<500)            152145     1.96     <= 3.0     PASS
+small-frontal (<200)     147982     1.61     <= 2.0     PASS
+medium (<500)            152145     2.00     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.50     <= 2.0     PASS
-medium (<500)            153560     1.50     <= 3.0     PASS
+small-frontal (<200)     153455     1.67     <= 2.0     PASS
+medium (<500)            153560     1.67     <= 3.0     PASS
 
 ```
 
@@ -188,26 +158,26 @@ Evidence: issue #171; `dev/research/markowitz-fill-measurement.md`;
 `dev/journal/2026-08-14-01.org`; the #166 and #168 arm harnesses.
 
 ## Recent Tried-and-Rejected
-two discopt worktrees pinned at `bce881ff` via `[patch.crates-io]`, two
-extension `.so`s with distinct md5s loaded by `PYTHONPATH`, each arm
-asserting its own module path before solving. Slower to build, but it
-measures the thing the issue is about.
+**Refuted by measurement.** `diag_symbolic_stages_argv` on
+KIRBY2_0007:
 
-## 2026-08-14 — #171: plain `cargo test` as the verification gate
+    TOTAL 1182 us
+      ldlt_compress   972   82.2%
+      renumber         57    4.8%
+      ordering         32    2.7%
 
-**Tried.** Verifying the Markowitz-default change with `cargo test`.
+Ordering is 32 us — 2.7% of symbolic and ~3% of the reported
+`factor_us`. Eliminating AMD cost entirely could not move the ratio.
+The cost is `ldlt_compress` (the MC64 matching feeding Duff-Pralet
+compression), which is a different subsystem from the one the
+hypothesis named.
 
-**Why it failed.** `cargo test` stops after the first failing test *target*.
-Four consecutive runs each reported exactly one failing binary, so the same
-"the suite is green except X" conclusion was drawn — and was wrong — three
-times. Run 5's log contains zero occurrences of `lu_sparse_rhs`: that binary
-never executed. The true blast radius was seven test sites across five
-files.
+A second prediction in the same hypothesis — that feral was producing
+more fill than MUMPS — is also refuted: the numeric driver is 127 us
+and `num_c ~ num_n` (149 vs 143 us), so the factorization is not the
+problem in either time or fill.
 
-**Replaced with.** `cargo test --no-fail-fast`, which surfaced all of them
-in one pass (864 passed, 0 failed). For any change to a default that every
-test inherits, fail-fast turns one measurement into N sequential ones and
-hides the scope.
+Superseded by `dev/research/ldlt-compress-cost-benefit-2026-08-15.md`.
 
 ## Source Files
 ```
@@ -348,5 +318,13 @@ tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
-
-(truncated from      360 lines to 350 line budget)
+tests/sparse_postorder.rs
+tests/sparse_refined.rs
+tests/sqd_fast_path.rs
+tests/static_assembly_maps.rs
+tests/stress_tests.rs
+tests/symbolic_profiler.rs
+tests/task_plan_parity.rs
+tests/threshold_consistency.rs
+tests/tiny_fast_path.rs
+```

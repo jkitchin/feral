@@ -5403,3 +5403,128 @@ files.
 in one pass (864 passed, 0 failed). For any change to a default that every
 test inherits, fail-fast turns one measurement into N sequential ones and
 hides the scope.
+
+## 2026-08-15 — #153: warm-starting Knight-Ruiz to save scaling sweeps
+
+**Tried.** Seeding `compute_infnorm`'s equilibration vector `d` from the
+previous IPM iterate's converged `d` instead of `d = 1`, and cutting the
+10-sweep cap to 2/3/5 on the strength of the warm start. Motivation: KR is
+cap-bound, not tolerance-bound — measured this session, only iterate-0 KKTs
+reach `tol = 1e-8` (dtoc1nd 6 sweeps → 4.4e-16, steering 4 → 7.7e-12,
+dtoc2 5 → 2.2e-16); from iterate 1 on all six fixtures burn the full 10 and
+exit at dev 1e-2 to 3e-2, so the tolerance is unreachable by construction.
+
+**Why it failed.** Warm-starting at a *reduced* cap loses. Chain experiment
+over full runs — every iterate warm-started from its predecessor, scored
+against a cold `d = 1` run at cap 10, counting per-iterate wins:
+
+| matrix                   | k=2  | k=3  | k=5   | k=10  |
+|--------------------------|------|------|-------|-------|
+| steering_12800 [InfNorm] | 0/2  | 0/2  | 0/2   | 2/2   |
+| TWIRISM1                 | 0/6  | 0/6  | 4/6   | 5/6   |
+| marine_1600 [MC64]       | 9/16 | 9/16 | 14/16 | 16/16 |
+
+Only warm@10 — the same cost as today — wins consistently. Every reduced
+cap loses on the one fixture that actually routes to `InfNorm`
+(steering_12800: 0/2 at k=2, 3 and 5), which is the only fixture where the
+lever could pay at all.
+
+An earlier reading that "warm@5 beats cold@10" came from a **single iterate
+pair** and did not replicate over full runs. The geometric-mean statistic
+that produced it is contaminated by iterate 0, which converges under both
+schedules; the per-iterate win count is the clean statistic.
+
+**Also:** this hypothesis had already been falsified six days earlier in
+`dev/research/scaling-warm-start-2026-08-09.md` (zero iteration reduction on
+6 fixtures; "lower the cap" ranked worst on risk/benefit, cap 5 giving
+3.7e-1 vs 1.4e-2 — 26x worse). That note was not read before recommending
+the work, which is the protocol step — read `dev/research/` and this file
+*before* writing code — that exists to prevent exactly this.
+
+**Sizing was also wrong.** The lever was first sized off what
+`pick_scaling_strategy` returns, but the sticky-`Auto` pin (#51/#65) means
+the steady-state route can differ: `mc64_cache_hit_count()` shows dtoc1nd at
+14/20 hits and marine at 12/18, i.e. both run MC64, not InfNorm. Only 2 of
+the 6 #153 fixtures (clnlbeam, steering_12800) actually run KR, so the lever
+was ~7-12%, not the 10-20% first reported. Size scaling levers off the
+observed route, not the picker.
+
+**Not rejected:** warm@10 — the same sweep budget, better conditioning
+(geomean 3x-100x lower final deviation). That is free quality, not a
+speedup, and would need downstream iterative-refinement counts to justify.
+Recorded as option 2 in the 2026-08-09 note; still open.
+
+---
+
+## 2026-08-15-02 — MC64 warm-cache miss cost: re-proposed, then found already rejected with a mechanism
+
+**Approach.** Reduce the MC64 warm-cache miss rate by tightening
+`GROWTH_FACTOR` / `GROWTH_COUNT` in `src/scaling/value_bound.rs`.
+Motivation was a marine_1600 measurement from 2026-08-15-01: cache hit
+25-30 ms vs miss 87-127 ms, 6 of 18 iterates missing, ~334 ms of a
+1784 ms solve (~19%). Proposed probe: log each miss and by how much it
+exceeded the threshold; if misses cluster just past the gate, tighten.
+
+**Rejected — the 2026-05-21 B2 entry (above, line ~2087) already
+supplies the mechanism, and it predicts this probe's outcome.**
+
+The gate measures diagonal dominance of `D₀·A·D₀`. On a regularized
+KKT the (2,2)-block rows carry a δ-sized diagonal (~1e-8) against ~1
+off-diagonals, so the dominance ratio *is* ~1/δ. As the IPM drives
+δ→0 the ratio climbs 1e8→1e10. The gate tracks the barrier
+trajectory, not scaling staleness.
+
+The proposed probe would have measured exactly the confounded
+quantity. pinene_3200's recorded misses are max_ratio/budget =
+1.906e8/1.162e8, 7.770e8/5.180e8, 2.486e10/1.657e10,
+5.562e10/3.708e10 — every one is ~1.5x past budget, i.e. "clusters
+just past the threshold" is TRUE and means nothing. The margin is set
+by how far δ moved that iterate. Tightening or loosening only shifts
+which iterate crosses; it cannot separate "δ shrank" (safe) from
+"matching changed" (unsafe, corrupts inertia — issue #38).
+
+**Not re-measured on marine_1600.** marine hits 12/18 where pinene
+hits 0/18, so marine is a different regime and it remains formally
+unmeasured whether its specific misses are δ-driven. That does not
+rescue the approach: the lever being tuned is the same confounded
+metric either way.
+
+**Lesson (mine, not the code's).** I recommended this lever to the
+user before searching `tried-and-rejected.md`. The same miss occurred
+one session earlier on the KR warm-start (2026-08-15-01). The search
+costs one grep and belongs *before* the recommendation, not after the
+approval. Two consecutive sessions have now spent user goodwill
+re-proposing work that was already closed with evidence.
+
+---
+
+## 2026-08-15-02 — KIRBY2 factor-ratio outlier attributed to AMD dense-row handling
+
+**Hypothesis.** KIRBY2_0007 (n=458) is the worst factor-ratio outlier
+in the bench at 8.95x MUMPS. Its structure is a bordered/arrowhead KKT
+— symmetric degree histogram `156 x2, 154 x3, 8 x151, 2 x302`, i.e.
+five near-dense hub rows over a sparse bed. Predicted that feral's AMD
+was blowing up on the quotient-graph work those hub rows induce, where
+MUMPS detects and defers dense rows, and that the fix would be a
+dense-row threshold.
+
+**Refuted by measurement.** `diag_symbolic_stages_argv` on
+KIRBY2_0007:
+
+    TOTAL 1182 us
+      ldlt_compress   972   82.2%
+      renumber         57    4.8%
+      ordering         32    2.7%
+
+Ordering is 32 us — 2.7% of symbolic and ~3% of the reported
+`factor_us`. Eliminating AMD cost entirely could not move the ratio.
+The cost is `ldlt_compress` (the MC64 matching feeding Duff-Pralet
+compression), which is a different subsystem from the one the
+hypothesis named.
+
+A second prediction in the same hypothesis — that feral was producing
+more fill than MUMPS — is also refuted: the numeric driver is 127 us
+and `num_c ~ num_n` (149 vs 143 us), so the factorization is not the
+problem in either time or fill.
+
+Superseded by `dev/research/ldlt-compress-cost-benefit-2026-08-15.md`.

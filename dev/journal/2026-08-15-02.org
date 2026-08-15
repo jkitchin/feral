@@ -1,0 +1,261 @@
+#+TITLE: Session 2026-08-15-02
+#+DATE: 2026-08-15
+
+* 09:05 :orient:mc64:prior-art:
+User approved doing both items from the end of 2026-08-15-01: (a) the
+MC64 warm-cache miss-cost probe (#153 remainder), (b) the KIRBY2
+factor-ratio outlier (8.95x vs MUMPS, worst in the bench).
+
+Searched =dev/tried-and-rejected.md= before starting, per protocol.
+Found a direct hit at line 2087: "2026-05-21 — B2 value-bounded MC64
+scaling cache: gate metric confounded by IPM delta".
+
+That entry does not merely record a failed attempt; it records a
+ROOT CAUSE that predicts my proposed probe's outcome:
+
+- The gate measures diagonal dominance of D0*A*D0. On a KKT the
+  (2,2) block carries a delta-regularized diagonal (~1e-8) against
+  ~1 off-diagonals, so the ratio is ~1/delta.
+- As the IPM drives delta -> 0, the ratio explodes 1e8 -> 1e10.
+  The gate is tracking the barrier trajectory, not scaling staleness.
+- Recorded verdict: "There is no GROWTH_FACTOR value that separates
+  'delta shrank' (safe to reuse) from 'matching changed' (unsafe)."
+- pinene_3200 measured max_ratio vs budget: iter2 1.906e8/1.162e8,
+  iter3 7.770e8/5.180e8, iter4 2.486e10/1.657e10, iter5
+  5.562e10/3.708e10. All FAIL. Cache hits: 0.
+
+Implication: my plan to "check whether misses cluster just past the
+threshold, then tighten GROWTH_FACTOR" is the exact approach already
+rejected with a mechanism. Each pinene miss IS ~1.5x past budget --
+i.e. "just past the threshold" -- but the margin is set by how fast
+delta moved that iterate, not by gate slack. Tightening only shifts
+which iterate crosses.
+
+CONCLUSION: do not tune GROWTH_FACTOR. The remaining live question is
+narrower: marine_1600 hits 12/18 and misses 6/18, which is a DIFFERENT
+regime from pinene (0 hits). Is marine's miss set delta-confounded too?
+
+* 09:20 :kirby2:measured:surprise:
+Ran diag_factor_phases on the two worst bench outliers.
+
+  matrix          drv_us  prol%  permute% scaling% schur% cbextr% zerofil% dense_o% buildrow%
+  KIRBY2_0007        127  22.0%   0.8%    18.1%    1.6%   8.7%    2.5%     21.0%    2.5%
+  GROUPING_0243       82  26.7%   1.2%    20.6%   17.6%   5.6%    0.8%     11.1%    1.0%
+
+The bench reports KIRBY2_0007 feral factor = 1065 us, MUMPS = 119 us
+(ratio 8.95). But the numeric driver is only 127 us. So ~938 us
+(88%) is OUTSIDE the numeric factorization.
+
+Checked the accounting is fair before chasing it:
+- bench.rs times symbolic + numeric together as =factor_us=
+  (src/bin/bench.rs:1926) on the stated grounds that the oracles
+  report a single equivalent field.
+- Verified that claim against the oracle source: mumps_bench.F:191
+  sets =MP%JOB = 4= inside the timed region. JOB=4 is analyse +
+  factorize. So MUMPS's 119 us DOES include analysis.
+
+So the comparison is apples-to-apples and the conclusion stands:
+feral's SYMBOLIC phase is the KIRBY2 bottleneck, not the kernel.
+~938 us of symbolic vs MUMPS's 119 us for analyse+factor combined.
+
+This reframes the item. I had assumed a kernel/fill problem and
+proposed looking at front sizes. Wrong target.
+
+* 09:25 :kirby2:structure:
+KIRBY2_0007 structure (n=458, nnz_stored=1522):
+  symmetric degree: max=156, mean=5.6
+  degree histogram: 156 x2, 154 x3, 8 x151, 2 x302
+
+Five near-dense hub rows (deg ~155) over a bed of 302 degree-2 and
+151 degree-8 rows. KIRBY2 is a NIST StRD nonlinear regression
+problem; the hubs are the model parameters, each coupling to every
+data residual. Classic bordered/arrowhead KKT.
+
+MUMPS oracle sidecar reports factor_nnz = 7672 for n=458 -- i.e. the
+factor is genuinely sparse, so a correct ordering does exist and
+MUMPS finds it. Working hypothesis for the symbolic cost: the near-
+dense hub rows are inflating AMD's quotient-graph work. To be
+confirmed by the per-stage breakdown.
+
+* 09:40 :kirby2:localized:ldlt-compress:
+Per-stage symbolic breakdown, diag_symbolic_stages_argv:
+
+  KIRBY2_0007 (n=458, nnz=1522)   TOTAL 1182 us
+    ldlt_compress   972   82.2%
+    renumber         57    4.8%
+    ordering         32    2.7%
+    (all else <2% each)
+
+  GROUPING_0243 (n=225, nnz=1475) TOTAL 477 us
+    ldlt_compress   291   61.0%
+    ordering         49   10.3%
+    renumber         45    9.4%
+
+The bottleneck is =ldlt_compress= -- the MUMPS ICNTL(12)=2 Duff-Pralet
+compression preprocessor, whose input is an MC64 matching. Ordering
+itself is 32 us (2.7%). My working hypothesis from 09:25 (AMD
+quotient-graph blowup on the near-dense hub rows) is WRONG and is
+recorded as such: AMD is not the cost.
+
+* 09:50 :kirby2:costbenefit:measured:
+probe_compress_costbenefit_argv (5-run median, symbolic+numeric,
+None vs LdltCompress):
+
+  matrix          n  | sym_n num_n tot_n | sym_c num_c tot_c | delta   delta%
+  KIRBY2_0007   458  |   155   143   297 |  1041   149  1191 |  +894  +301.0%
+  KIRBY2_0006   458  |   151   153   300 |   924   144  1094 |  +794  +264.7%
+  GROUPING_0243 225  |   104   122   226 |   364    97   461 |  +235  +104.0%
+  GROUPING_0031 225  |   103   113   216 |   308   100   410 |  +194   +89.8%
+
+All four: NONE wins. Critically =num_c ~ num_n= (149 vs 143 on
+KIRBY2_0007) -- compression delivers ZERO numeric benefit on these,
+so the entire MC64 cost is waste. This is the ORTHREGF pattern from
+2026-06-06-04, not the ROSEPETAL pattern (where num_c = num_n/8).
+
+Consequence for the bench: KIRBY2_0007 uncompressed total is 297 us
+against the MUMPS oracle's 119 us => ratio ~2.5x, versus the 8.95x
+the bench currently reports. The single worst factor-ratio outlier in
+the corpus is ~4x of pure preprocessing waste.
+
+Verified the bench comparison is fair before claiming this (see
+09:20): MUMPS oracle times JOB=4 = analyse+factorize.
+
+* 09:55 :prior-art:constraint:
+Re-read tried-and-rejected 2026-06-06-04 ("Scaling-aware LdltCompress
+skip"). Binding constraints on any fix:
+
+- Do NOT gate LdltCompress on the scaling strategy. Refuted: the MC64
+  is load-bearing (build_supermap walks the matching's cycle
+  structure), and scaling-reuse does not predict cost/benefit
+  (ROSEPETAL -75.7% win vs ORTHREGF +91.8% loss, both InfNorm).
+- The entry explicitly names the open lever: "an orthogonal
+  compression cost/benefit gate that estimates fill reduction vs
+  MC64+ordering cost", and records that "no cheap structural feature
+  yet separates ROSEPETAL (win) from ORTHREGF (loss)".
+
+What is new here and was not available in 2026-06-06-04: a CEILING
+argument that does not require predicting fill reduction. On
+KIRBY2_0007 the whole uncompressed numeric phase is 143 us. Even if
+compression drove numeric time to exactly zero it could save at most
+143 us, while costing 886 us of MC64. So compression is
+unconditionally a loss whenever
+
+    estimated MC64 cost >> total achievable numeric time
+
+independent of how good the compressed ordering would be. That is a
+cost/benefit gate that sidesteps the fill-prediction problem the
+prior session got stuck on. Feasibility note: uncompressed ordering
++ col_counts is 52 us on KIRBY2 (32 + 20), i.e. ~5% of the MC64 cost,
+so "look before you leap" is affordable in principle.
+
+NOT YET a proposal -- needs the corpus bucket size first (sweep
+running) and then research note + plan per protocol. Recording the
+idea now so the reasoning is dated and auditable.
+
+* 10:20 :compress:corpus:measured:
+Swept one iterate per family, 696 families with .mtx < 400 KB, 693
+parsed (probe_compress_costbenefit_argv).
+
+  LdltCompress engaged        : 514 / 693  (74%)
+  with tot_n >= 50us (signal) : 164  -> losers 157, winners 7
+  loser delta%                : p25 13.0  median 18.1  p75 26.2
+                                p90 52.3  max 696.4
+  aggregate waste             : 121945 us
+    GILBERT_0000 alone        :  87361 us (72%)
+    other 156 losers          :  34584 us (median 120 us each)
+
+Two readings, and the honest one matters. The aggregate number is
+72% one pathological matrix (GILBERT_0000, n=5001, +696%). But the
+DISTRIBUTED effect survives excluding it: a median 18.1% tax on 96%
+of families where compression engages.
+
+Sub-50us rows were filtered as timer noise -- 693-row raw set
+contains many n=2..5 families where "+100%" is 1us vs 2us.
+
+* 10:35 :compress:gate:validated:
+Oracle gate: skip compression when mc64_cost > T * num_n. No fill
+prediction needed -- num_n is the ENTIRE numeric phase, so an MC64
+costing more than T=1 times it cannot repay even under a compression
+that drove numeric time to zero.
+
+  T     skips losers   us recovered   winners broken
+  0.25    126/166         114860        1 (HAHN1, 79us, -9.7%)
+  0.50     56/166         106307        1 (HAHN1)
+  1.00     21/166          96991        0
+  2.00      6/166          93553        0
+
+Excluding GILBERT at T=0.25: skips 120/156, recovers 27436/34584 us
+(79%), breaks one 79us winner. ~347:1 trade.
+
+Validated against the 2026-06-06-04 counterexample pair:
+  ORTHREGF  mc64 4158 / num_n 1422 = 2.92 -> SKIP  (correct, +129% loser)
+  ex8_2_2   mc64  958 / num_n 144305 = 0.007 -> KEEP (correct, -3.0% winner)
+  SINQUAD2  ratio 0.18 -> KEEP (conservative miss; it is a +9.4% loser)
+
+So the ceiling ratio separates the pair that defeated the
+scaling-reuse signal in 2026-06-06-04.
+
+* 10:40 :data-quality:rosepetal:blocked:
+ROSEPETAL_0000 -- the flagship WINNER of the 2026-06-06-04 rejection
+-- cannot be re-measured. read_mtx rejects it:
+
+  IoError("declared nnz 2003000 does not match the 1460226 entries
+  in the file")
+
+Header says 2003000, file has 1460226 (73% present) => truncated.
+It is the only iterate in that family. data/matrices/ is gitignored
+(.gitignore:20) so the file is untracked: the truncation cannot be
+dated, diffed, or reverted.
+
+Same class as the known dtoc2_0001/0002 non-finite-value defect.
+
+Consequence, stated plainly: the counterexample that anchors the
+2026-06-06-04 rejection is currently unreproducible. I am NOT
+claiming that rejection was wrong -- its recorded numbers (MC64
+0.68s, numeric 5.72s -> 0.77s) give ratio 0.12, which the ceiling
+gate keeps comfortably. But that is now an argument from a recorded
+number, not from a measurement I can repeat.
+
+* 10:50 :compress:obstacle:design:
+The validated gate is an ORACLE -- mc64_cost and num_n are both
+measured after doing the work. Checked whether either is predictable.
+
+num_n: tractable. Uncompressed ordering + col_counts = 32 + 20 =
+52 us on KIRBY2 (~5% of the MC64 cost), and column counts give a
+standard flop estimate.
+
+mc64_cost: NOT predictable. Observed MC64 cost per row over the
+signal set:
+  min 0.0303  p25 0.0560  median 0.0972  p75 0.2061  max 17.3509 us/row
+a 573x spread. An estimator keyed on n (or n,nnz) is wrong by orders
+of magnitude precisely on the tail where the win lives.
+
+Proposed instead: do not predict the cost, BOUND it. Run MC64 under
+a work budget proportional to the predicted flops, counted in
+augmenting-path edge scans, and abandon to the already-computed
+uncompressed ordering if exceeded.
+
+Counted work, not wall clock -- a time-based abort would make the
+factorization machine- and load-dependent, which this project
+actively guards against (probe_value_determinism, diag_par_repeat).
+
+Not implemented. Open questions recorded in the research note:
+threading a counter through mc64::compute_matching without
+perturbing the non-aborted result; whether abandoning disturbs
+cached_mc64 state the #38 staleness guard relies on; budget
+calibration.
+
+* 10:55 :mc64:closed:
+Item (2) from the user's approved list (MC64 warm-cache miss cost) is
+CLOSED, not deferred. The 2026-05-21 entry supplies a mechanism, not
+just a negative result: the gate metric is 1/delta on a regularized
+KKT, so it tracks the barrier trajectory. No GROWTH_FACTOR separates
+safe from unsafe. My proposed "are misses just past threshold" probe
+would have measured exactly the confounded quantity -- pinene's
+misses ARE ~1.5x past budget, and that margin is set by delta's step,
+not by gate slack.
+
+Protocol note for myself: I pitched this lever to the user before
+searching tried-and-rejected. Same miss as the KR warm-start in
+2026-08-15-01. Two in two sessions. The search is cheap and belongs
+BEFORE the recommendation, not after the approval.

@@ -1,0 +1,421 @@
+#+TITLE: Session journal 2026-08-15-01
+#+STARTUP: showeverything
+
+* 09:40 :scaling:issue-153:issue-134b:probe:
+Opened the two levers carried out of the 0.16.0 checkpoint. Wrote
+=crates/feral-diagnostics/src/bin/probe_scaling_levers.rs= (read-only) to
+answer them with numbers instead of reasoning from source: what the six
+#153 KKTs route to, how many Knight-Ruiz sweeps they actually burn, whether
+the MC64 warm scaling cache hits across an iterate sequence, and how the
+router's gates behave under a symmetric relabeling.
+
+* 09:55 :issue-153:correction:mc64-cache:
+CORRECTION to my own triage. I characterised #153's "warm-path scaling
+never warms" as an unreachable code path, i.e. a bug. That is wrong. The
+value-bounded MC64 scaling cache exists and hits:
+
+: marine_1600  12 hits / 18 iterates
+: dtoc1nd      14 hits / 20 iterates
+: rocket_12800  0 hits /  2 iterates
+
+rocket's 0/2 is the fixture, not the code: its two dumps have different
+patterns (332,793 vs 435,190 stored nnz), so the pattern fingerprint
+correctly invalidates. marine's misses (iters 1, 5, 9, 10, 11) are the
+value-bound check rejecting value drift, which is the #38 inertia-drift
+guard doing its job.
+
+The miss cost is real and large. On marine_1600 a hit factors in 25-30 ms
+and a miss in 87-127 ms -- the Hungarian is ~3x the entire rest of the
+factorization. Six of 18 iterates pay it; closing that gap is worth roughly
+334 ms of 1784 ms (~19%) on that sequence, but only by relaxing a guard
+that exists for a correctness reason.
+
+* 10:10 :issue-153:infnorm:knight-ruiz:finding:
+The InfNorm half is a different problem than #153 assumes, and a sharper
+one. KR is *cap-bound, not tolerance-bound* on every working iterate:
+
+: matrix          iter0 cold          iter1 cold
+: clnlbeam        10 sweeps dev 2.2e-2 (capped)   10 sweeps dev 2.1e-2 (capped)
+: dtoc1nd          6 sweeps dev 4.4e-16 CONVERGED 10 sweeps dev 3.5e-2 (capped)
+: steering_12800   4 sweeps dev 7.7e-12 CONVERGED 10 sweeps dev 1.8e-2 (capped)
+: rocket_12800    10 sweeps dev 1.3e-2 (capped)   10 sweeps dev 2.1e-2 (capped)
+: marine_1600     10 sweeps dev 4.5e-3 (capped)   10 sweeps dev 1.4e-2 (capped)
+: dtoc2            5 sweeps dev 2.2e-16 CONVERGED
+
+Only the iterate-0 KKT ever reaches =tol = 1e-8=. From iterate 1 on, every
+matrix burns the full =max_iter = 10= and exits 6-7 orders of magnitude
+short. So scaling "not warming" here is not a missing cache -- the
+algorithm never finishes, and there is no converged answer to cache. This
+is #134 item D's "always reports =Applied= even unconverged" showing up as
+the normal case rather than an edge case.
+
+* 10:25 :issue-153:warm-start:measurement:
+Warm-starting the KR iteration from the previous iterate's =d= does NOT
+reduce the sweep count -- every warm run still hits the cap. It buys
+*quality* instead, 1-2 orders of magnitude at every budget:
+
+: matrix     budget   cold dev   warm dev
+: clnlbeam        1    5.16e4    9.39e-2
+:                 5    4.93e-1   5.57e-3
+:                10    2.10e-2   1.74e-4
+: dtoc1nd         5    6.91e-1   2.50e-2
+:                10    3.49e-2   7.90e-4
+: marine_1600     5    3.59e-1   3.25e-2
+:                10    1.38e-2   1.03e-3
+: rocket_12800    5    4.94e-1   2.21e-1
+:                10    2.11e-2   7.77e-3
+
+The lever this exposes: warm-started KR at 5 sweeps is already better
+equilibrated than cold KR at 10 on clnlbeam (5.6e-3 vs 2.1e-2) and dtoc1nd
+(2.5e-2 vs 3.5e-2). That is a 2x cut in KR cost at equal-or-better scaling
+quality. KR measures 4-6 ms on these against warm factor times of 11-30 ms,
+so ~10-20% of the factorization.
+
+Caveat, stated before anyone builds it: this is not bit-identical. A
+different starting point reaches a different fixed point, which changes
+pivoting and could move inertia on edge cases. It needs the corpus inertia
+gate and =golden_bits=, and it is a candidate for opt-in rather than
+default.
+
+* 10:40 :issue-134b:router:confirmed:
+The routing bug is real, and the reversal experiment is decisive. Applying
+the symmetric relabeling P(i) = n-1-i -- which cannot change any
+permutation-invariant property of the matrix, including whether MC64 helps:
+
+: matrix     as stored                      reversed
+: VESUVIO    d1=1025 md=1026 Mc64Symmetric  d1=2058 md=11 InfNorm
+: VESUVIOU   d1=1025 md=1026 Mc64Symmetric  d1=2058 md=11 InfNorm
+: MUONSINE   d1=512  md=512  Mc64Symmetric  d1=1025 md=4  InfNorm
+: CRESC132   d1=2654 md=2657 Mc64Symmetric  d1=2656 md=8  InfNorm
+
+All four are in the documented 6x-243x MC64-benefit class. The router keys
+on storage, not on the matrix.
+
+* 10:55 :issue-134b:correction:calibration:
+CORRECTION, second one. Two things I asserted when prioritising #134B are
+not supported by the data.
+
+1. The issue's prescribed fix -- "compute symmetric degrees ... in the same
+   O(n+nnz) pass" -- breaks the router if applied literally to both gates.
+   A slack column's symmetric degree is 2 (its diagonal plus the border
+   entry), never 1, so the degree-1 count collapses to zero for every arrow
+   matrix. Corpus sweep over =data/matrices/kkt=: 568 families read, 26
+   flip route, and the 26 include VESUVIO, VESUVIOU, VESUVIA, MUONSINE and
+   CRESC132 -- all of them to InfNorm. The literal fix would break the
+   router on exactly the class it was calibrated for.
+
+   The gate that *is* permutation-invariant is symmetric degree <= 2 for
+   the slack-mass count, plus symmetric degree for the dense-head count.
+   But that is not a drop-in either: it pushes ACOPP30 from md=29 to md=43
+   and ACOPR30 from 43 to 47, both across the >32 head gate, and ACOPP30 is
+   a documented MC64-hurts case (Policy 4 fallback). The 32 threshold needs
+   re-validating against the 2026-05-17 panel before any of this ships.
+
+2. I claimed the trailing-border case "is plausibly costing real time on
+   real inputs today" because duals-last is the IPOPT convention that
+   pounce and discopt feed us. Not supported. The pounce dumps store the
+   dense coupling where the router can see it -- rocket_12800 stored
+   d1=38400 md=38401 and marine_1600 stored d1=38392 md=6401, both routing
+   to Mc64Symmetric on stored counts. Across 568 corpus families, zero are
+   currently misrouted by a trailing border.
+
+   So #134B is a robustness fix against an input ordering we have no dumps
+   of, not a speedup on anything in hand. It should be prioritised as such.
+
+* 11:05 :planning:
+Net: the order in the 0.16.0 checkpoint was wrong. #153's InfNorm
+warm-start is the measurable win (~10-20% of factor on the InfNorm-routed
+KKTs, quantified above); #153's MC64 half is a guard-tuning question with a
+correctness cost; #134B is a real bug with no measured payoff and a
+recalibration dependency. Reporting all three to the user before writing
+any implementation.
+
+* 11:40 :issue-153:sizing:correction:
+Followed up on the open question I flagged: which strategy each of the six
+actually *runs* at steady state, not which one the picker returns at
+iterate 0. A cache hit is only possible if MC64 ran (the =mc64_ran= gate
+requires it), so the hit counter is a sufficient probe. Ran all six:
+
+: matrix          picker@0        hits      steady-state route
+: clnlbeam        InfNorm         0 / 2     InfNorm  (pattern stable, so 0 is real)
+: steering_12800  InfNorm         0 / 3     InfNorm  (pattern stable, so 0 is real)
+: dtoc1nd         InfNorm        14 / 20    MC64     (sticky-Auto pin moved it)
+: rocket_12800    Mc64Symmetric   0 / 2     MC64     (pattern changes between the only 2 dumps)
+: marine_1600     Mc64Symmetric  12 / 18    MC64
+: dtoc2           InfNorm         0 / 1     unknown -- only one usable dump
+
+So the InfNorm-routed set is *two* of the six, not four. dtoc1nd looked
+like an InfNorm matrix from the picker and is not: its 14 cache hits prove
+the Hungarian ran, so the sticky-Auto pin (#65 fallback or #51) moved it
+onto MC64 after the first factor. My earlier sizing of the KR warm-start
+lever assumed four InfNorm matrices and is therefore too generous.
+
+Corrected sizing, using the same warm sequences:
+
+: matrix          warm factor   KR (10 sweeps)   KR share   halved -> saves
+: clnlbeam           30.2 ms        4.1 ms        13.6%       ~7% of factor
+: steering_12800     25.5 ms        6.0 ms        23.5%      ~12% of factor
+
+~7-12% on the two matrices that actually run InfNorm, not 10-20% across
+four. The lever is real but narrower than I reported.
+
+* 11:50 :corpus:data-quality:
+=dtoc2_0001.mtx= and =dtoc2_0002.mtx= fail to load:
+
+: read_mtx failed: IoError("... line 849754: non-finite value 'inf'")
+
+The reader is correct to reject them -- the dumps contain a literal =inf=.
+dtoc2 therefore has exactly one usable iterate in the repo, so every dtoc2
+claim in #153 (including its 1.29x ratio and its 21.0% scaling share) rests
+on a single matrix. Not a feral bug; a corpus gap to note before anyone
+uses dtoc2 as a fixture.
+
+* 12:20 :protocol-miss:issue-153:prior-art:
+Protocol miss on my part, caught late. The Normal Session Protocol says to
+read =dev/research/= and search =dev/tried-and-rejected.md= *before writing
+any code* on a new feature. I recommended the KR warm-start to the user
+first and searched afterwards. The prior art exists and is six days old:
+
+: dev/research/scaling-warm-start-2026-08-09.md
+: examples/probe_kr_warmstart.rs   (checked-in reproducer)
+
+That note already falsified "warm-start reduces the sweep count" and
+already rejected "lower the cap" (cold KR at cap 5 measured ~26x worse
+equilibrated than at cap 10 on HYDCAR20). It identifies the true cause,
+which my probe re-derived independently today: Ruiz-style equilibration
+converges linearly at ratio ~1/2, so from dev ~1e-2 at the cap, reaching
+tol=1e-8 needs ~30 sweeps, and max_iter=10 truncates rather than converges.
+
+My independent re-derivation is a consistency check on the note, not a new
+finding. The only genuinely unmeasured thing I brought was the
+*combination* the note did not try: carry d forward AND spend fewer sweeps.
+
+* 12:35 :issue-153:falsified:knight-ruiz:
+The combination is falsified too. Tested as the shipping comparison -- a
+cold chain (every iterate restarts from d=1 at 10 sweeps, i.e. today)
+against a warm chain (iterate 0 pays 10, every later iterate starts from
+the previous d and pays k) -- over the longest stable-pattern run in each
+corpus, scored on the equilibration actually delivered:
+
+: matrix                    k=2      k=3      k=5     k=10   (warm@k wins)
+: steering_12800 [InfNorm]  0/2      0/2      0/2     2/2
+: TWIRISM1       [note fx]  0/6      0/6      4/6     5/6
+: marine_1600    [MC64]     9/16     9/16    14/16   16/16
+
+On =steering_12800= -- one of the only two matrices that actually runs
+InfNorm at steady state -- warm@5 loses 2 of 2 iterates against cold@10.
+warm@2 and warm@3 lose everywhere. The reduced-budget warm chain does not
+pay.
+
+My earlier "warm@5 beats cold@10" claim came from a single iterate pair
+(iterate 0 -> iterate 1) on clnlbeam and dtoc1nd. Over full runs it does
+not replicate. A single pair was not enough evidence to recommend a change,
+and I should not have offered it as a sized lever.
+
+What IS confirmed, and matches the note's own Option 2: warm-starting at
+the *unchanged* 10-sweep budget improves quality at zero speed cost --
+steering 2/2, TWIRISM1 5/6, marine 16/16, geometric mean of the delivered
+dev improving 3x to 100x. That is free conditioning, not a speedup, and
+its payoff would have to be measured in downstream refinement counts.
+
+* 12:40 :planning:revised:
+Revised disposition of the three items the user green-lit:
+1. KR warm-start for speed -- NOT implementing. Falsified twice now
+   (2026-08-09 note, and today's chain experiment). Recording here rather
+   than re-litigating it a third time next session.
+2. MC64 warm-cache miss cost -- still real (marine: 87-127 ms miss vs
+   25-30 ms hit, 6 of 18 iterates). Proceeding to investigate.
+3. #134B router permutation-invariance -- still real and unaffected by any
+   of the above. Proceeding to implement.
+
+* 13:10 :134b:calibration:measured:
+Built the permutation-invariant candidate gate and calibrated it over
+the corpus. Both gates computed on SYMMETRIC degree (degree of column
+j in the full matrix, not the stored lower triangle); slack mass
+counts columns with symmetric degree <= slack_max AND a nonzero
+diagonal. Head gate unchanged at >32.
+
+Corpus sweep, 568 families, one iterate each:
+
+| slack_max | route changes | gain MC64 | lose MC64 | invariant under reversal |
+|-----------+---------------+-----------+-----------+--------------------------|
+|         1 |            26 |         0 |        26 |                  568/568 |
+|         2 |             8 |         3 |         5 |                  568/568 |
+|         3 |             6 |         3 |         3 |                  568/568 |
+
+Control: the SHIPPED router is not invariant on 27 of 568 families.
+The candidate is invariant on 568/568 at every slack_max. That is the
+bug, measured, and the fix, measured.
+
+Documented calibration panel (function doc comment, journal
+2026-05-17-01 14:30) is fully preserved at slack_max=2:
+VESUVIO/VESUVIOU/VESUVIA/MUONSINE/CRESC132 stay Mc64Symmetric,
+ACOPP30 stays InfNorm. And unlike today, VESUVIO stays Mc64Symmetric
+when symmetrically reversed (today it flips to InfNorm).
+
+My pre-measurement worry that the 32 head threshold would need
+recalibrating was WRONG. ACOPP30's symmetric max degree is 29, same
+side of the 32 gate as its stored 29. ACOPR30 goes 43 -> 47, still
+above 32, still Mc64Symmetric -- unchanged verdict. No threshold move
+is needed.
+
+
+* 13:35 :134b:correction:incomplete-sweep:
+CORRECTION to 13:10. That sweep covered only data/matrices/kkt (568
+families). The corpus has three roots -- kkt, kkt-mittelmann,
+kkt-expansion -- 1004 families total, and kkt-mittelmann is where the
+"MC64 hurts clnlbeam" evidence that calibrated the shipped thresholds
+lives. Sweeping one root and calling it "the corpus" was wrong.
+
+Corrected numbers over all 1004 families:
+
+| slack_max | route changes | gain MC64 | lose MC64 | invariant |
+|-----------+---------------+-----------+-----------+-----------|
+|         1 |           124 |         0 |       124 | 1004/1004 |
+|         2 |           143 |        54 |        89 | 1004/1004 |
+|         3 |           138 |        68 |        70 | 1004/1004 |
+
+Shipped router NOT invariant on 163 of 1004 (was 27 of 568). So the
+BUG is ~3x bigger than I reported: 16% of the corpus routes on an
+artifact of index order.
+
+But the FIX as drafted is also ~18x more disruptive than I reported:
+143 route changes, not 8. And the slack_max=2 "lose MC64" list
+includes marine_1600, rocket_12800, ROCKET, STEERING, robot_a/b/c,
+robot_1600, pinene_3200, gasoil_3200, qcqp1500-*, TWIRISM1 -- the
+large IPM families that dominate feral's real workload and where the
+MC64 cache is measurably paying (marine: 12/18 hits, 25-30 ms hit vs
+87-127 ms miss, measured this session at 10:55).
+
+The clean 8x separation I reported at 13:10 (arrow >= 0.44 vs
+non-arrow <= 0.056) was an artifact of looking only at the textbook
+arrow families in kkt. It does not hold on the full corpus.
+
+Root cause of the mismatch: stored "nnz_col == 1 && diag" means "j has
+no coupling to any LATER index", not "j has low coupling". For a
+leading-border arrow KKT those coincide (slack couples only to the
+head, stored in the head's earlier column, so symmetric degree is 2).
+For the large IPM KKTs they do not -- their stored-degree-1 columns
+have several couplings to earlier indices. A single small slack_max
+cannot cover both. Measuring the actual symmetric-degree distribution
+of the columns the shipped gate counts, before proposing another gate.
+
+
+* 14:05 :134b:design-table:decided:
+Measured the full design space. Gate (a) and gate (b) can each be
+computed on stored or symmetric degree, independently -- 4 variants,
+1004 families:
+
+| variant                 | changes | gain | lose | invariant  |
+|-------------------------+---------+------+------+------------|
+| shipped (stored,stored) |       0 |    0 |    0 |  841/1004  |
+| (stored a, sym b)       |      15 |   15 |    0 |  890/1004  |
+| (sym a, stored b)       |     102 |   13 |   89 |  923/1004  |
+| (sym a, sym b)          |     143 |   54 |   89 | 1004/1004  |
+
+Reversed-VESUVIO (the duals-last shape #134B is actually about):
+
+| variant           | VESUVIO | MUONSINE | CRESC132 |
+|-------------------+---------+----------+----------|
+| shipped           | InfNorm | InfNorm  | InfNorm  |
+| (stored a, sym b) | MC64    | MC64     | MC64     |
+| (sym a, stored b) | InfNorm | InfNorm  | InfNorm  |
+| (sym a, sym b)    | MC64    | MC64     | MC64     |
+
+Two conclusions:
+
+1. Gate (b) alone fixes the reported bug. Fixing gate (b) restores
+   MC64 on all three reversed arrow KKTs. Fixing gate (a) alone does
+   NOT -- it is strictly worse (89 losses, bug unfixed). That rules
+   out the "half fix in the other direction".
+
+2. Gate (b) alone is MONOTONE. Symmetric degree >= stored degree, so
+   the head gate can only become easier to pass: 15 changes, 15 gains,
+   0 losses. No family loses MC64, so none of the large IPM workloads
+   (marine_1600, rocket_12800, pinene_3200, robot_*, STEERING) are
+   touched, and the 2026-05-17 calibration panel is preserved by
+   construction on the InfNorm side -- clnlbeam's symmetric max degree
+   is 5 and ACOPP30's is 29, both still under 32.
+
+Full invariance (sym a, sym b) is NOT shippable on this evidence: 89
+families would lose MC64, including marine_1600 and rocket_12800 where
+the MC64 cache is measurably paying. Justifying that needs IPM-outcome
+data on 89 families, not a routing-parity argument. Filing as the
+remaining scope of #134B rather than pretending it is done.
+
+* 14:20 :134b:pricing:measured:
+Priced all 15 gate-(b) gainers over every iterate (min-of-3 factor,
+rhs = A*1, forward error ||x-1||_inf):
+
+- Inertia: identical under both routes on all 15. No inertia risk.
+- Time (MC64/InfNorm): median 0.98, range 0.95-1.19. MC64 is free to
+  slightly faster on 14 of 15.
+- Accuracy: neutral or better on 14. CHAIN 5.02e-6 -> 1.42e-8,
+  SOSQP1 8.49e-6 -> 1.95e-6, C-RELOAD 2.04e-10 -> 1.07e-10.
+
+One unfavorable case, reported rather than buried: MSS1 (n=163) is the
+only family where the change costs both time (0.872 -> 1.037 ms,
++19%) and accuracy (1.43e-1 -> 6.15e-1). Both figures are forward
+error on a system neither route actually solves -- 1e-1 forward error
+means MSS1 is too ill-conditioned for this metric to separate the
+routes. Pre-existing, not caused by the change, but MC64 does not
+help it. Absolute cost is 0.17 ms.
+
+Decision: ship the gate (b) fix. Defer gate (a).
+
+
+* 16:55 :134b:implemented:tests:
+Shipped the gate (b) fix. Four new tests; two failed before the change
+(route_is_invariant_under_index_reversal, trailing_border_routes_to_mc64)
+and pass after. Verified by calling the SHIPPED router, not a local
+reimplementation: 1004 families, invariance 841 -> 890, 15 route
+changes, 15 gains, 0 losses. Matches the prediction exactly.
+
+Two existing fixtures had to be corrected. Assertions unchanged; only
+the matrices they build changed:
+
+- `shape_csc(100, 60, 4)` was documented as "the clnlbeam shape:
+  narrow band" but coupled all 40 non-slack columns to the SAME 4 row
+  indices -- a 4-spoke star of symmetric degree 41, not a band. Stored
+  counting cannot tell a star from a band (both report 5); symmetric
+  counting can. External oracle: the real clnlbeam matrix has
+  symmetric max degree 5, measured this session, so the band is the
+  faithful fixture. Added `banded_csc`.
+- The 32-boundary test moved to `arrow_leading(n, head)`, whose head
+  has symmetric degree exactly `head` by construction and is therefore
+  checkable by hand. The old fixture's symmetric degree depended on
+  how many non-slack columns happened to reach a given row -- I would
+  have been deriving the expected value from my own implementation.
+
+* 17:10 :134b:regression:bench:fixed:
+Session-end bench REGRESSED on the dense buckets and I chased it
+rather than filing it as noise:
+
+| bucket                  | 08-14-03 | first run | after fix |
+|-------------------------+----------+-----------+-----------|
+| dense small-frontal p90 |     1.58 |      1.66 |      1.54 |
+| dense medium p90        |     2.00 |      2.13 |      1.91 |
+| sparse small-frontal    |     1.54 |      1.50 |      1.50 |
+| sparse medium           |     1.54 |      1.51 |      1.51 |
+
+Cause: the first cut allocated an n-length degree accumulator on every
+`pick_scaling_strategy` call. The dense partition is ~148k
+sub-millisecond factorizations, so a per-factor allocation is visible
+-- +5% on small-frontal, +6.5% on medium.
+
+Fix: order the gates so the allocation is off the common path. Gate
+(a) is allocation-free and rejects most of the corpus, so decide it
+first and return InfNorm. Then, because symmetric degree is never
+below stored degree, a stored column that already clears 32 settles
+gate (b) with no second pass. The accumulator is allocated only for
+matrices that pass gate (a) AND have no stored column above 32 -- the
+genuinely ambiguous case, which is exactly where the trailing-border
+KKTs live. Semantics identical: re-verified 890/1004, 15 gains, 0
+losses.
+
+Both dense buckets now beat the 08-14-03 baseline (1.58 -> 1.54,
+2.00 -> 1.91). Lesson: a router that runs per-factor is on the hot
+path for the tiny-IPM tail even though it is O(n+nnz) against an
+O(n^1.5+) factorization -- allocation, not asymptotics, is what shows
+up there.
+
