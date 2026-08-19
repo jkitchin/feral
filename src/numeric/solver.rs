@@ -18,8 +18,9 @@ use crate::numeric::factorize::{
     FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
 };
 use crate::numeric::solve::{
-    solve_sparse, solve_sparse_many, solve_sparse_many_refined, solve_sparse_refined_auto,
-    BLAS3_REFINE_THRESHOLD,
+    solve_sparse, solve_sparse_into, solve_sparse_many, solve_sparse_many_into,
+    solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions,
+    SolveManyWorkspace, BLAS3_REFINE_THRESHOLD,
 };
 use crate::scaling::{
     mc64_value_bound_passes, pick_scaling_strategy, precompute_mc64_validity, Mc64CacheValidity,
@@ -1607,14 +1608,95 @@ impl Solver {
         }
     }
 
+    /// In-place [`Solver::solve`]: writes the solution into `x_out`
+    /// rather than returning an owned `Vec` (issue #178 item 2).
+    ///
+    /// A host that already owns its right-hand-side buffer otherwise
+    /// pays an allocation plus a copy-back of `n` doubles per
+    /// back-solve. Bit-for-bit identical to [`Solver::solve`] on the
+    /// same factor and right-hand side.
+    ///
+    /// Errors, in precedence order: [`FeralError::NoFactor`] when no
+    /// factor is stored, then [`FeralError::DimensionMismatch`] when
+    /// `x_out.len() != n`. Never panics.
+    ///
+    /// Aliasing `rhs` and `x_out` is unrepresentable in safe Rust —
+    /// `&[f64]` and `&mut [f64]` into one allocation cannot coexist — so
+    /// the compiler rejects the aliased call and this method does not
+    /// need to.
+    pub fn solve_into(&self, rhs: &[f64], x_out: &mut [f64]) -> Result<(), FeralError> {
+        match &self.last_factors {
+            Some(f) => solve_sparse_into(f, rhs, x_out),
+            None => Err(FeralError::NoFactor),
+        }
+    }
+
     /// Solve with iterative refinement against the original matrix
     /// and the stored factor. Returns `FeralError::NoFactor` if no
     /// factor is stored.
     pub fn solve_refined(&self, matrix: &CscMatrix, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
+        self.solve_refined_opts(matrix, rhs, RefineOptions::default())
+    }
+
+    /// [`Solver::solve_refined`] with a caller-supplied cap on the number
+    /// of refinement correction steps (issue #178).
+    ///
+    /// `RefineOptions::default()` is bit-for-bit identical to
+    /// [`Solver::solve_refined`]. `RefineOptions::with_max_steps(1)` is
+    /// the case an interior-point host wants: one correction per call,
+    /// leaving the convergence decision to the host's own refinement
+    /// loop, which is the loop that computes the residual ratio anyone
+    /// actually consults. See [`RefineOptions`] for the full semantics —
+    /// notably that the cap never overrides the convergence, divergence,
+    /// or plateau exits, and never returns an iterate worse than
+    /// [`Solver::solve`]'s.
+    pub fn solve_refined_opts(
+        &self,
+        matrix: &CscMatrix,
+        rhs: &[f64],
+        opts: RefineOptions,
+    ) -> Result<Vec<f64>, FeralError> {
         let f = match &self.last_factors {
             Some(f) => f,
             None => return Err(FeralError::NoFactor),
         };
+        let mut x = vec![0.0; f.n];
+        self.refine_into(matrix, f, rhs, &mut x, opts)?;
+        Ok(x)
+    }
+
+    /// In-place [`Solver::solve_refined_opts`]: writes the best-residual
+    /// iterate into `x_out` (issue #178 item 2).
+    ///
+    /// Pass `RefineOptions::default()` for the exact behavior of
+    /// [`Solver::solve_refined`]. Errors follow the same precedence as
+    /// [`Solver::solve_into`] — `NoFactor` before `DimensionMismatch`,
+    /// never a panic — and aliasing `rhs` with `x_out` is likewise
+    /// unrepresentable in safe Rust.
+    pub fn solve_refined_into(
+        &self,
+        matrix: &CscMatrix,
+        rhs: &[f64],
+        x_out: &mut [f64],
+        opts: RefineOptions,
+    ) -> Result<(), FeralError> {
+        let f = match &self.last_factors {
+            Some(f) => f,
+            None => return Err(FeralError::NoFactor),
+        };
+        self.refine_into(matrix, f, rhs, x_out, opts)
+    }
+
+    /// Shared body of the single-RHS refined entry points, so the
+    /// allocating and in-place forms cannot drift apart.
+    fn refine_into(
+        &self,
+        matrix: &CscMatrix,
+        factors: &SparseFactors,
+        rhs: &[f64],
+        x_out: &mut [f64],
+        opts: RefineOptions,
+    ) -> Result<(), FeralError> {
         // Issue #131 Gap A: when parallelism is on, refine through the
         // contribution-block solve core (pooled across the initial +
         // correction solves). Install on this solver's pool (built during
@@ -1635,8 +1717,10 @@ impl Solver {
         // identically on every host; `use_parallel` and the pool now
         // choose only the execution strategy, which is bit-neutral.
         match (self.use_parallel, &self.parallel_pool) {
-            (true, Some(pool)) => pool.install(|| solve_sparse_refined_auto(matrix, f, rhs, true)),
-            _ => solve_sparse_refined_auto(matrix, f, rhs, false),
+            (true, Some(pool)) => pool.install(|| {
+                solve_sparse_refined_auto_into(matrix, factors, rhs, x_out, true, opts)
+            }),
+            _ => solve_sparse_refined_auto_into(matrix, factors, rhs, x_out, false, opts),
         }
     }
 
@@ -1656,6 +1740,37 @@ impl Solver {
         }
     }
 
+    /// In-place [`Solver::solve_many`]: writes the column-major solution
+    /// into `x_out` (issue #178 item 2).
+    ///
+    /// Bit-for-bit identical to [`Solver::solve_many`]. `nrhs == 0` is a
+    /// no-op. Errors follow the same precedence as
+    /// [`Solver::solve_into`]: `NoFactor`, then `DimensionMismatch` when
+    /// `rhs` or `x_out` is not `n * nrhs` long. Never panics.
+    pub fn solve_many_into(
+        &self,
+        rhs: &[f64],
+        nrhs: usize,
+        x_out: &mut [f64],
+    ) -> Result<(), FeralError> {
+        let factors = match &self.last_factors {
+            Some(f) => f,
+            None => return Err(FeralError::NoFactor),
+        };
+        let n = factors.n;
+        if x_out.len() != n * nrhs {
+            return Err(FeralError::DimensionMismatch {
+                expected: n * nrhs,
+                got: x_out.len(),
+            });
+        }
+        if nrhs == 0 {
+            return Ok(());
+        }
+        let mut ws = SolveManyWorkspace::for_factors(factors, nrhs);
+        solve_sparse_many_into(factors, rhs, nrhs, x_out, &mut ws)
+    }
+
     /// Multi-RHS solve with per-column iterative refinement against
     /// the original matrix and the stored factor. Each column is
     /// refined independently — convergence is per-column, not all-
@@ -1667,14 +1782,67 @@ impl Solver {
         rhs: &[f64],
         nrhs: usize,
     ) -> Result<Vec<f64>, FeralError> {
-        let factors = match &self.last_factors {
-            Some(f) => f,
+        self.solve_many_refined_opts(matrix, rhs, nrhs, RefineOptions::default())
+    }
+
+    /// [`Solver::solve_many_refined`] with a caller-supplied cap on the
+    /// number of refinement correction steps (issue #178).
+    ///
+    /// The cap applies **per column**, matching the per-column
+    /// convergence this entry point already provides:
+    /// `RefineOptions::with_max_steps(1)` gives every column at most one
+    /// correction, and a column that converges sooner still stops sooner.
+    /// `RefineOptions::default()` is bit-for-bit identical to
+    /// [`Solver::solve_many_refined`].
+    pub fn solve_many_refined_opts(
+        &self,
+        matrix: &CscMatrix,
+        rhs: &[f64],
+        nrhs: usize,
+        opts: RefineOptions,
+    ) -> Result<Vec<f64>, FeralError> {
+        let n = match &self.last_factors {
+            Some(f) => f.n,
             None => return Err(FeralError::NoFactor),
         };
         if nrhs == 0 {
             return Ok(Vec::new());
         }
+        let mut out = vec![0.0; n * nrhs];
+        self.solve_many_refined_into(matrix, rhs, nrhs, &mut out, opts)?;
+        Ok(out)
+    }
+
+    /// In-place [`Solver::solve_many_refined_opts`]: writes the
+    /// column-major best-iterate solution into `x_out` (issue #178
+    /// item 2).
+    ///
+    /// Pass `RefineOptions::default()` for the exact behavior of
+    /// [`Solver::solve_many_refined`]. `nrhs == 0` is a no-op. Errors
+    /// follow the same precedence as [`Solver::solve_into`]: `NoFactor`,
+    /// then `DimensionMismatch`. Never panics.
+    pub fn solve_many_refined_into(
+        &self,
+        matrix: &CscMatrix,
+        rhs: &[f64],
+        nrhs: usize,
+        x_out: &mut [f64],
+        opts: RefineOptions,
+    ) -> Result<(), FeralError> {
+        let factors = match &self.last_factors {
+            Some(f) => f,
+            None => return Err(FeralError::NoFactor),
+        };
         let n = factors.n;
+        if x_out.len() != n * nrhs {
+            return Err(FeralError::DimensionMismatch {
+                expected: n * nrhs,
+                got: x_out.len(),
+            });
+        }
+        if nrhs == 0 {
+            return Ok(());
+        }
         if rhs.len() != n * nrhs {
             return Err(FeralError::DimensionMismatch {
                 expected: n * nrhs,
@@ -1685,24 +1853,14 @@ impl Solver {
         // #58); narrow solves (the IPM predictor-corrector, nrhs = 2)
         // keep the proven per-column loop, bit-identical.
         if nrhs >= BLAS3_REFINE_THRESHOLD {
-            return solve_sparse_many_refined(matrix, factors, rhs, nrhs);
+            return solve_sparse_many_refined_into(matrix, factors, rhs, nrhs, x_out, opts);
         }
-        let mut out = vec![0.0; n * nrhs];
         for c in 0..nrhs {
             let src = &rhs[c * n..(c + 1) * n];
-            // Same #131 Gap A dispatch as `solve_refined` (per column),
-            // with the same #154 pool-or-serial fallback and the same
-            // #177 rule: the factor picks the core, the pool picks only
-            // the schedule.
-            let xc = match (self.use_parallel, &self.parallel_pool) {
-                (true, Some(pool)) => {
-                    pool.install(|| solve_sparse_refined_auto(matrix, factors, src, true))
-                }
-                _ => solve_sparse_refined_auto(matrix, factors, src, false),
-            }?;
-            out[c * n..(c + 1) * n].copy_from_slice(&xc);
+            let dst = &mut x_out[c * n..(c + 1) * n];
+            self.refine_into(matrix, factors, src, dst, opts)?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Estimate `kappa_1(A) = ||A||_1 * ||A^{-1}||_1` via the

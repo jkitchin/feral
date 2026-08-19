@@ -1,11 +1,11 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-19T14:05:36Z
+Generated: 2026-08-19T15:29:43Z
 
 ## Latest Session
-File: dev/sessions/2026-08-19-01.md
+File: dev/sessions/2026-08-19-02.md
 ```
-# Session 2026-08-19-01
+# Session 2026-08-19-02
 
 ## BENCHMARK NUMBERS ARE NOT COMPARABLE TO LAST SESSION
 
@@ -59,11 +59,11 @@ distinct solve cores**:
 
 ## Git Status
 ```
+c154c92 docs: session checkpoint 2026-08-19-01 (#177 fixed)
 b75da82 test(solve): pin the refined solve's arithmetic against the host (#177)
 3cafe57 fix(solve): choose the solve core from the factor, not the host (#177)
 6fb9d26 Merge pull request #174 from jkitchin/feat/scaling-router-invariance
 d00666a docs: session checkpoint 2026-08-15-02 (KIRBY2 localized, #153 closed)
-3029905 docs(compress): localize the KIRBY2 factor-ratio outlier to LdltCompress
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 428 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.90s
+test result: ok. 428 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 3.11s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-02.md)
 
 
 Refined solve, best of 7, 4 workers, microseconds. This is the
@@ -287,6 +287,8 @@ tests/issue107_external_ordering.rs
 tests/issue112_bg_update.rs
 tests/issue127_pipeline_split.rs
 tests/issue128_supernode_nrow.rs
+tests/issue178_refine_cap.rs
+tests/issue178_solve_into.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
@@ -346,4 +348,5 @@ tests/symbolic_profiler.rs
 tests/task_plan_parity.rs
 tests/threshold_consistency.rs
 tests/tiny_fast_path.rs
-```
+
+(truncated from 351 lines to 350 line budget)

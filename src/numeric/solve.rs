@@ -70,6 +70,36 @@ pub fn solve_sparse(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, Fe
     Ok(x)
 }
 
+/// In-place form of [`solve_sparse`]: writes the solution into `x_out`
+/// instead of returning an owned `Vec` (issue #178 item 2).
+///
+/// Bit-for-bit identical to [`solve_sparse`] on the same factor and
+/// right-hand side. Returns [`FeralError::DimensionMismatch`] when
+/// `x_out.len() != factors.n` — never panics, and never leaves a partial
+/// write behind a length error.
+///
+/// Aliasing `rhs` and `x_out` is unrepresentable: `&[f64]` and
+/// `&mut [f64]` borrowing one allocation cannot coexist, so the compiler
+/// rejects the aliased call rather than this function having to.
+pub fn solve_sparse_into(
+    factors: &SparseFactors,
+    rhs: &[f64],
+    x_out: &mut [f64],
+) -> Result<(), FeralError> {
+    let n = factors.n;
+    if x_out.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: x_out.len(),
+        });
+    }
+    if n == 0 && rhs.is_empty() {
+        return Ok(());
+    }
+    let mut ws = SolveWorkspace::for_factors(factors);
+    solve_sparse_into_ws(factors, rhs, x_out, &mut ws)
+}
+
 // N5 (`dev/research/repo-review-2026-06-09.md`) reproducing-test
 // instrumentation: counts `SolveWorkspace` constructions so a white-box
 // test can prove the condition estimator pools one workspace across its
@@ -1825,6 +1855,82 @@ fn gemm_scalar_block(
     }
 }
 
+/// Default cap on iterative-refinement **correction** steps: 10.
+///
+/// MUMPS's `ICNTL(10)` default. Below this, some near-rank-deficient KKT
+/// matrices (CERI651C/ELS, HAHN1, MEYER3NE) bounce in and out of the
+/// machine-precision basin before settling — see
+/// `dev/journal/2026-04-18-06.org`. Issue #178 makes the cap settable
+/// per call but explicitly does **not** change this default.
+pub const DEFAULT_REFINE_MAX_STEPS: usize = 10;
+
+/// Per-call knobs for the sparse iterative-refinement entry points.
+///
+/// `Default` reproduces FERAL's historical behavior exactly, so
+/// `solve_sparse_refined(a, f, b)` and
+/// `solve_sparse_refined_opts(a, f, b, RefineOptions::default())` are
+/// bit-for-bit identical.
+///
+/// # Why a cap exists (issue #178)
+///
+/// The 10-step budget is right for a caller that solves `Ax = b` and
+/// keeps the answer. It is wrong for a caller that is *itself* running
+/// iterative refinement over the same system — an interior-point method
+/// is exactly that. Ipopt's `PDFullSpaceSolver` computes the residual
+/// after each of its own back-solves and decides from it whether to
+/// continue; when each of those back-solves is a `solve_refined`, the
+/// two loops nest and one augmented-system solve can cost up to
+/// `10 × 11 = 110` substitution passes. The outer loop owns the
+/// convergence criterion; the inner loop drives a residual nobody
+/// consults toward a tolerance nobody set. Measured on a 118 276 × 118 276
+/// augmented system, that inner loop was 60 % of back-solve time
+/// (147.3 s vs 58.3 s) — see `dev/research/refinement-cap-2026-08-19.md`.
+///
+/// # Semantics
+///
+/// `max_steps` counts *corrections*, not total substitution passes: the
+/// initial solve always happens, so a call runs at most `1 + max_steps`
+/// passes. This matches how [`RefinementDiagnostics`] numbers its steps
+/// (`steps[0]` is the unrefined solve), so a run under `max_steps = k`
+/// yields at most `k + 1` entries.
+///
+/// It is a **cap, not a target**. The `ε·√n` relative-residual target,
+/// the 100× divergence guard, and the 2-strike plateau exit all keep
+/// priority, so raising `max_steps` can never add work to a system that
+/// has already converged. And the best-iterate contract is preserved
+/// under every value: the returned `x` is the iterate with the smallest
+/// `‖r‖₂` seen, which always includes the unrefined solve, so no cap can
+/// return an answer worse than [`solve_sparse`]'s.
+///
+/// `max_steps = 0` is the unrefined solve, bit-for-bit — and costs the
+/// same, since the residual matvec is skipped rather than computed and
+/// discarded. (Under the diagnostics entry point the matvec still runs:
+/// `steps[0]` is the point there.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefineOptions {
+    /// Maximum number of correction steps. See the type-level docs.
+    pub max_steps: usize,
+}
+
+impl Default for RefineOptions {
+    fn default() -> Self {
+        Self {
+            max_steps: DEFAULT_REFINE_MAX_STEPS,
+        }
+    }
+}
+
+impl RefineOptions {
+    /// Options capping refinement at `max_steps` correction steps.
+    ///
+    /// `RefineOptions::with_max_steps(1)` is the interior-point host's
+    /// case: one correction per call, leaving the convergence decision to
+    /// the host's own refinement loop.
+    pub fn with_max_steps(max_steps: usize) -> Self {
+        Self { max_steps }
+    }
+}
+
 /// Solve A·x = rhs using the sparse factorization with iterative refinement.
 ///
 /// Mirrors `crate::dense::solve::solve_refined` for the multifrontal path.
@@ -1857,10 +1963,65 @@ pub fn solve_sparse_refined(
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<Vec<f64>, FeralError> {
-    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false, SolveCore::SharedVector)?;
+    solve_sparse_refined_opts(matrix, factors, rhs, RefineOptions::default())
+}
+
+/// [`solve_sparse_refined`] with a caller-supplied correction-step cap
+/// (issue #178). `RefineOptions::default()` is bit-for-bit identical to
+/// [`solve_sparse_refined`]; see [`RefineOptions`] for what the cap does
+/// and does not override.
+pub fn solve_sparse_refined_opts(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    opts: RefineOptions,
+) -> Result<Vec<f64>, FeralError> {
+    let mut x = vec![0.0; factors.n];
+    solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        &mut x,
+        false,
+        SolveCore::SharedVector,
+        opts,
+    )?;
     Ok(x)
 }
 
+/// In-place form of [`solve_sparse_refined_opts`]: writes the
+/// best-residual iterate into `x_out` (issue #178 item 2).
+///
+/// `x_out` *is* the best-iterate storage, so this saves the refiner an
+/// `n`-length allocation on top of saving the caller the copy-back.
+/// Returns [`FeralError::DimensionMismatch`] when `x_out.len() != factors.n`.
+pub fn solve_sparse_refined_into(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    x_out: &mut [f64],
+    opts: RefineOptions,
+) -> Result<(), FeralError> {
+    solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        x_out,
+        false,
+        SolveCore::SharedVector,
+        opts,
+    )?;
+    Ok(())
+}
+
+/// Iterative refinement using the tree-parallel contribution-block solve
+/// (issue #131 Gap A) for the initial and correction solves, pooling one
+/// `CbSolveWorkspace` across them. Falls back per-solve to the serial
+/// path when the factor's assembly tree is not `worthwhile` (path-like /
+/// small trees), so it never regresses those; on bushy trees it runs the
+/// substitutions across the rayon pool. The refined result is a valid
+/// solution equal to `solve_sparse_refined`'s up to floating-point
+/// reassociation. Used by `Solver::solve_refined` when parallelism is on.
 /// Iterative refinement through the contribution-block solve core (issue
 /// #131 Gap A) for the initial and correction solves, pooling one
 /// `CbSolveWorkspace` across them.
@@ -1879,19 +2040,34 @@ pub fn solve_sparse_refined(
 /// forward groups contributions by subtree, the shared-vector core folds
 /// them in flat postorder. Choosing between the two cores is therefore a
 /// numerically visible decision and belongs to the caller — see
-/// [`SolveCore`]. Used by `Solver::solve_refined` when parallelism is on.
+/// [`SolveCore`].
 pub fn solve_sparse_refined_cb(
     matrix: &CscMatrix,
     factors: &SparseFactors,
     rhs: &[f64],
     parallel: bool,
 ) -> Result<Vec<f64>, FeralError> {
-    let (x, _) = solve_sparse_refined_core(
+    solve_sparse_refined_cb_opts(matrix, factors, rhs, parallel, RefineOptions::default())
+}
+
+/// [`solve_sparse_refined_cb`] with a caller-supplied correction-step cap
+/// (issue #178).
+pub fn solve_sparse_refined_cb_opts(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    parallel: bool,
+    opts: RefineOptions,
+) -> Result<Vec<f64>, FeralError> {
+    let mut x = vec![0.0; factors.n];
+    solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
+        &mut x,
         false,
         SolveCore::ContribBlock { parallel },
+        opts,
     )?;
     Ok(x)
 }
@@ -1913,19 +2089,100 @@ pub fn solve_sparse_refined_auto(
     rhs: &[f64],
     parallel: bool,
 ) -> Result<Vec<f64>, FeralError> {
-    let (x, _) =
-        solve_sparse_refined_core(matrix, factors, rhs, false, SolveCore::Auto { parallel })?;
+    solve_sparse_refined_auto_opts(matrix, factors, rhs, parallel, RefineOptions::default())
+}
+
+/// [`solve_sparse_refined_auto`] with a caller-supplied correction-step
+/// cap (issue #178).
+pub fn solve_sparse_refined_auto_opts(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    parallel: bool,
+    opts: RefineOptions,
+) -> Result<Vec<f64>, FeralError> {
+    let mut x = vec![0.0; factors.n];
+    solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        &mut x,
+        false,
+        SolveCore::Auto { parallel },
+        opts,
+    )?;
     Ok(x)
 }
 
-/// [`solve_sparse_refined_cb`] with tree-parallel execution requested.
-/// Retained as the established name for the issue #131 Gap A entry point.
+/// In-place form of [`solve_sparse_refined_auto_opts`] (issue #178 item
+/// 2): writes the best-residual iterate into `x_out`.
+pub fn solve_sparse_refined_auto_into(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    x_out: &mut [f64],
+    parallel: bool,
+    opts: RefineOptions,
+) -> Result<(), FeralError> {
+    solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        x_out,
+        false,
+        SolveCore::Auto { parallel },
+        opts,
+    )?;
+    Ok(())
+}
+
 pub fn solve_sparse_refined_parallel(
     matrix: &CscMatrix,
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<Vec<f64>, FeralError> {
-    solve_sparse_refined_cb(matrix, factors, rhs, true)
+    solve_sparse_refined_parallel_opts(matrix, factors, rhs, RefineOptions::default())
+}
+
+/// [`solve_sparse_refined_parallel`] with a caller-supplied
+/// correction-step cap (issue #178).
+pub fn solve_sparse_refined_parallel_opts(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    opts: RefineOptions,
+) -> Result<Vec<f64>, FeralError> {
+    let mut x = vec![0.0; factors.n];
+    solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        &mut x,
+        false,
+        SolveCore::ContribBlock { parallel: true },
+        opts,
+    )?;
+    Ok(x)
+}
+
+/// In-place form of [`solve_sparse_refined_parallel_opts`].
+pub fn solve_sparse_refined_parallel_into(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    x_out: &mut [f64],
+    opts: RefineOptions,
+) -> Result<(), FeralError> {
+    solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        x_out,
+        false,
+        SolveCore::ContribBlock { parallel: true },
+        opts,
+    )?;
+    Ok(())
 }
 
 /// Per-step diagnostic data emitted by
@@ -1998,11 +2255,36 @@ pub fn solve_sparse_refined_with_diagnostics(
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<(Vec<f64>, RefinementDiagnostics), FeralError> {
-    let (x, diag) = solve_sparse_refined_core(matrix, factors, rhs, true, SolveCore::SharedVector)?;
-    // `with_diagnostics = true` always yields `Some`; if it ever doesn't,
-    // that's a logic bug — `expect` is fine in test code, but per CLAUDE.md
-    // we use Result in src/. Return DimensionMismatch as a defensive
-    // signal (can't actually happen with current control flow).
+    solve_sparse_refined_with_diagnostics_opts(matrix, factors, rhs, RefineOptions::default())
+}
+
+/// [`solve_sparse_refined_with_diagnostics`] with a caller-supplied
+/// correction-step cap (issue #178).
+///
+/// This is the observable the cap is verified against: a run under
+/// `max_steps = k` returns at most `k + 1` entries in
+/// [`RefinementDiagnostics::steps`], `steps[0]` being the unrefined
+/// solve. Unlike the non-diagnostic entry points, `max_steps = 0` still
+/// computes the initial residual — emitting `steps[0]` is the point.
+pub fn solve_sparse_refined_with_diagnostics_opts(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    opts: RefineOptions,
+) -> Result<(Vec<f64>, RefinementDiagnostics), FeralError> {
+    let mut x = vec![0.0; factors.n];
+    let diag = solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        &mut x,
+        true,
+        SolveCore::SharedVector,
+        opts,
+    )?; // `with_diagnostics = true` always yields `Some`; if it ever doesn't,
+        // that's a logic bug — `expect` is fine in test code, but per CLAUDE.md
+        // we use Result in src/. Return DimensionMismatch as a defensive
+        // signal (can't actually happen with current control flow).
     let diag = diag.ok_or(FeralError::DimensionMismatch {
         expected: 1,
         got: 0,
@@ -2049,18 +2331,30 @@ pub enum SolveCore {
     },
 }
 
+/// Shared refinement loop behind every `solve_sparse_refined*` entry
+/// point. Writes the best-residual iterate into `x_out` — which doubles
+/// as the `best_x` storage, so the refined path holds one working vector
+/// and one residual vector, not three.
 fn solve_sparse_refined_core(
     matrix: &CscMatrix,
     factors: &SparseFactors,
     rhs: &[f64],
+    x_out: &mut [f64],
     with_diagnostics: bool,
     core: SolveCore,
-) -> Result<(Vec<f64>, Option<RefinementDiagnostics>), FeralError> {
+    opts: RefineOptions,
+) -> Result<Option<RefinementDiagnostics>, FeralError> {
     let n = factors.n;
     if rhs.len() != n {
         return Err(FeralError::DimensionMismatch {
             expected: n,
             got: rhs.len(),
+        });
+    }
+    if x_out.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: x_out.len(),
         });
     }
 
@@ -2107,12 +2401,29 @@ fn solve_sparse_refined_core(
         core,
         SolveCore::ContribBlock { parallel: true } | SolveCore::Auto { parallel: true }
     );
-    let mut x = vec![0.0; n];
+    // The unrefined solve goes straight into the caller's buffer: it is
+    // the first (and, under `max_steps = 0`, the only) candidate for the
+    // best iterate.
     match (cb_ws.as_mut(), ws.as_mut()) {
-        (Some(cb), _) => cb.solve_into(factors, rhs, &mut x, cb_parallel),
-        (None, Some(w)) => solve_sparse_into_ws(factors, rhs, &mut x, w)?,
+        (Some(cb), _) => cb.solve_into(factors, rhs, x_out, cb_parallel),
+        (None, Some(w)) => solve_sparse_into_ws(factors, rhs, x_out, w)?,
         (None, None) => unreachable!("exactly one solve workspace is built"),
     }
+
+    // Issue #178: `max_steps = 0` must be the same *computation* as
+    // `solve_sparse`, not merely the same answer — otherwise a caller
+    // that opts out of refinement still pays a matvec and a norm per
+    // solve. Return before the residual is formed, and before the
+    // working iterate is even allocated. The diagnostics path is the
+    // exception: `steps[0]` carries that residual, so it runs the matvec
+    // and then simply skips the loop.
+    if opts.max_steps == 0 && !with_diagnostics {
+        return Ok(None);
+    }
+
+    // `x` is the working iterate the corrections accumulate into;
+    // `x_out` keeps the best one seen.
+    let mut x = x_out.to_vec();
 
     // Initial residual: compute A·x directly into r, then negate-add.
     let mut r = vec![0.0; n];
@@ -2122,7 +2433,6 @@ fn solve_sparse_refined_core(
     }
     let mut r_norm = norm2(&r);
 
-    let mut best_x = x.clone();
     let mut best_r_norm = r_norm;
     let mut stagnant_count: usize = 0;
     let mut dx = vec![0.0; n];
@@ -2140,7 +2450,13 @@ fn solve_sparse_refined_core(
     // single-strike exit kills) while still capping the easy-case cost.
     // Bench evidence (cap=2 / cap=3 / two-tier / 1-strike / 2-strike)
     // is in `dev/journal/2026-04-18-06.org`.
-    let max_steps = 10;
+    //
+    // Issue #178 made the step budget a per-call parameter
+    // (`RefineOptions::max_steps`, default `DEFAULT_REFINE_MAX_STEPS = 10`)
+    // so an interior-point host running its own refinement loop over the
+    // same system can ask for one correction instead of ten. It is a cap
+    // only: every exit below still takes priority over it.
+    let max_steps = opts.max_steps;
     let max_stagnant_steps = 2;
     let n_sqrt = (n as f64).sqrt();
     let threshold = f64::EPSILON * n_sqrt;
@@ -2197,7 +2513,7 @@ fn solve_sparse_refined_core(
         let improved = r_norm < best_r_norm;
         if improved {
             best_r_norm = r_norm;
-            best_x.copy_from_slice(&x);
+            x_out.copy_from_slice(&x);
             stagnant_count = 0;
             if with_diagnostics {
                 returned_step = step;
@@ -2240,7 +2556,7 @@ fn solve_sparse_refined_core(
     } else {
         None
     };
-    Ok((best_x, diag))
+    Ok(diag)
 }
 
 /// Multi-RHS solve with per-column iterative refinement, batched through
@@ -2262,6 +2578,40 @@ pub fn solve_sparse_many_refined(
     rhs: &[f64],
     nrhs: usize,
 ) -> Result<Vec<f64>, FeralError> {
+    solve_sparse_many_refined_opts(matrix, factors, rhs, nrhs, RefineOptions::default())
+}
+
+/// [`solve_sparse_many_refined`] with a caller-supplied correction-step
+/// cap (issue #178). The cap applies **per column**, exactly as the
+/// uncapped budget does: each column stops at the first of its own
+/// convergence, divergence, plateau, or `opts.max_steps`.
+pub fn solve_sparse_many_refined_opts(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    nrhs: usize,
+    opts: RefineOptions,
+) -> Result<Vec<f64>, FeralError> {
+    let mut x = vec![0.0; factors.n * nrhs];
+    solve_sparse_many_refined_into(matrix, factors, rhs, nrhs, &mut x, opts)?;
+    Ok(x)
+}
+
+/// In-place form of [`solve_sparse_many_refined_opts`]: writes the
+/// column-major best-iterate solution into `x_out` (issue #178 item 2).
+///
+/// `x_out` doubles as the per-column best-iterate storage, so this saves
+/// the refiner an `n × nrhs` allocation as well as the caller's
+/// copy-back. Returns [`FeralError::DimensionMismatch`] when `rhs` or
+/// `x_out` is not `n * nrhs` long.
+pub fn solve_sparse_many_refined_into(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    nrhs: usize,
+    x_out: &mut [f64],
+    opts: RefineOptions,
+) -> Result<(), FeralError> {
     let n = factors.n;
     if rhs.len() != n * nrhs {
         return Err(FeralError::DimensionMismatch {
@@ -2269,12 +2619,20 @@ pub fn solve_sparse_many_refined(
             got: rhs.len(),
         });
     }
+    if x_out.len() != n * nrhs {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * nrhs,
+            got: x_out.len(),
+        });
+    }
     if nrhs == 0 || n == 0 {
-        return Ok(vec![0.0; n * nrhs]);
+        x_out.fill(0.0);
+        return Ok(());
     }
 
-    // Same constants as the single-RHS refiner (solve_sparse_refined_core).
-    let max_steps = 10;
+    // Same constants as the single-RHS refiner (solve_sparse_refined_core),
+    // including the issue #178 per-call step cap.
+    let max_steps = opts.max_steps;
     let max_stagnant_steps = 2;
     let threshold = f64::EPSILON * (n as f64).sqrt();
     let divergence_factor = 100.0;
@@ -2286,8 +2644,20 @@ pub fn solve_sparse_many_refined(
         }
     };
 
-    // Initial batched solve.
-    let mut x = solve_sparse_many(factors, rhs, nrhs)?;
+    // Initial batched solve, written straight into the caller's buffer:
+    // it is both the working iterate for the residual sweep below and
+    // the per-column best iterate. Bit-for-bit `solve_sparse_many`,
+    // which is the same call with a workspace it builds itself.
+    let mut ws = SolveManyWorkspace::for_factors(factors, nrhs);
+    solve_sparse_many_into(factors, rhs, nrhs, x_out, &mut ws)?;
+
+    // Issue #178: `max_steps = 0` is `solve_sparse_many`, and must cost
+    // the same — return before the per-column residual sweep rather than
+    // computing residuals nobody will act on.
+    if max_steps == 0 {
+        return Ok(());
+    }
+
     let mut best_rn = vec![0.0f64; nrhs];
     let mut bnorm = vec![0.0f64; nrhs];
 
@@ -2302,7 +2672,7 @@ pub fn solve_sparse_many_refined(
     let mut rc = vec![0.0f64; n];
     let mut active: Vec<usize> = Vec::new();
     for c in 0..nrhs {
-        matrix.symv(&x[c * n..(c + 1) * n], &mut rc);
+        matrix.symv(&x_out[c * n..(c + 1) * n], &mut rc);
         for i in 0..n {
             rc[i] = rhs[c * n + i] - rc[i];
         }
@@ -2313,11 +2683,13 @@ pub fn solve_sparse_many_refined(
         }
     }
     if active.is_empty() {
-        return Ok(x);
+        return Ok(());
     }
 
-    // Refinement is needed for at least one column.
-    let mut best_x = x.clone();
+    // Refinement is needed for at least one column. `x_out` holds the
+    // initial solve and from here on is the per-column *best* iterate;
+    // `x` is the working iterate the corrections accumulate into.
+    let mut x = x_out.to_vec();
     let mut stagnant = vec![0usize; nrhs];
     // Gather buffer sized to the (shrinking) active set; the leading
     // `n * active.len()` is used each step.
@@ -2354,7 +2726,7 @@ pub fn solve_sparse_many_refined(
 
             if rn < best_rn[c] {
                 best_rn[c] = rn;
-                best_x[c * n..(c + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]);
+                x_out[c * n..(c + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]);
                 stagnant[c] = 0;
             } else {
                 stagnant[c] += 1;
@@ -2372,7 +2744,7 @@ pub fn solve_sparse_many_refined(
         active = still;
     }
 
-    Ok(best_x)
+    Ok(())
 }
 
 fn norm2(v: &[f64]) -> f64 {

@@ -1,197 +1,159 @@
-#+TITLE: Session 2026-08-19-01
-#+DATE: 2026-08-19
+#+TITLE: Session journal 2026-08-19-01
+#+STARTUP: showeverything
 
-* 13:15 :issue-177:solve:parallel:
-Goal: fix #177 — "parallel solve is not bit-identical to serial on
-henon120, breaking #131's stated contract".
+* 13:20 :orient:issue-178:
+Task: fix https://github.com/jkitchin/feral/issues/178 — two independent
+asks from pounce#698.
 
-Read =src/numeric/solve.rs=. Two *different numerical cores* exist for
-a sparse solve:
+1. A caller-supplied cap on iterative-refinement correction steps.
+   Today `max_steps = 10` is hard-coded twice: `src/numeric/solve.rs:1873`
+   (single-RHS core) and `src/numeric/solve.rs:2007` (multi-RHS). An IPM
+   host runs its own refinement loop over the same system, so one of its
+   back-solves can cost up to 10x11 = 110 substitution passes.
+   Measured on pounce 0.10.0, 118276-dim augmented system: back-solve
+   147.3 s (refine on) vs 58.3 s (refine off), wall 487.2 vs 387.9 s.
+   The ask is explicitly NOT to change the default — only to make `k`
+   settable per call.
 
-- =solve_sparse_core_into= (shared global vector, flat postorder
-  left-fold of separator updates), used by =solve_sparse= and
-  =solve_sparse_refined=;
-- the contribution-block core (=cb_forward_front= / =cb_run_serial= /
-  =cb_run_parallel=), issue #131 Gap A, which sums each front's RHS as a
-  *tree* over children in ascending child order.
+2. In-place (`*_into`) solve entry points on `Solver`, so a host that
+   owns the RHS buffer does not pay `dim x nrhs` doubles of allocation
+   plus copy-back per back-solve.
 
-The module header at solve.rs:395-412 already states these differ by
-floating-point reassociation and calls the CB core "an opt-in path".
-So CB-vs-shared-vector is by design, not a bug.
+Code inspection findings:
+- `solve_sparse_refined_core` (`solve.rs:1797`) is the single funnel for
+  `solve_sparse_refined`, `solve_sparse_refined_parallel`, and
+  `solve_sparse_refined_with_diagnostics`. One cap parameter there covers
+  all three.
+- `solve_sparse_many_refined` (`solve.rs:1989`) is a separate loop with
+  its own copy of the constants; it needs the cap threaded independently.
+- `Solver::solve_many_refined` (`solver.rs:1661`) dispatches on
+  `BLAS3_REFINE_THRESHOLD`: wide solves go to `solve_sparse_many_refined`,
+  narrow ones (the IPM `nrhs = 2` case) run a per-column loop over
+  `solve_sparse_refined{,_parallel}`. Both arms need the cap.
+- `best_x` in both loops is already a `Vec` that is returned by value, so
+  the in-place ask and the cap ask touch the same lines — doing them in
+  one pass avoids editing the same loop twice.
 
-* 13:25 :issue-177:root-cause:
-The actual defect is *which core runs is chosen by a machine-dependent
-gate*. =solve_sparse_refined_core= (solve.rs:1829) does
+* 13:40 :issue-178:test-oracle:refinement:
+Needed a test oracle for "a solve that runs the full 10-step budget"
+(issue #178 verification item 1 is stated in terms of a run that returns
+`steps.len() == 11`). Probed the obvious candidates with
+`solve_sparse_refined_with_diagnostics`:
 
-    let cb = CbSolveWorkspace::for_factors(factors);
-    cb.worthwhile().then_some(cb)
+    ill-conditioned bordered KKT (existing test matrix)  steps=1
+    singular 3x3 (ForceAccept zero pivot)                steps=3
+    Hilbert n=8/10/12/14/16/18/20/24/30/40               steps=4/5/7/7/5/3/4/4/3/3
+    KKT with (1,1) block eps=1e-14/1e-16/1e-18           steps=1
 
-and falls back to the shared-vector =SolveWorkspace= when not
-worthwhile. =CbTaskPlan::worthwhile= depends on =fwd_seeds.len() >= 2=
-and =max_local < 0.7*total=, both computed from
+None reach 11. The reason is structural, not incidental: when the factor
+is *exact*, refinement bottoms out on roundoff in two or three steps and
+the 2-strike plateau exit fires. Nothing that is merely ill-conditioned
+runs the budget.
 
-    thresh = FERAL_CB_THRESH or (total / (rayon::current_num_threads()*16))
+The situation the cap exists for is different — the factor is a genuinely
+perturbed approximate inverse (cascade-break L-factor perturbation,
+static pivot perturbation), so refinement converges *linearly* and keeps
+improving as long as it is allowed to. That is directly constructible
+through the public API, because it takes the matrix and the factor
+separately: factor `A + dA`, refine against `A`.
 
-So =rayon::current_num_threads()= and =FERAL_CB_THRESH= select the
-*arithmetic*, not just the schedule. That is exactly the reporter's
-"same feral, same matrix, same POUNCE build produces different iterate
-paths on machines with different core counts".
+Tridiagonal n=20, `A = tridiag(-1, 2, -1)`, factor of `A` with the
+diagonal perturbed by `delta*(1 + 0.01*j)`:
 
-* 13:35 :issue-177:evidence:
-Measured with a scaffold test (=tests/refined_parallel_thread_invariance.rs=,
-temporary) plus two temporary =eprintln!= probes in solve.rs.
+    delta   steps  relative residual trajectory
+    1e-1    11     1.15e-1 -> 2.82e-3   (never converges, all 10 used)
+    3e-2    11     4.01e-2 -> 7.23e-5
+    1e-2    11     1.49e-2 -> 1.06e-7   ~3.3x per step, monotone
+    3e-3    11     4.85e-3 -> 3.35e-12
+    1e-3    11     1.67e-3 -> 1.50e-16
+    1e-4     6     1.70e-4 -> 3.07e-16  (converges, exits early)
 
-Poisson 2D 160x160 (n=25600), same factor, same RHS:
+Picked `delta = 1e-2` as the full-budget case (11 steps, every step
+improving, so the run stops on the cap and nothing else) and
+`delta = 1e-4` as the "cap is not a target" case (6 steps under a cap of
+10, so raising the cap must change nothing). Both assertions are made
+explicitly in the tests, so if either matrix stops having the property
+the test fails loudly rather than passing vacuously.
 
-    DBG177 plan: total=1090303 thresh=68143 roots=36 seeds=4  max_local=81612 threads=1 worthwhile=true
-    DBG177 plan: total=1090303 thresh=34071 roots=51 seeds=9  max_local=57676 threads=2 worthwhile=true
-    DBG177 plan: total=1090303 thresh=17035 roots=83 seeds=25 max_local=27510 threads=4 worthwhile=true
-    DBG177 plan: total=1090303 thresh=8517 roots=133 seeds=50 max_local=21000 threads=8 worthwhile=true
+* 14:05 :issue-178:implementation:
+Implemented both asks. Design notes in
+`dev/research/refinement-cap-2026-08-19.md`, plan in
+`dev/plans/issue-178-refine-cap-and-inplace.md`.
 
-    threads=1: bits differing vs serial-refined = 24295
-    threads=2: bits differing vs serial-refined = 24295
-    threads=4: bits differing vs serial-refined = 24295
-    threads=8: bits differing vs serial-refined = 24295
-    threads 1 vs 2: 0    threads 2 vs 4: 0    threads 4 vs 8: 0
+Item 1: `RefineOptions { max_steps }`, `Copy`, `Default` =
+`DEFAULT_REFINE_MAX_STEPS = 10`. Threaded through
+`solve_sparse_refined_core` and `solve_sparse_many_refined`, replacing
+both hard-coded `let max_steps = 10` sites. Chose an options struct over
+a bare `usize` parameter because the repo convention is params structs
+(`NumericParams`, `SupernodeParams`, `BunchKaufmanParams`, `LuParams`)
+and a later field addition stays source-compatible for callers that
+build from `Default`.
 
-Two facts, both matching the issue report exactly:
+`max_steps = 0` returns before the residual matvec, not after — otherwise
+opting out of refinement still costs a `symv` and a `norm2` per solve and
+the "all-or-nothing" complaint would only be half addressed. Verified
+bit-for-bit against `solve_sparse` / `solve_sparse_many`.
 
-1. The CB core is *itself* bit-stable across thread counts — the plan
-   changes (seeds 4 -> 50) but the output does not move a bit. The
-   child-reduction order really is fixed, as documented. So this is not
-   a scheduling artifact.
-2. The CB core differs from the shared-vector core by 24295 of 25600
-   entries. The reporter's "serial solve" run
-   (=FERAL_CB_THRESH=1000000000000=) is not the CB core run serially —
-   it is a *different core*. That is the whole of the observed
-   divergence.
+Item 2: `solve_sparse_refined_core` and `solve_sparse_many_refined` now
+write into a caller `x_out` slice which *is* the `best_x` storage. That
+removes one n-length (resp. n*nrhs) allocation from the refined path
+itself, not only from the caller. Multi-RHS additionally runs its initial
+batched solve straight into `x_out` via `solve_sparse_many_into`, so the
+common "every column already converged" path does zero extra copies.
 
-Smaller grids (Poisson 60x60, 96x96, total 351544) come out
-=worthwhile=false= — they fail =total >= MIN_TOTAL_COST= (1e6) — so both
-runs take the shared-vector core and agree bit-for-bit. That is why
-NARX_CFy agrees and henon120 does not: it is a size/structure
-threshold, exactly the "structure-dependent rather than universal"
-observation in the issue.
+`Solver` surface: `solve_into`, `solve_refined_opts`,
+`solve_refined_into`, `solve_many_into`, `solve_many_refined_opts`,
+`solve_many_refined_into`. The #131/#154 parallel-or-serial dispatch was
+duplicated between `solve_refined` and the narrow arm of
+`solve_many_refined`; both now go through one private `refine_into`, so
+the allocating and in-place forms cannot drift.
 
-* 13:40 :issue-177:decision:
-Fix: *decouple core selection from scheduling*. =worthwhile= must
-choose only between =cb_run_parallel= and =cb_run_serial= (already
-byte-identical to each other); it must never switch to the
-shared-vector core. Then neither =rayon::current_num_threads()= nor
-=FERAL_CB_THRESH= can perturb a single bit, and the reporter's repro
-becomes bit-identical.
+Aliasing `rhs`/`x_out` (issue #178 asks for it to be supported or
+explicitly rejected): it is neither — it is unrepresentable, since
+`&[f64]` and `&mut [f64]` into one allocation cannot coexist. Documented
+on each entry point rather than guarded by an unreachable runtime check.
 
-Rejected: making the CB core bit-identical to the shared-vector core.
-The shared-vector core folds each front's separator update into a
-global vector in postorder; the CB core folds a grandchild's block into
-its child's block before it reaches the parent. Matching the postorder
-fold would require abandoning the subtree grouping — i.e. the
-parallelism itself. Already documented at solve.rs:404-412.
+Evidence: 21 new tests in `tests/issue178_refine_cap.rs` (12) and
+`tests/issue178_solve_into.rs` (9), all passing; full suite
+`cargo test --workspace` green with 0 failures across 93 test binaries;
+`cargo clippy --all-targets -- -D warnings` clean.
 
-* 14:10 :issue-177:perf:pivot:
-First cut of the fix — "when the caller asks for the parallel refine,
-always use the CB core; =worthwhile= only picks =cb_run_parallel= vs
-=cb_run_serial=" — is correct but *not shippable as-is*. Measured the
-two cores head to head (refined solve, best of 7, 4 workers, us):
+* 14:35 :issue-178:measurement:bench:
+Ran the mandatory session-end bench (`cargo run --bin bench --release`).
+**The benchmark corpus is not present in this container** —
+`data/benchmark-config.toml` is missing, so the harness fell back to its
+8 synthetic matrices and both Phase 2.8.1 partition tables report
+`count = 0`, verdict `N/A`. There is therefore **no comparison against
+2026-08-15-02's p90 numbers this session**. Not a regression, not an
+improvement — not measured. What did run passed: 2/2 inertia match vs
+MUMPS, 2/2 residual pass, worst residual 1.26e-16.
 
-    matrix        n       shared-vector   CB-serial      CB-par(4)
-    chain_400     400          24.0       30.6 (1.27x)   31.5 (1.31x)
-    chain_2000    2000        119.0      154.0 (1.29x)  162.5 (1.37x)
-    chain_20000   20000      1271.8     1630.7 (1.28x) 1617.1 (1.27x)
-    poisson_40    1600        659.3     1198.8 (1.82x) 1228.2 (1.86x)
-    poisson_96    9216       4649.5     5035.4 (1.08x) 5087.5 (1.09x)
-    poisson_160   25600     31842.2    35188.1 (1.11x) 22968.5 (0.72x)
+So I measured the change directly instead, on real KKT matrices in the
+repo. Per-call cost of the single-RHS refined solve as a function of the
+new cap, 20 reps each, release build, one trial (no repeated trials —
+treat as indicative, not as a noise-bounded measurement):
 
-The CB core *only* wins on the one factor where =worthwhile= holds
-(poisson_160, 0.72x). Everywhere else it is 1.08-1.86x slower with
-nothing to show for it. So =worthwhile= is a well-tuned *performance*
-gate, and the naive fix would have bought determinism by paying up to
-1.86x on every path-like tree. Correctness before performance is the
-rule, but paying 1.86x when a cheaper correct design exists is not
-that trade.
+    matrix                  n      steps  bare     k=0     k=1     k=10
+    VESUVIO_0021          3083     5      0.077ms  1.03x   3.07x   7.31x
+    nuffield2_trap_iter1  26649    3      9.63ms   1.07x   2.13x   3.00x
+    twirism1_kkt           745     3      0.087ms  0.72x   2.04x   3.19x
+    sawpath_kkt           1575     3      0.069ms  0.91x   2.16x   3.16x
 
-Worse, the naive fix does not even close the issue. =use_parallel=
-defaults from =Solver::default_use_parallel()= =
-=available_parallelism() > 1=. So "core = f(use_parallel)" still means
-"core = f(host core count)" — a 1-core box and a 4-core box still
-disagree. The pool-availability arm (#154) leaks the same way.
+Two things this confirms:
 
-* 14:25 :issue-177:decision:design:
-Pivoted to: *the core is a pure function of the factor; the host
-chooses only the schedule.*
+1. `k = 0` costs what `solve_sparse` costs (0.72-1.07x, i.e. within the
+   noise of the bare solve). The early return *before* the residual
+   matvec is doing its job — had I returned after it, k=0 would sit
+   visibly above 1.0x on every row.
+2. On VESUVIO_0021 — a pounce KKT that uses 4 corrections before the
+   plateau exit — `k = 1` is 3.07x bare against the default's 7.31x, a
+   2.4x reduction in per-call refined-solve cost. That is the same
+   direction and rough magnitude as pounce#698's 2.6x per-iteration
+   back-solve reduction, measured independently at a different scale.
 
-- =cb_core_profitable(factors)= applies the same three-part gate at a
-  fixed =CB_REFERENCE_FANOUT= (64) granularity — never
-  =rayon::current_num_threads()=, never =FERAL_CB_THRESH=.
-- =SolveCore::Auto= consults it; =Solver::solve_refined= and
-  =solve_many_refined= use =Auto=. =use_parallel= and pool availability
-  now only decide =cb_run_parallel= vs =cb_run_serial=, which are
-  byte-identical.
-- =CbTaskPlan='s worker-derived threshold survives untouched, for
-  scheduling.
-
-This keeps the shared-vector core on exactly the trees where it is
-faster, keeps the CB core where it wins, and makes the choice
-host-invariant.
-
-* 14:40 :issue-177:perf:regression:
-First =Auto= implementation called =CbTaskPlan::build_with_threshold=
-for the verdict. That allocates three =Vec<Vec<usize>>= of length
-=n_nodes= (=build_children=, =owned=, =tr_children=) on *every* refined
-solve, including the ones it rejects:
-
-    chain_400     1.29x    chain_2000   1.27x    chain_20000  1.24x
-
-i.e. the predicate cost as much as the thing it was avoiding.
-Rewrote =cb_core_profitable= on flat =O(n_nodes)= arrays — subtree cost
-folded into parents using the postorder guarantee, no child lists at
-all. After:
-
-    matrix        n       shared-vector  auto-serial     auto-par(4)
-    chain_400     400          22.3       22.9 (1.03x)   22.9 (1.03x)
-    chain_2000    2000        112.9      114.8 (1.02x)  114.6 (1.01x)
-    chain_20000   20000      1276.3     1276.8 (1.00x) 1272.0 (1.00x)
-    poisson_40    1600        642.2      657.1 (1.02x)  691.8 (1.08x)
-    poisson_96    9216       4549.3     4612.6 (1.01x)  4631.5 (1.02x)
-    poisson_160   25600     27761.6    30632.9 (1.10x) 20763.6 (0.75x)
-
-Rejected trees are back to parity (1.00-1.03x). The remaining cost is
-honest and localized: on a CB-profitable factor a host with no workers
-pays ~1.10x for the determinism, and a 4-worker host gains 25%.
-
-Two implementations of one gate can drift, so
-=cb_core_profitable_matches_the_plan_gate= pins the flat predicate
-against =CbTaskPlan::worthwhile= across six fixtures that land on both
-sides of it.
-
-* 14:55 :issue-177:tests:
-The pre-fix failure is deterministic and reproducible. Ran the new
-=solver_refine_is_identical_across_parallelism_and_pool_availability=
-against a worktree at 6fb9d26:
-
-    solve_refined pooled vs pool-less: 24295 of 25600 entries differ
-    left: 24295   right: 0
-    test result: FAILED. 4 passed; 1 failed
-
-Post-fix all five pass. Coverage added:
-
-- =tests/refined_solve_core_stability.rs= — worker count (1/2/3/4/8),
-  pool vs no pool, parallel vs sequential =Solver=, on matrices either
-  side of the gate; plus a non-vacuity check that the two cores really
-  are distinguishable on the fixture (else the whole file proves
-  nothing).
-- =tests/cb_core_choice_ignores_env.rs= — the reporter's own knob.
-  Single-test binary on purpose: it mutates the process environment,
-  which is shared across a binary's tests but not across binaries.
-- =solve.rs= unit tests — threshold sweep byte-identity (with a
-  non-vacuity assertion that the sweep really produced different task
-  decompositions), gate-rejected factors still run the CB core when
-  asked, and the flat-vs-plan agreement guard.
-
-Also retargeted the pre-existing
-=solver_parallel_without_pool_falls_back_to_serial_refine= (#154). It
-asserted pool-less == =with_parallel(false)=, which after this change
-is not guaranteed in general — it passed only because its n=64
-tridiagonal fixture is small enough that both cores coincide. Kept
-that comparison (it still has content on that fixture) and added the
-invariant that does hold everywhere: pool-less == pooled.
+The three matrices that stop at 3 steps do so via the 2-strike plateau
+(their residuals are large and non-decreasing — nuffield2_trap is the
+issue-54 repro and is genuinely near-singular), so their default is
+already close to `k = 2` and the cap has less to give. That is the
+expected shape: the cap pays off exactly where refinement would
+otherwise keep going.

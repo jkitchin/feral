@@ -4,6 +4,42 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — caller-capped iterative refinement and in-place solves (issue #178)
+
+- **`RefineOptions`** makes the refinement step budget a per-call parameter.
+  `RefineOptions::with_max_steps(k)` runs at most `k` correction steps;
+  `RefineOptions::default()` is today's budget (`DEFAULT_REFINE_MAX_STEPS = 10`)
+  and is bit-for-bit identical to the existing entry points. New `_opts` forms:
+  `solve_sparse_refined_opts`, `solve_sparse_refined_parallel_opts`,
+  `solve_sparse_refined_with_diagnostics_opts`, `solve_sparse_many_refined_opts`,
+  `Solver::solve_refined_opts`, `Solver::solve_many_refined_opts`.
+- **Why.** FERAL's 10-step budget is right for a caller that solves `Ax = b` and
+  keeps the answer, and wrong for a caller running its own refinement over the
+  same system. An interior-point host is the latter, so the two loops nest and
+  one augmented-system solve can cost up to `10 x 11 = 110` substitution passes —
+  measured at 60 % of back-solve time (147.3 s vs 58.3 s) on a 118 276-dimension
+  KKT system in pounce#698. The outer loop owns the convergence criterion; the
+  inner one drives a residual nobody consults.
+- **No default changed.** The cap is an upper bound only: the `eps*sqrt(n)`
+  relative-residual target, the 100x divergence guard, and the 2-strike plateau
+  exit all keep priority, and the best-iterate contract holds under every `k`, so
+  no cap can return an answer worse than `solve_sparse`. `k = 0` equals
+  `solve_sparse` bit-for-bit — and costs the same, since the residual matvec is
+  skipped rather than computed and discarded.
+- **In-place entry points.** `Solver::solve_into`, `solve_refined_into`,
+  `solve_many_into`, `solve_many_refined_into`, plus free-function
+  `solve_sparse_into`, `solve_sparse_refined_into`,
+  `solve_sparse_many_refined_into`. A host that owns its right-hand-side buffer
+  no longer pays an allocation plus copy-back per back-solve (`dim x nrhs`
+  doubles, ~946 KB per solve at the dimension above). Each is bit-identical to
+  its allocating twin; a wrong-length `rhs` or `x_out` returns
+  `DimensionMismatch` rather than panicking; `NoFactor` keeps precedence.
+  Aliasing `rhs` with `x_out` is unrepresentable in safe Rust rather than
+  checked at runtime.
+- The refined paths also lost an internal allocation: the caller's `x_out` is
+  now the best-iterate storage, and the multi-RHS refiner runs its initial
+  batched solve directly into it.
+
 ### Fixed — the solve core no longer depends on the host's core count (issue #177)
 
 - `Solver::solve_refined` and `solve_many_refined` now choose between the
