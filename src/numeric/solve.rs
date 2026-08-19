@@ -736,10 +736,17 @@ struct CbTaskPlan {
     pending_fwd: Vec<usize>,
     /// Whether each node is a task root.
     is_task_root: Vec<bool>,
+    /// The shape half of the gate — [`cb_gate_shape`] on this plan's
+    /// terms. Recorded so `cb_core_profitable_matches_the_plan_gate` can
+    /// pin it against the flat reimplementation that decides the *core*
+    /// (issue #177); `worthwhile` is this **and** the overhead half.
+    #[cfg(test)]
+    shape_ok: bool,
     /// Whether tree-parallel *execution* is expected to beat running the
-    /// same CB core serially: at least two independent task roots, and no
-    /// single task root's serial share dominates (Amdahl), and enough
-    /// total work to amortize the O(threads·n) scratch setup.
+    /// same CB core serially: the shape terms of [`cb_gate_shape`] —
+    /// at least two independent task roots, enough total work, no single
+    /// task root's serial share dominating (Amdahl) — **and** the
+    /// per-front overhead term of [`cb_sync_amortized`] (issue #175).
     ///
     /// Issue #177: this gates `cb_run_parallel` vs `cb_run_serial` only —
     /// two byte-identical cores. It must never be used to choose between
@@ -757,6 +764,56 @@ const MIN_TOTAL_COST: u64 = 1_000_000;
 /// itself, parallel overhead dominates whatever the rest of the tree does
 /// (e.g. an arrow front whose huge root front is one serial task).
 const MAX_LOCAL_SHARE: f64 = 0.7;
+
+/// Minimum average work per **front**, in `own_cost` units
+/// (`nrow·(nelim+1)`), for tree-parallel execution to pay — about an 8×8
+/// front (issue #175).
+///
+/// `cb_run_parallel` pays a fixed synchronization cost *per front*: the
+/// shared `contribs` mutex is taken once per child drained and once to
+/// store the front's own block, inside the per-front loop. That cost
+/// scales with the number of supernodes, while [`MIN_TOTAL_COST`] is a
+/// floor on *total* work — so a wide, extremely sparse tree can clear
+/// every shape term and still spend the solve synchronizing. That is
+/// what #175 reports on the Mittelmann KKT `NARX_CFy`: 45,736
+/// supernodes, Lagrangian Hessian nnz 19,851, ~30 cost units per front,
+/// 15% of the IPM run and ~3.0M involuntary context switches lost to the
+/// tree-parallel solve on a 14-core host.
+///
+/// 64 is the measured break-even (4-core container, pooled CB core,
+/// serial vs tree-parallel at 2/4/8 workers, geometric mean over two
+/// runs — `issue175_cb_gate_calibration` reproduces it):
+///
+/// | work/front | 25 | 28 | 53 | 74 | 103 | 202 | 235 | 305 |
+/// |---|---:|---:|---:|---:|---:|---:|---:|---:|
+/// | par/ser | 1.08 | 1.02 | 0.98 | 0.91 | 0.81 | 0.73 | 0.75 | 0.63 |
+///
+/// Everything at or below 53 is a wash or a loss; everything at or above
+/// 74 pays. See `dev/research/issue-175-cb-solve-gate-overhead.md`.
+const MIN_COST_PER_FRONT: u64 = 64;
+
+/// The shape half of the CB gate: at least two independent task roots,
+/// enough total work to amortize the `O(threads·n)` scratch setup, and no
+/// single task root's serial share dominating the tree (Amdahl).
+///
+/// Shared by [`CbTaskPlan::worthwhile`] (scheduling) and
+/// [`cb_core_profitable`] (core choice, host-independent) so the two
+/// cannot drift; the overhead half below is scheduling-only.
+#[inline]
+fn cb_gate_shape(fwd_seeds: usize, total: u64, max_local: u64) -> bool {
+    fwd_seeds >= 2 && total >= MIN_TOTAL_COST && (max_local as f64) < MAX_LOCAL_SHARE * total as f64
+}
+
+/// The overhead half of the CB gate (issue #175): is there enough work
+/// per front to amortize `cb_run_parallel`'s per-front synchronization?
+///
+/// Scheduling-only. `cb_core_profitable` must **not** consult this: it
+/// chooses between two numerically distinct cores, and the two answers
+/// this predicate separates are byte-identical (issue #177).
+#[inline]
+fn cb_sync_amortized(total: u64, n_nodes: usize) -> bool {
+    total >= MIN_COST_PER_FRONT.saturating_mul(n_nodes as u64)
+}
 
 /// Reference fan-out for the host-independent coarsening (issue #177):
 /// 16 task roots per worker on a canonical 4-worker host. Used only to
@@ -887,9 +944,11 @@ impl CbTaskPlan {
             }
             max_local = max_local.max(local);
         }
-        let worthwhile = fwd_seeds.len() >= 2
-            && total >= MIN_TOTAL_COST
-            && (max_local as f64) < MAX_LOCAL_SHARE * (total as f64);
+        let shape_ok = cb_gate_shape(fwd_seeds.len(), total, max_local);
+        // Issue #175: the shape terms alone accept wide, extremely sparse
+        // trees whose fronts are too small to pay for the per-front
+        // synchronization `cb_run_parallel` does.
+        let worthwhile = shape_ok && cb_sync_amortized(total, n_nodes);
 
         CbTaskPlan {
             owned,
@@ -898,6 +957,8 @@ impl CbTaskPlan {
             tr_children,
             pending_fwd,
             is_task_root,
+            #[cfg(test)]
+            shape_ok,
             worthwhile,
         }
     }
@@ -911,7 +972,14 @@ impl CbTaskPlan {
 /// anything the host controls. This builds the coarsening at the fixed
 /// [`CB_REFERENCE_FANOUT`] granularity — never from
 /// `rayon::current_num_threads()` and never from `FERAL_CB_THRESH` — and
-/// applies the same three-part test `CbTaskPlan::worthwhile` uses.
+/// applies [`cb_gate_shape`], the shape half of `CbTaskPlan`'s gate.
+///
+/// Issue #175 added a second, scheduling-only half
+/// ([`cb_sync_amortized`]) to `CbTaskPlan::worthwhile`. It is
+/// deliberately **not** applied here: it separates two byte-identical
+/// executions of one core, whereas this predicate separates two cores
+/// with different arithmetic, so folding it in would silently change
+/// which reassociation wide-sparse factors solve with.
 ///
 /// Measured on this repo's fixtures (4 workers, refined solve, time
 /// relative to the shared-vector core): the CB core costs 1.27–1.86x on
@@ -976,7 +1044,7 @@ fn cb_core_profitable(factors: &SparseFactors) -> bool {
         }
         max_local = max_local.max(local[t]);
     }
-    fwd_seeds >= 2 && total >= MIN_TOTAL_COST && (max_local as f64) < MAX_LOCAL_SHARE * total as f64
+    cb_gate_shape(fwd_seeds, total, max_local)
 }
 
 /// Shared, read-only context threaded through the CB solve tasks.
@@ -2754,7 +2822,8 @@ fn norm2(v: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dense::factor::{BunchKaufmanParams, ZeroPivotAction};
+    use crate::dense::factor::{BunchKaufmanParams, FrontalFactors, ZeroPivotAction};
+    use crate::inertia::Inertia;
     use crate::numeric::factorize::factorize_multifrontal;
     use crate::sparse::csc::CscMatrix;
     use crate::symbolic::{symbolic_factorize, SupernodeParams};
@@ -2764,6 +2833,329 @@ mod tests {
             on_zero_pivot: ZeroPivotAction::ForceAccept,
             ..BunchKaufmanParams::default()
         })
+    }
+
+    // ---- Issue #175: the tree-parallel solve gate ---------------------
+    // Fixtures and the calibration harness that set `MIN_COST_PER_FRONT`,
+    // plus the regression tests that pin what it rejects.
+    /// NARX-shaped proxy (issue #175): `blocks` independent dynamic-
+    /// system KKT blocks, each a `steps`-long chain of `width`-wide
+    /// states with one equality constraint per step and a near-empty
+    /// Hessian, joined by one light coupling row. `width` sets the
+    /// frontal size, i.e. the work each front does per unit of
+    /// synchronization — the axis issue #175 is about.
+    fn narx_proxy(blocks: usize, steps: usize, width: usize) -> CscMatrix {
+        let per_step = width + 1; // `width` states + one multiplier
+        let per_block = per_step * steps;
+        let n = blocks * per_block + 1;
+        let link = n - 1;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        let mut push = |r: usize, c: usize, v: f64| {
+            let (r, c) = if r >= c { (r, c) } else { (c, r) };
+            rows.push(r);
+            cols.push(c);
+            vals.push(v);
+        };
+        for b in 0..blocks {
+            let base = b * per_block;
+            for t in 0..steps {
+                let x0 = base + t * per_step;
+                let y = x0 + width;
+                for i in 0..width {
+                    for j in 0..=i {
+                        push(x0 + i, x0 + j, if i == j { 1e-2 } else { 1e-3 });
+                    }
+                    push(y, x0 + i, 1.0 + i as f64 * 0.1);
+                    if t + 1 < steps {
+                        push(y, x0 + per_step + i, -0.9);
+                    }
+                }
+                push(y, y, -1e-8);
+            }
+            push(link, base, 0.25);
+        }
+        push(link, link, 1.0);
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    fn poisson_grid(k: usize) -> CscMatrix {
+        let n = k * k;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..k {
+            for i in 0..k {
+                let p = j * k + i;
+                rows.push(p);
+                cols.push(p);
+                vals.push(4.0);
+                if i + 1 < k {
+                    rows.push(p + 1);
+                    cols.push(p);
+                    vals.push(-1.0);
+                }
+                if j + 1 < k {
+                    rows.push(p + k);
+                    cols.push(p);
+                    vals.push(-1.0);
+                }
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    /// A `NodeFactors` carrying only what the coarsening reads —
+    /// `frontal_factors.{nrow, nelim}` — so a tree with tens of
+    /// thousands of fronts can be built in microseconds. Factoring a
+    /// real matrix with 45k supernodes takes minutes in a debug build,
+    /// and the gate is a pure function of the tree shape and these two
+    /// numbers (`own_cost = nrow·(nelim+1)`).
+    fn synthetic_node(nrow: usize, nelim: usize) -> NodeFactors {
+        NodeFactors {
+            first_col: 0,
+            ncol: nelim,
+            nelim,
+            n_delayed_in: 0,
+            nrow,
+            row_indices: Vec::new(),
+            frontal_factors: FrontalFactors {
+                nrow,
+                ncol: nelim,
+                nelim,
+                l: Vec::new(),
+                d_diag: Vec::new(),
+                d_subdiag: Vec::new(),
+                perm: Vec::new(),
+                perm_inv: Vec::new(),
+                contrib: Vec::new(),
+                contrib_dim: nrow - nelim,
+                n_delayed: 0,
+                inertia: Inertia::new(0, 0, 0),
+                needs_refinement: false,
+                n_rook_rescues: 0,
+                n_tiny: 0,
+                zero_tol: 0.0,
+                zero_tol_2x2: 0.0,
+            },
+            inertia: Inertia::new(0, 0, 0),
+        }
+    }
+
+    /// `branches` independent chains of `per_branch` identical fronts
+    /// under one root — postorder, so children precede parents. The
+    /// shape of a wide, extremely sparse assembly tree: many independent
+    /// subtrees, no single one dominating, every front the same size.
+    fn wide_thin_plan(
+        branches: usize,
+        per_branch: usize,
+        nrow: usize,
+        nelim: usize,
+    ) -> (CbTaskPlan, u64, usize) {
+        let n_nodes = branches * per_branch + 1;
+        let root = n_nodes - 1;
+        let mut parents: Vec<Option<usize>> = vec![None; n_nodes];
+        for b in 0..branches {
+            let base = b * per_branch;
+            for k in 0..per_branch {
+                // within a branch, node `base + k` feeds `base + k + 1`
+                parents[base + k] = Some(if k + 1 < per_branch {
+                    base + k + 1
+                } else {
+                    root
+                });
+            }
+        }
+        let nodes: Vec<NodeFactors> = (0..n_nodes).map(|_| synthetic_node(nrow, nelim)).collect();
+        let children = build_children(&parents, n_nodes);
+        let plan = CbTaskPlan::build_with_threshold(
+            &children,
+            &parents,
+            &nodes,
+            n_nodes,
+            CbThreshold::Reference,
+        );
+        let total = (n_nodes as u64) * (nrow as u64) * (nelim as u64 + 1);
+        (plan, total, n_nodes)
+    }
+
+    /// Issue #175: a wide, extremely sparse tree — the `NARX_CFy` shape,
+    /// 45,736 supernodes at ~30 cost units per front — clears every
+    /// *shape* term of the gate (11+ independent seeds, well over
+    /// `MIN_TOTAL_COST` of work, no dominant subtree) and still loses
+    /// 15% of an IPM run to per-front synchronization when scheduled
+    /// over the pool. The overhead term must reject it.
+    #[test]
+    fn issue175_wide_thin_tree_is_not_scheduled_in_parallel() {
+        // 16 branches x 2858 fronts of nrow 6 / nelim 4 = 30 units each.
+        let (plan, total, n_nodes) = wide_thin_plan(16, 2858, 6, 4);
+
+        // Non-vacuity: this is exactly the tree the pre-#175 gate liked.
+        assert!(
+            plan.shape_ok,
+            "fixture must pass the shape half (seeds {}, total {total}) — \
+             otherwise it is not the overhead term doing the rejecting",
+            plan.fwd_seeds.len()
+        );
+        assert!(
+            plan.fwd_seeds.len() >= 2 && total >= MIN_TOTAL_COST,
+            "fixture lost its shape: seeds {}, total {total}",
+            plan.fwd_seeds.len()
+        );
+        // ...and it is thin: 30 units per front, under the 64 floor.
+        assert!(
+            total / (n_nodes as u64) < MIN_COST_PER_FRONT,
+            "fixture must be thinner than the floor: {} units/front",
+            total / (n_nodes as u64)
+        );
+        assert!(
+            !plan.worthwhile,
+            "wide-thin tree ({} units/front, {n_nodes} fronts) was scheduled \
+             in parallel — issue #175 regression",
+            total / (n_nodes as u64)
+        );
+    }
+
+    /// The complement of the test above: the same wide tree with fronts
+    /// big enough to amortize the synchronization stays parallel. Guards
+    /// against #175's fix degenerating into "never schedule in
+    /// parallel", which would forfeit the 25-37% tree-parallel win
+    /// measured on bushy factors.
+    #[test]
+    fn issue175_wide_tree_with_real_fronts_still_schedules_in_parallel() {
+        // Same 16-way tree, fronts of nrow 16 / nelim 15 = 256 units —
+        // the poisson_160 end of the calibration table (235 units/front,
+        // par/ser 0.75).
+        let (plan, total, n_nodes) = wide_thin_plan(16, 400, 16, 15);
+        assert!(
+            total / (n_nodes as u64) >= MIN_COST_PER_FRONT,
+            "fixture must be fatter than the floor: {} units/front",
+            total / (n_nodes as u64)
+        );
+        assert!(
+            plan.worthwhile,
+            "bushy tree ({} units/front, {} seeds) must still be scheduled \
+             in parallel",
+            total / n_nodes as u64,
+            plan.fwd_seeds.len()
+        );
+    }
+
+    /// Issue #175's term is a *scheduling* term: it may not reach the
+    /// predicate that picks the numerical core (issue #177), or the same
+    /// factor would solve with different arithmetic depending on how
+    /// thin its tree is. Pinned on the scalar rule: the shape half is
+    /// what `cb_core_profitable` applies, and it ignores front size.
+    #[test]
+    fn issue175_overhead_term_is_scheduling_only() {
+        let (thin, total, n_nodes) = wide_thin_plan(16, 2858, 6, 4);
+        assert!(!thin.worthwhile && thin.shape_ok);
+        // The core-choice half sees the same tree as profitable, whatever
+        // the front size, because both cores are equally available to it.
+        let max_local = total / 800;
+        assert!(
+            cb_gate_shape(thin.fwd_seeds.len(), total, max_local),
+            "the shape half must not have picked up the per-front term"
+        );
+        assert!(!cb_sync_amortized(total, n_nodes));
+        assert!(cb_sync_amortized(
+            total,
+            (total / MIN_COST_PER_FRONT) as usize
+        ));
+    }
+
+    /// Calibration harness for `MIN_COST_PER_FRONT`, not an assertion.
+    /// Run with `cargo test --release -- --ignored --nocapture issue175`.
+    /// Prints, per fixture, the gate's terms next to the measured serial
+    /// and tree-parallel times of the *pooled* CB core — the choice
+    /// `worthwhile` actually makes — over rayon pools of 1/2/4/8
+    /// workers. Kept in-tree so the constant can be re-derived on
+    /// another host; the numbers this produced are in
+    /// `dev/research/issue-175-cb-solve-gate-overhead.md`.
+    #[test]
+    #[ignore = "calibration harness (issue #175), not an assertion"]
+    fn issue175_cb_gate_calibration() {
+        let reps: usize = std::env::var("FERAL_CALIB_REPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+        let fixtures = [
+            ("poisson_96", poisson_grid(96)),
+            ("poisson_160", poisson_grid(160)),
+            ("narx_w1", narx_proxy(24, 2000, 1)),
+            ("narx_w2", narx_proxy(24, 1300, 2)),
+            ("narx_w3", narx_proxy(24, 1000, 3)),
+            ("narx_w4", narx_proxy(24, 800, 4)),
+            ("narx_w6", narx_proxy(24, 570, 6)),
+            ("narx_w8", narx_proxy(24, 440, 8)),
+        ];
+        println!(
+            "{:<15} {:>3} {:>7} {:>8} {:>10} {:>6} {:>6} {:>8} {:>9} {:>9} {:>7}",
+            "fixture",
+            "w",
+            "n",
+            "nodes",
+            "total",
+            "roots",
+            "seeds",
+            "tot/node",
+            "ser_us",
+            "par_us",
+            "par/ser"
+        );
+        for (label, m) in fixtures.iter() {
+            let sym = symbolic_factorize(m, &SupernodeParams::default()).unwrap();
+            let (factors, _) = factorize_multifrontal(m, &sym, &make_params()).unwrap();
+            let n = m.n;
+            let b: Vec<f64> = (0..n).map(|i| 1.0 + 0.37 * (i % 7) as f64).collect();
+            for w in [1usize, 2, 4, 8] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(w)
+                    .build()
+                    .unwrap();
+                pool.install(|| {
+                    let mut x = vec![0.0; n];
+                    let mut ws = CbSolveWorkspace::for_factors(&factors);
+                    let roots = ws.plan.is_task_root.iter().filter(|b| **b).count();
+                    let seeds = ws.plan.fwd_seeds.len();
+                    let nodes = factors.node_factors.len();
+                    let total: u64 = factors
+                        .node_factors
+                        .iter()
+                        .map(|nd| {
+                            (nd.frontal_factors.nrow as u64)
+                                .saturating_mul(nd.frontal_factors.nelim as u64 + 1)
+                        })
+                        .sum();
+                    let time = |ws: &mut CbSolveWorkspace, par: bool, x: &mut [f64]| -> f64 {
+                        ws.plan.worthwhile = par;
+                        ws.solve_into(&factors, &b, x, true);
+                        let mut best = f64::INFINITY;
+                        for _ in 0..reps {
+                            let t0 = std::time::Instant::now();
+                            ws.solve_into(&factors, &b, x, true);
+                            best = best.min(t0.elapsed().as_secs_f64() * 1e6);
+                        }
+                        best
+                    };
+                    let ser = time(&mut ws, false, &mut x);
+                    let par = time(&mut ws, true, &mut x);
+                    let ser = ser.min(time(&mut ws, false, &mut x));
+                    let par = par.min(time(&mut ws, true, &mut x));
+                    println!(
+                        "{:<15} {:>3} {:>7} {:>8} {:>10} {:>6} {:>6} {:>8} {:>9.1} {:>9.1} {:>7.2}",
+                        label,
+                        w,
+                        n,
+                        nodes,
+                        total,
+                        roots,
+                        seeds,
+                        total / nodes.max(1) as u64,
+                        ser,
+                        par,
+                        par / ser
+                    );
+                });
+            }
+        }
     }
 
     fn check_solve(m: &CscMatrix, rhs: &[f64], tol: f64) {
@@ -3337,6 +3729,12 @@ mod tests {
     /// allocations cost more than a whole chain solve. Two
     /// implementations of one rule can drift, so pin them together
     /// across tree shapes that land on both sides of the gate.
+    ///
+    /// The rule they share is the *shape* half (`cb_gate_shape`). Issue
+    /// #175's per-front overhead term belongs to `worthwhile` alone —
+    /// it decides between two byte-identical executions, not between two
+    /// cores — so it is `shape_ok`, not `worthwhile`, that is pinned
+    /// here.
     #[test]
     fn cb_core_profitable_matches_the_plan_gate() {
         let mut checked_true = false;
@@ -3362,9 +3760,9 @@ mod tests {
             );
             let flat = cb_core_profitable(&factors);
             assert_eq!(
-                flat, plan.worthwhile,
+                flat, plan.shape_ok,
                 "n={}: flat predicate says {flat}, CbTaskPlan says {}",
-                m.n, plan.worthwhile
+                m.n, plan.shape_ok
             );
             checked_true |= flat;
             checked_false |= !flat;

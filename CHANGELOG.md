@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)
+
+- **What changed.** `CbTaskPlan::worthwhile`, the predicate that chooses
+  tree-parallel over serial execution of the contribution-block solve core
+  (issue #131 Gap A), gains a per-front overhead term: a factor is scheduled
+  over the rayon pool only when its fronts average at least 64
+  `nrow·(nelim+1)` cost units. Its three previous terms were all properties of
+  the tree's *shape* — seed count, total work, Amdahl share — and none of them
+  modelled the cost the parallel core pays *per front*.
+- **Why.** `cb_run_parallel` takes a shared mutex inside its per-front loop, so
+  its overhead scales with the supernode count while the work available to hide
+  it scales with the total flops. A wide, extremely sparse KKT clears every
+  shape term and still loses: on the Mittelmann `NARX_CFy` (45,736 supernodes,
+  Lagrangian Hessian nnz 19,851) under an interior-point host on 14 cores, the
+  tree-parallel solve cost **15% of the run** (7.35 s of 49.41 s) and ~3.0M
+  involuntary context switches. Locally reproduced at up to 1.42x on a 4-core
+  container.
+- **Nothing numerical changes.** The gate picks between two byte-identical
+  executions of one core; the predicate that picks the *core* — and so the
+  arithmetic — is unchanged on every matrix (issue #177's host-independence
+  contract holds). Bushy factors still take the tree-parallel path and keep
+  their measured 25–37% win.
+
 ### Added — caller-capped iterative refinement and in-place solves (issue #178)
 
 - **`RefineOptions`** makes the refinement step budget a per-call parameter.
