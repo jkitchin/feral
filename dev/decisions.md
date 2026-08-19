@@ -6754,3 +6754,70 @@ Evidence: issue #178; pounce#698 Observation 5;
 `dev/research/refinement-cap-2026-08-19.md`;
 `dev/plans/issue-178-refine-cap-and-inplace.md`;
 `dev/journal/2026-08-19-01.org`; `tests/issue178_refine_cap.rs`.
+
+## 2026-08-19 — The solve core is a function of the factor, not of the host (issue #177)
+
+feral has two numerically distinct sparse solve cores. The
+shared-global-vector core (`solve_sparse_core_into`) folds each front's
+separator update into a global vector in flat postorder. The
+contribution-block core of issue #131 Gap A (`cb_forward_front`)
+assembles each front's RHS from its children's contribution blocks,
+summed in ascending child order — a subtree sum tree. Each is a valid
+reassociation of the other, and they differ in the last bits by design.
+That was known and documented; it is not what is being decided here.
+
+**Decision: which of the two cores runs is determined by the factor's
+structure alone. The host — core count, thread-pool availability,
+`use_parallel`, `FERAL_CB_THRESH` — may choose only the execution
+schedule, and every schedule produces identical bits.**
+
+Before this, `Solver::solve_refined` chose the core from
+`CbSolveWorkspace::worthwhile()`, a predicate derived from
+`rayon::current_num_threads()` and overridable by `FERAL_CB_THRESH`;
+`Solver` also fell back to the shared-vector core whenever
+`ThreadPoolBuilder::build()` had failed, and `use_parallel` itself
+defaults from `available_parallelism() > 1`. Three separate routes ran
+from the host's core count into the arithmetic. Issue #16 established
+that a ULP difference here is amplified by the IPM host's filter line
+search into trajectory-level outcomes (141 vs 888 outer iterations on
+qcqp1000-1nc), so this was not a cosmetic difference: the same feral,
+same matrix, same POUNCE build solved along different iterate paths on
+machines with different core counts. Reported on henon120 in #177.
+
+Mechanism: `cb_core_profitable(factors)` applies the same three-part
+gate `CbTaskPlan::worthwhile` uses (at least two independent task roots,
+`total >= MIN_TOTAL_COST`, no task root holding more than
+`MAX_LOCAL_SHARE` of the work), but coarsens at a fixed
+`CB_REFERENCE_FANOUT = 64` granularity instead of a worker-derived one.
+`SolveCore::Auto` consults it. `CbTaskPlan` keeps its worker-derived
+threshold for scheduling.
+
+Rejected alternatives, and why:
+
+- *Make the CB core bit-identical to the shared-vector core.* Would
+  require the CB forward to fold contributions in postorder-of-source-
+  front, but it folds a grandchild's block into its child's block before
+  that block reaches the parent. Matching the flat postorder means
+  abandoning the subtree grouping, i.e. the parallelism itself.
+
+- *Always use the CB core when parallelism is requested.* Correct and
+  simple, but measured 1.08-1.86x slower than the shared-vector core on
+  every factor the gate rejects (path-like chains, small grids), where
+  the CB core wins nothing — its only measured win is 0.72x on
+  poisson_160 at 4 workers. It also fails to close the issue, since
+  `use_parallel` is itself defaulted from the host's core count.
+
+- *Retire the CB core, or make it opt-in only.* Restores determinism at
+  zero cost on rejected trees, but forfeits issue #131 Gap A's actual
+  win (25% on the bushy factors where tree-parallel solve pays).
+
+Accepted cost: on a factor the predicate routes to the CB core, a host
+that cannot spawn workers now pays ~1.10x on the refined solve
+(poisson_160: 27.8 ms shared-vector, 30.6 ms CB-serial), where before it
+would have silently taken the shared-vector core and a different answer.
+Factors the predicate rejects are unchanged, at 1.00-1.03x.
+
+Evidence: issue #177; `dev/journal/2026-08-19-01.org`;
+`tests/refined_solve_core_stability.rs` (fails at 6fb9d26 with 24295 of
+25600 entries differing between the pooled and pool-less arms);
+`tests/cb_core_choice_ignores_env.rs`.

@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-19T13:38:18Z
+Generated: 2026-08-19T15:29:43Z
 
 ## Latest Session
-File: dev/sessions/2026-08-19-01.md
+File: dev/sessions/2026-08-19-02.md
 ```
-# Session 2026-08-19-01
+# Session 2026-08-19-02
 
-## BENCHMARK NOT COMPARABLE THIS SESSION — corpus absent
+## BENCHMARK NUMBERS ARE NOT COMPARABLE TO LAST SESSION
 
-Reported first, per the hard rule in CLAUDE.md, because the honest
-statement is "not measured", not "unchanged".
+Reported first, per the hard rule in CLAUDE.md.
 
-`cargo run --bin bench --release` ran to completion, but
-`data/benchmark-config.toml` is **not present in this container**, so the
-harness fell back to its 8 synthetic matrices. Both Phase 2.8.1 exit
-partitions report `count = 0`, verdict `N/A`:
+`cargo run --bin bench --release` in this container found only the 8
+synthetic matrices; the external corpus and the MUMPS/SPRAL oracle
+timings are not present. Both Phase 2.8.1 exit partitions therefore
+report `N/A` rather than a p90:
 
-    partition                 count   p90   target  verdict
-    dense  small-frontal (<200)   0     -    <= 2.0    N/A
-    dense  medium (<500)          0     -    <= 3.0    N/A
-    sparse small-frontal (<200)   0     -    <= 2.0    N/A
-    sparse medium (<500)          0     -    <= 3.0    N/A
+    --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+    bucket                    count      p90     target  verdict
+    small-frontal (<200)          0        -     <= 2.0      N/A
+    medium (<500)                 0        -     <= 3.0      N/A
 
-There is therefore **no comparison against 2026-08-15-02's numbers**
-(1.61 / 2.00 / 1.67 / 1.67). Not a regression and not an improvement —
-not measured. What did run passed: 2/2 inertia match vs MUMPS, 2/2
-residual pass, worst residual 1.26e-16 (densecol_kkt_300_0000).
+**No comparison against 2026-08-15-02's 1.61 / 2.00 / 1.67 / 1.67 is
+possible from this run.** I am not claiming the numbers held; I am
+saying they were not measured. A session with the corpus mounted should
+re-run the partition before reading anything into it.
 
-The changes this session are additive API surface with `Default`-valued
-wrappers proven bit-identical to the previous entry points, so the
-factor-ratio partitions are not expected to move; but "not expected to
-move" is a prediction, not a measurement, and it should be checked on a
-machine that has the corpus.
+What the run does confirm: correctness is intact on what it could see —
+inertia 2/2 vs MUMPS, residual 2/2, worst residual 1.26e-16.
+
+This is also the wrong benchmark for this change, which touches the
+*solve* path and not the factor path. The relevant measurements are in
+"Benchmark Results" below.
 
 ## Goal
 
-Fix [issue #178](https://github.com/jkitchin/feral/issues/178), filed
-from [pounce#698](https://github.com/jkitchin/pounce/issues/698). Two
-independent asks:
-
-1. A caller-supplied cap on iterative-refinement correction steps. An
-   interior-point host runs its own refinement loop over the same
-   augmented system, so FERAL's inner 10-step budget is work whose
-   residual nobody consults — measured at 60 % of back-solve time on a
-   118 276-dimension KKT system.
-2. In-place (`*_into`) solve entry points, so a host that owns its
-   right-hand-side buffer stops paying an allocation plus copy-back per
-   back-solve.
+Fix issue #177 — "parallel solve is not bit-identical to serial on
+henon120, breaking #131's stated contract".
 
 ## Accomplished
 
-Both, plus the research note and plan the lifecycle requires.
+### The report is real, but not the bug it looks like
 
-### Item 1 — `RefineOptions`
+The reporter compared two runs that differed only in `FERAL_CB_THRESH`,
+held the factorization sequential to rule out #16, and found the two
+parallel runs bit-identical to each other but not to the "serial" one.
+They concluded there was a fixed ordering difference in the parallel
+path — "findable deterministically".
 
+There is no such ordering difference. feral has **two numerically
+distinct solve cores**:
+
+- `solve_sparse_core_into` — folds each front's separator update into a
+  global vector in flat postorder;
+- the contribution-block core (#131 Gap A) — assembles each front's RHS
+  from its children's contribution blocks, summed in ascending child
 ```
 
 ## Git Status
 ```
-22765f6 docs(changelog): record the issue #178 refinement cap and in-place solves
-ae169f9 feat(solver): capped and in-place solve entry points on Solver
-f23137b feat(solve): make the refinement step budget a per-call option
-eeee52a docs: research note and plan for a caller-capped refiner (issue #178)
+c154c92 docs: session checkpoint 2026-08-19-01 (#177 fixed)
+b75da82 test(solve): pin the refined solve's arithmetic against the host (#177)
+3cafe57 fix(solve): choose the solve core from the factor, not the host (#177)
 6fb9d26 Merge pull request #174 from jkitchin/feat/scaling-router-invariance
+d00666a docs: session checkpoint 2026-08-15-02 (KIRBY2 localized, #153 closed)
 ```
 
 ## Test Status
@@ -82,38 +82,41 @@ test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 425 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.54s
+test result: ok. 428 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 3.11s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-02.md)
 
 
-FERAL benchmark harness
-  ordering: default (symbolic_factorize heuristic)
-  scaling: default (SupernodeParams::default)
-Loading matrices from data/benchmark-config.toml ... not found
+Refined solve, best of 7, 4 workers, microseconds. This is the
+measurement the change is about; the `bench` binary's factor-ratio
+partitions are unrelated to it and were unavailable anyway (see the
+top of this file).
 
-name                n   factor(μs)    solve(μs)        inertia
---------------------------------------------------------------
-spd_10             10           21            1     (10, 0, 0)
-spd_50             50           45            2     (50, 0, 0)
-spd_100           100          220            5    (100, 0, 0)
-spd_200           200          926           41    (200, 0, 0)
-kkt_10_3           13            5            0     (10, 3, 0)
-kkt_30_10          40           31            1    (30, 10, 0)
-kkt_50_15          65           89            2    (50, 15, 0)
-kkt_100_30        130          339            7   (100, 30, 0)
+    matrix        n      shared-vector  auto-serial     auto-par(4)
+    chain_400     400         22.3      22.9 (1.03x)   22.9 (1.03x)
+    chain_2000    2000       112.9     114.8 (1.02x)  114.6 (1.01x)
+    chain_20000   20000     1276.3    1276.8 (1.00x) 1272.0 (1.00x)
+    poisson_40    1600       642.2     657.1 (1.02x)  691.8 (1.08x)
+    poisson_96    9216      4549.3    4612.6 (1.01x) 4631.5 (1.02x)
+    poisson_160   25600    27761.6   30632.9 (1.10x) 20763.6 (0.75x)
+
+Factors the predicate rejects are at parity (1.00-1.03x). On the one
+factor it routes to the CB core, a host with no workers pays ~1.10x for
+the determinism and a 4-worker host gains 25%.
+
+The `bench` binary run for this session:
 
 8 matrices benchmarked
-
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+2 KKT matrices total
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
   Worst residual: 1.14e-15 (densecol_kkt_300_0000)
@@ -123,6 +126,9 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
@@ -137,58 +143,58 @@ medium (<500)                 0        -     <= 3.0      N/A
 ```
 
 ## Recent Decisions
-measurement above: pounce defaults `feral_refine` to *on* for a
-documented case (`pinene_3200`) whose IPM tail stalls when the residual
-floor left by cascade-break's L-factor perturbation goes uncorrected.
-Zero steps loses that case. So the problem was never that 10 is too
-many — it is that 10 and 0 were the only two values expressible. The
-value that plausibly serves both is 1, and nobody could ask for it.
 
-Two semantics follow from "cap, not target", and both are tested rather
-than merely documented. The existing exits — the `ε·√n` relative
-residual, the 100× divergence guard, the 2-strike plateau — keep
-priority, so raising `max_steps` can never add work to a system that has
-already converged. And the best-iterate contract holds under every value,
-so no cap can return an answer worse than `solve_sparse`'s.
+Rejected alternatives, and why:
 
-`max_steps = 0` returns before the residual matvec rather than after. The
-answer would be identical either way; the cost would not, and a caller
-opting out of refinement paying a `symv` and a `norm2` per solve would
-address only half of what was reported.
+- *Make the CB core bit-identical to the shared-vector core.* Would
+  require the CB forward to fold contributions in postorder-of-source-
+  front, but it folds a grandchild's block into its child's block before
+  that block reaches the parent. Matching the flat postorder means
+  abandoning the subtree grouping, i.e. the parallelism itself.
 
-Measured on this branch (20 reps, release, single trial): on
-VESUVIO_0021, a pounce KKT that uses 4 corrections, the refined solve is
-7.31× the bare solve at the default and 3.07× at `k = 1`; `k = 0` is
-1.03×, i.e. inside the bare solve's own noise. The 2.4× per-call
-reduction is the same direction and rough magnitude as pounce#698's
-independently measured 2.6× per-iteration back-solve reduction.
+- *Always use the CB core when parallelism is requested.* Correct and
+  simple, but measured 1.08-1.86x slower than the shared-vector core on
+  every factor the gate rejects (path-like chains, small grids), where
+  the CB core wins nothing — its only measured win is 0.72x on
+  poisson_160 at 4 workers. It also fails to close the issue, since
+  `use_parallel` is itself defaulted from the host's core count.
 
-Evidence: issue #178; pounce#698 Observation 5;
-`dev/research/refinement-cap-2026-08-19.md`;
-`dev/plans/issue-178-refine-cap-and-inplace.md`;
-`dev/journal/2026-08-19-01.org`; `tests/issue178_refine_cap.rs`.
+- *Retire the CB core, or make it opt-in only.* Restores determinism at
+  zero cost on rejected trees, but forfeits issue #131 Gap A's actual
+  win (25% on the bushy factors where tree-parallel solve pays).
+
+Accepted cost: on a factor the predicate routes to the CB core, a host
+that cannot spawn workers now pays ~1.10x on the refined solve
+(poisson_160: 27.8 ms shared-vector, 30.6 ms CB-serial), where before it
+would have silently taken the shared-vector core and a different answer.
+Factors the predicate rejects are unchanged, at 1.00-1.03x.
+
+Evidence: issue #177; `dev/journal/2026-08-19-01.org`;
+`tests/refined_solve_core_stability.rs` (fails at 6fb9d26 with 24295 of
+25600 entries differing between the pooled and pool-less arms);
+`tests/cb_core_choice_ignores_env.rs`.
 
 ## Recent Tried-and-Rejected
-**Refuted by measurement.** `diag_symbolic_stages_argv` on
-KIRBY2_0007:
 
-    TOTAL 1182 us
-      ldlt_compress   972   82.2%
-      renumber         57    4.8%
-      ordering         32    2.7%
+**Rejected on measurement.** The predicate runs on every refined solve,
+including the ones it rejects, and `CbTaskPlan::build` allocates three
+`Vec<Vec<usize>>` of length `n_nodes` (`build_children`, `owned`,
+`tr_children`). Cost of the verdict alone, versus the shared-vector
+baseline it was supposed to preserve:
 
-Ordering is 32 us — 2.7% of symbolic and ~3% of the reported
-`factor_us`. Eliminating AMD cost entirely could not move the ratio.
-The cost is `ldlt_compress` (the MC64 matching feeding Duff-Pralet
-compression), which is a different subsystem from the one the
-hypothesis named.
+    chain_400     1.29x
+    chain_2000    1.27x
+    chain_20000   1.24x
 
-A second prediction in the same hypothesis — that feral was producing
-more fill than MUMPS — is also refuted: the numeric driver is 127 us
-and `num_c ~ num_n` (149 vs 143 us), so the factorization is not the
-problem in either time or fill.
+That is the same 1.24-1.29x the design existed to avoid — the predicate
+cost as much as the core it was declining. Replaced by a flat
+`O(n_nodes)` computation (four `Vec`s of scalars, subtree costs folded
+into parents using the postorder guarantee, no child lists), which
+brings the rejected trees back to 1.00-1.03x.
 
-Superseded by `dev/research/ldlt-compress-cost-benefit-2026-08-15.md`.
+The cost of that replacement is a second implementation of one gate.
+`cb_core_profitable_matches_the_plan_gate` pins the two together across
+six fixtures landing on both sides of the gate.
 
 ## Source Files
 ```
@@ -258,6 +264,7 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
+tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
 tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
@@ -327,6 +334,7 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
+tests/refined_solve_core_stability.rs
 tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
@@ -340,4 +348,5 @@ tests/symbolic_profiler.rs
 tests/task_plan_parity.rs
 tests/threshold_consistency.rs
 tests/tiny_fast_path.rs
-```
+
+(truncated from 351 lines to 350 line budget)

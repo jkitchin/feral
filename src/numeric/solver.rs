@@ -19,8 +19,8 @@ use crate::numeric::factorize::{
 };
 use crate::numeric::solve::{
     solve_sparse, solve_sparse_into, solve_sparse_many, solve_sparse_many_into,
-    solve_sparse_many_refined_into, solve_sparse_refined_into, solve_sparse_refined_parallel_into,
-    RefineOptions, SolveManyWorkspace, BLAS3_REFINE_THRESHOLD,
+    solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions,
+    SolveManyWorkspace, BLAS3_REFINE_THRESHOLD,
 };
 use crate::scaling::{
     mc64_value_bound_passes, pick_scaling_strategy, precompute_mc64_validity, Mc64CacheValidity,
@@ -1698,25 +1698,29 @@ impl Solver {
         opts: RefineOptions,
     ) -> Result<(), FeralError> {
         // Issue #131 Gap A: when parallelism is on, refine through the
-        // tree-parallel contribution-block solve (pooled across the
-        // initial + correction solves). It self-gates per factor — on
-        // path-like / small trees it runs the serial core, matching the
-        // default path's behavior. Install on this solver's pool (built
-        // during the parallel factor) so the solve uses the same worker
-        // count and does not oversubscribe.
+        // contribution-block solve core (pooled across the initial +
+        // correction solves). Install on this solver's pool (built during
+        // the parallel factor) so the solve uses the same worker count
+        // and does not oversubscribe.
         //
-        // Issue #154: if no pool was built, run the serial refine
-        // rather than falling through to the global pool. An earlier
-        // comment here stated the global-pool fall-through as
-        // intentional; it is not — no pool means threads were
-        // unavailable, and reaching for a different pool does not make
-        // them available. Serial refinement is bit-exact with the
-        // self-gated serial core the parallel path already takes on
-        // path-like trees.
+        // Issue #154: if no pool was built, do not fall through to
+        // rayon's global pool — no pool means threads were unavailable,
+        // and reaching for a different pool does not make them available.
+        //
+        // Issue #177: *which core* runs is no longer a runtime decision
+        // at all. The two cores use different reassociations, so a gate
+        // derived from `rayon::current_num_threads()` — or from whether
+        // the pool got built, or from `use_parallel` (itself defaulted
+        // from `available_parallelism()`) — made the arithmetic a
+        // function of the host's core count. `SolveCore::Auto` picks from
+        // the factor's structure alone, so a given factor solves
+        // identically on every host; `use_parallel` and the pool now
+        // choose only the execution strategy, which is bit-neutral.
         match (self.use_parallel, &self.parallel_pool) {
-            (true, Some(pool)) => pool
-                .install(|| solve_sparse_refined_parallel_into(matrix, factors, rhs, x_out, opts)),
-            _ => solve_sparse_refined_into(matrix, factors, rhs, x_out, opts),
+            (true, Some(pool)) => pool.install(|| {
+                solve_sparse_refined_auto_into(matrix, factors, rhs, x_out, true, opts)
+            }),
+            _ => solve_sparse_refined_auto_into(matrix, factors, rhs, x_out, false, opts),
         }
     }
 
@@ -3225,8 +3229,7 @@ mod tests {
     }
 
     /// Issue #154: `use_parallel` on with no pool built must run the
-    /// *sequential* refine, not the tree-parallel one on rayon's
-    /// global pool.
+    /// refine in this thread, not on rayon's global pool.
     ///
     /// That state is reachable in production whenever
     /// `ThreadPoolBuilder::build()` fails — `wasm32-wasip1`, or an
@@ -3238,9 +3241,19 @@ mod tests {
     /// without building one, so this exercises exactly the fallback
     /// arm those two call sites take.
     ///
-    /// Asserted bit-identically against a plain sequential solver:
-    /// the fallback is a scheduling decision and must not perturb
-    /// numerics.
+    /// Issue #177 narrowed what "must not perturb numerics" means here.
+    /// The original wording asserted the fallback against a plain
+    /// *sequential* solver, which was only ever true because this
+    /// fixture is small enough that the parallel dispatch declined the
+    /// contribution-block core anyway. `use_parallel` now selects the
+    /// core outright, so the invariant that actually holds — and the
+    /// one worth defending — is that **pool availability changes
+    /// nothing**: pool-less parallel must equal pooled parallel, bit
+    /// for bit. Both are asserted below, the sequential comparison
+    /// retained because on this path-like fixture the CB core and the
+    /// shared-vector core do coincide, so it still has content.
+    /// `tests/refined_solve_core_stability.rs` carries the same
+    /// pooled-vs-pool-less assertion on a factor where they do not.
     #[test]
     fn solver_parallel_without_pool_falls_back_to_serial_refine() {
         let n = 64usize;
@@ -3302,6 +3315,36 @@ mod tests {
                 a.to_bits(),
                 b.to_bits(),
                 "solve_many_refined[{}] differs: fallback = {}, sequential = {}",
+                i,
+                a,
+                b
+            );
+        }
+
+        // Issue #177: the invariant that must hold on *every* factor —
+        // requesting parallelism and getting a pool must give the same
+        // bits as requesting it and not getting one.
+        let mut pooled = Solver::new().with_parallel(true);
+        assert!(matches!(pooled.factor(&m, None), FactorStatus::Success));
+        let pooled_x = pooled.solve_refined(&m, &rhs).expect("pooled refine");
+        for (i, (a, b)) in x.iter().zip(pooled_x.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "solve_refined[{}] differs: pool-less = {}, pooled = {}",
+                i,
+                a,
+                b
+            );
+        }
+        let pooled_many = pooled
+            .solve_many_refined(&m, &rhs, 1)
+            .expect("pooled multi-refine");
+        for (i, (a, b)) in many.iter().zip(pooled_many.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "solve_many_refined[{}] differs: pool-less = {}, pooled = {}",
                 i,
                 a,
                 b
