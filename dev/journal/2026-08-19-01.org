@@ -1,0 +1,197 @@
+#+TITLE: Session 2026-08-19-01
+#+DATE: 2026-08-19
+
+* 13:15 :issue-177:solve:parallel:
+Goal: fix #177 — "parallel solve is not bit-identical to serial on
+henon120, breaking #131's stated contract".
+
+Read =src/numeric/solve.rs=. Two *different numerical cores* exist for
+a sparse solve:
+
+- =solve_sparse_core_into= (shared global vector, flat postorder
+  left-fold of separator updates), used by =solve_sparse= and
+  =solve_sparse_refined=;
+- the contribution-block core (=cb_forward_front= / =cb_run_serial= /
+  =cb_run_parallel=), issue #131 Gap A, which sums each front's RHS as a
+  *tree* over children in ascending child order.
+
+The module header at solve.rs:395-412 already states these differ by
+floating-point reassociation and calls the CB core "an opt-in path".
+So CB-vs-shared-vector is by design, not a bug.
+
+* 13:25 :issue-177:root-cause:
+The actual defect is *which core runs is chosen by a machine-dependent
+gate*. =solve_sparse_refined_core= (solve.rs:1829) does
+
+    let cb = CbSolveWorkspace::for_factors(factors);
+    cb.worthwhile().then_some(cb)
+
+and falls back to the shared-vector =SolveWorkspace= when not
+worthwhile. =CbTaskPlan::worthwhile= depends on =fwd_seeds.len() >= 2=
+and =max_local < 0.7*total=, both computed from
+
+    thresh = FERAL_CB_THRESH or (total / (rayon::current_num_threads()*16))
+
+So =rayon::current_num_threads()= and =FERAL_CB_THRESH= select the
+*arithmetic*, not just the schedule. That is exactly the reporter's
+"same feral, same matrix, same POUNCE build produces different iterate
+paths on machines with different core counts".
+
+* 13:35 :issue-177:evidence:
+Measured with a scaffold test (=tests/refined_parallel_thread_invariance.rs=,
+temporary) plus two temporary =eprintln!= probes in solve.rs.
+
+Poisson 2D 160x160 (n=25600), same factor, same RHS:
+
+    DBG177 plan: total=1090303 thresh=68143 roots=36 seeds=4  max_local=81612 threads=1 worthwhile=true
+    DBG177 plan: total=1090303 thresh=34071 roots=51 seeds=9  max_local=57676 threads=2 worthwhile=true
+    DBG177 plan: total=1090303 thresh=17035 roots=83 seeds=25 max_local=27510 threads=4 worthwhile=true
+    DBG177 plan: total=1090303 thresh=8517 roots=133 seeds=50 max_local=21000 threads=8 worthwhile=true
+
+    threads=1: bits differing vs serial-refined = 24295
+    threads=2: bits differing vs serial-refined = 24295
+    threads=4: bits differing vs serial-refined = 24295
+    threads=8: bits differing vs serial-refined = 24295
+    threads 1 vs 2: 0    threads 2 vs 4: 0    threads 4 vs 8: 0
+
+Two facts, both matching the issue report exactly:
+
+1. The CB core is *itself* bit-stable across thread counts — the plan
+   changes (seeds 4 -> 50) but the output does not move a bit. The
+   child-reduction order really is fixed, as documented. So this is not
+   a scheduling artifact.
+2. The CB core differs from the shared-vector core by 24295 of 25600
+   entries. The reporter's "serial solve" run
+   (=FERAL_CB_THRESH=1000000000000=) is not the CB core run serially —
+   it is a *different core*. That is the whole of the observed
+   divergence.
+
+Smaller grids (Poisson 60x60, 96x96, total 351544) come out
+=worthwhile=false= — they fail =total >= MIN_TOTAL_COST= (1e6) — so both
+runs take the shared-vector core and agree bit-for-bit. That is why
+NARX_CFy agrees and henon120 does not: it is a size/structure
+threshold, exactly the "structure-dependent rather than universal"
+observation in the issue.
+
+* 13:40 :issue-177:decision:
+Fix: *decouple core selection from scheduling*. =worthwhile= must
+choose only between =cb_run_parallel= and =cb_run_serial= (already
+byte-identical to each other); it must never switch to the
+shared-vector core. Then neither =rayon::current_num_threads()= nor
+=FERAL_CB_THRESH= can perturb a single bit, and the reporter's repro
+becomes bit-identical.
+
+Rejected: making the CB core bit-identical to the shared-vector core.
+The shared-vector core folds each front's separator update into a
+global vector in postorder; the CB core folds a grandchild's block into
+its child's block before it reaches the parent. Matching the postorder
+fold would require abandoning the subtree grouping — i.e. the
+parallelism itself. Already documented at solve.rs:404-412.
+
+* 14:10 :issue-177:perf:pivot:
+First cut of the fix — "when the caller asks for the parallel refine,
+always use the CB core; =worthwhile= only picks =cb_run_parallel= vs
+=cb_run_serial=" — is correct but *not shippable as-is*. Measured the
+two cores head to head (refined solve, best of 7, 4 workers, us):
+
+    matrix        n       shared-vector   CB-serial      CB-par(4)
+    chain_400     400          24.0       30.6 (1.27x)   31.5 (1.31x)
+    chain_2000    2000        119.0      154.0 (1.29x)  162.5 (1.37x)
+    chain_20000   20000      1271.8     1630.7 (1.28x) 1617.1 (1.27x)
+    poisson_40    1600        659.3     1198.8 (1.82x) 1228.2 (1.86x)
+    poisson_96    9216       4649.5     5035.4 (1.08x) 5087.5 (1.09x)
+    poisson_160   25600     31842.2    35188.1 (1.11x) 22968.5 (0.72x)
+
+The CB core *only* wins on the one factor where =worthwhile= holds
+(poisson_160, 0.72x). Everywhere else it is 1.08-1.86x slower with
+nothing to show for it. So =worthwhile= is a well-tuned *performance*
+gate, and the naive fix would have bought determinism by paying up to
+1.86x on every path-like tree. Correctness before performance is the
+rule, but paying 1.86x when a cheaper correct design exists is not
+that trade.
+
+Worse, the naive fix does not even close the issue. =use_parallel=
+defaults from =Solver::default_use_parallel()= =
+=available_parallelism() > 1=. So "core = f(use_parallel)" still means
+"core = f(host core count)" — a 1-core box and a 4-core box still
+disagree. The pool-availability arm (#154) leaks the same way.
+
+* 14:25 :issue-177:decision:design:
+Pivoted to: *the core is a pure function of the factor; the host
+chooses only the schedule.*
+
+- =cb_core_profitable(factors)= applies the same three-part gate at a
+  fixed =CB_REFERENCE_FANOUT= (64) granularity — never
+  =rayon::current_num_threads()=, never =FERAL_CB_THRESH=.
+- =SolveCore::Auto= consults it; =Solver::solve_refined= and
+  =solve_many_refined= use =Auto=. =use_parallel= and pool availability
+  now only decide =cb_run_parallel= vs =cb_run_serial=, which are
+  byte-identical.
+- =CbTaskPlan='s worker-derived threshold survives untouched, for
+  scheduling.
+
+This keeps the shared-vector core on exactly the trees where it is
+faster, keeps the CB core where it wins, and makes the choice
+host-invariant.
+
+* 14:40 :issue-177:perf:regression:
+First =Auto= implementation called =CbTaskPlan::build_with_threshold=
+for the verdict. That allocates three =Vec<Vec<usize>>= of length
+=n_nodes= (=build_children=, =owned=, =tr_children=) on *every* refined
+solve, including the ones it rejects:
+
+    chain_400     1.29x    chain_2000   1.27x    chain_20000  1.24x
+
+i.e. the predicate cost as much as the thing it was avoiding.
+Rewrote =cb_core_profitable= on flat =O(n_nodes)= arrays — subtree cost
+folded into parents using the postorder guarantee, no child lists at
+all. After:
+
+    matrix        n       shared-vector  auto-serial     auto-par(4)
+    chain_400     400          22.3       22.9 (1.03x)   22.9 (1.03x)
+    chain_2000    2000        112.9      114.8 (1.02x)  114.6 (1.01x)
+    chain_20000   20000      1276.3     1276.8 (1.00x) 1272.0 (1.00x)
+    poisson_40    1600        642.2      657.1 (1.02x)  691.8 (1.08x)
+    poisson_96    9216       4549.3     4612.6 (1.01x)  4631.5 (1.02x)
+    poisson_160   25600     27761.6    30632.9 (1.10x) 20763.6 (0.75x)
+
+Rejected trees are back to parity (1.00-1.03x). The remaining cost is
+honest and localized: on a CB-profitable factor a host with no workers
+pays ~1.10x for the determinism, and a 4-worker host gains 25%.
+
+Two implementations of one gate can drift, so
+=cb_core_profitable_matches_the_plan_gate= pins the flat predicate
+against =CbTaskPlan::worthwhile= across six fixtures that land on both
+sides of it.
+
+* 14:55 :issue-177:tests:
+The pre-fix failure is deterministic and reproducible. Ran the new
+=solver_refine_is_identical_across_parallelism_and_pool_availability=
+against a worktree at 6fb9d26:
+
+    solve_refined pooled vs pool-less: 24295 of 25600 entries differ
+    left: 24295   right: 0
+    test result: FAILED. 4 passed; 1 failed
+
+Post-fix all five pass. Coverage added:
+
+- =tests/refined_solve_core_stability.rs= — worker count (1/2/3/4/8),
+  pool vs no pool, parallel vs sequential =Solver=, on matrices either
+  side of the gate; plus a non-vacuity check that the two cores really
+  are distinguishable on the fixture (else the whole file proves
+  nothing).
+- =tests/cb_core_choice_ignores_env.rs= — the reporter's own knob.
+  Single-test binary on purpose: it mutates the process environment,
+  which is shared across a binary's tests but not across binaries.
+- =solve.rs= unit tests — threshold sweep byte-identity (with a
+  non-vacuity assertion that the sweep really produced different task
+  decompositions), gate-rejected factors still run the CB core when
+  asked, and the flat-vs-plan agreement guard.
+
+Also retargeted the pre-existing
+=solver_parallel_without_pool_falls_back_to_serial_refine= (#154). It
+asserted pool-less == =with_parallel(false)=, which after this change
+is not guaranteed in general — it passed only because its n=64
+tridiagonal fixture is small enough that both cores coincide. Kept
+that comparison (it still has content on that fixture) and added the
+invariant that does hold everywhere: pool-less == pooled.

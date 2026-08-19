@@ -5528,3 +5528,76 @@ and `num_c ~ num_n` (149 vs 143 us), so the factorization is not the
 problem in either time or fill.
 
 Superseded by `dev/research/ldlt-compress-cost-benefit-2026-08-15.md`.
+
+## 2026-08-19 — Three approaches to issue #177 (host-dependent solve core)
+
+Context: `Solver::solve_refined` chose between two numerically distinct
+solve cores using a predicate derived from
+`rayon::current_num_threads()`, so the arithmetic depended on the host's
+core count. See `dev/decisions.md` (2026-08-19) for what was adopted.
+
+### Rejected: make the CB core bit-identical to the shared-vector core
+
+This is what the issue's reporter expected to find — "a real ordering
+difference in the code ... findable deterministically". It is not
+achievable. The shared-vector core folds each front's separator update
+into a global vector in postorder, so a global row accumulates
+contributions in ascending source-front order. The CB core folds a
+grandchild's contribution block into its child's block before that block
+ever reaches the parent. Reproducing the postorder fold would require
+abandoning the subtree grouping — that is, the parallelism itself.
+Already documented at solve.rs:404-412; restated here because the issue
+asked for exactly this and it is worth having the refusal on record.
+
+### Rejected: always use the CB core when parallelism is requested
+
+Correct and a two-line change: let `worthwhile` pick `cb_run_parallel`
+vs `cb_run_serial` (byte-identical) and never switch cores. Implemented
+and measured before rejecting.
+
+**Rejected on measurement.** Refined solve, best of 7, 4 workers, us:
+
+    matrix        n       shared-vector   CB-serial      CB-par(4)
+    chain_400     400          24.0       30.6 (1.27x)   31.5 (1.31x)
+    chain_2000    2000        119.0      154.0 (1.29x)  162.5 (1.37x)
+    chain_20000   20000      1271.8     1630.7 (1.28x) 1617.1 (1.27x)
+    poisson_40    1600        659.3     1198.8 (1.82x) 1228.2 (1.86x)
+    poisson_96    9216       4649.5     5035.4 (1.08x) 5087.5 (1.09x)
+    poisson_160   25600     31842.2    35188.1 (1.11x) 22968.5 (0.72x)
+
+The CB core's only win is 0.72x on poisson_160 — the one factor where
+`worthwhile` holds. Everywhere else it is 1.08-1.86x slower with nothing
+to show for it, so this would have paid up to 1.86x on every path-like
+tree to buy determinism that a cheaper design also buys.
+
+**And it does not close the issue.** `use_parallel` defaults from
+`Solver::default_use_parallel()` = `available_parallelism() > 1`, so
+"core = f(use_parallel)" is still "core = f(host core count)". A 1-core
+box and a 4-core box would have continued to disagree. The
+pool-availability arm (#154) leaks identically.
+
+### Rejected: compute the profitability verdict by building a `CbTaskPlan`
+
+The adopted design needs a host-independent profitability predicate. The
+obvious implementation reuses `CbTaskPlan::build_with_threshold` at a
+fixed granularity and reads `.worthwhile`.
+
+**Rejected on measurement.** The predicate runs on every refined solve,
+including the ones it rejects, and `CbTaskPlan::build` allocates three
+`Vec<Vec<usize>>` of length `n_nodes` (`build_children`, `owned`,
+`tr_children`). Cost of the verdict alone, versus the shared-vector
+baseline it was supposed to preserve:
+
+    chain_400     1.29x
+    chain_2000    1.27x
+    chain_20000   1.24x
+
+That is the same 1.24-1.29x the design existed to avoid — the predicate
+cost as much as the core it was declining. Replaced by a flat
+`O(n_nodes)` computation (four `Vec`s of scalars, subtree costs folded
+into parents using the postorder guarantee, no child lists), which
+brings the rejected trees back to 1.00-1.03x.
+
+The cost of that replacement is a second implementation of one gate.
+`cb_core_profitable_matches_the_plan_gate` pins the two together across
+six fixtures landing on both sides of the gate.

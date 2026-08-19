@@ -4,6 +4,37 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the solve core no longer depends on the host's core count (issue #177)
+
+- `Solver::solve_refined` and `solve_many_refined` now choose between the
+  shared-vector and contribution-block solve cores from the **factor's
+  structure alone**. Previously the choice came from
+  `CbSolveWorkspace::worthwhile()`, a predicate derived from
+  `rayon::current_num_threads()` and overridable by `FERAL_CB_THRESH`, plus a
+  fall-back to the shared-vector core whenever `ThreadPoolBuilder::build()` had
+  failed — and `use_parallel` itself defaults from `available_parallelism()`.
+- **The bug.** The two cores use different (equally valid) floating-point
+  reassociations: the shared-vector core folds each front's separator update
+  into a global vector in flat postorder, the contribution-block core sums a
+  subtree tree. So the same feral, same matrix, same factor solved with
+  different arithmetic on machines with different core counts. Issue #16
+  established that a ULP difference here is amplified by the IPM host's filter
+  line search into trajectory-level outcomes (141 vs 888 outer iterations on
+  qcqp1000-1nc), so downstream iterate paths diverged. Reported on henon120.
+- **What is now guaranteed.** For a given factor, a refined solve returns
+  identical bits at any worker count, with or without a thread pool, with
+  parallelism on or off, and for any `FERAL_CB_THRESH`. Worker count, pool
+  availability and `FERAL_CB_THRESH` select the execution schedule only, and
+  `cb_run_parallel` / `cb_run_serial` are byte-identical.
+- **Performance.** Factors routed to the shared-vector core are unchanged
+  (1.00–1.03x). On a factor routed to the contribution-block core, a host that
+  cannot spawn workers pays ~1.10x for the determinism (poisson_160, refined
+  solve: 27.8 ms → 30.6 ms) while a 4-worker host gains 25% (20.8 ms).
+- **New API.** `SolveCore`, `solve_sparse_refined_auto` (the factor-derived
+  choice, what `Solver` uses) and `solve_sparse_refined_cb` (the explicit
+  contribution-block entry point, with an execution-strategy argument).
+  `solve_sparse_refined` and `solve_sparse_refined_parallel` are unchanged.
+
 ### Fixed — scaling router no longer routes on index order (issue #134 item B)
 
 - `pick_scaling_strategy`'s dense-head gate now counts the **symmetric degree**

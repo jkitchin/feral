@@ -1,183 +1,200 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-15T22:22:29Z
+Generated: 2026-08-19T14:05:36Z
 
 ## Latest Session
-File: dev/sessions/2026-08-15-02.md
+File: dev/sessions/2026-08-19-01.md
 ```
-# Session 2026-08-15-02
+# Session 2026-08-19-01
 
-## BENCHMARK NUMBERS ARE WORSE THAN LAST SESSION
+## BENCHMARK NUMBERS ARE NOT COMPARABLE TO LAST SESSION
 
 Reported first, per the hard rule in CLAUDE.md.
 
-    partition                  2026-08-15-01   this session   delta
-    dense  small-frontal (<200)     1.54           1.61        +0.07
-    dense  medium (<500)            1.91           2.00        +0.09
-    sparse small-frontal (<200)     1.50           1.67        +0.17
-    sparse medium (<500)            1.51           1.67        +0.16
+`cargo run --bin bench --release` in this container found only the 8
+synthetic matrices; the external corpus and the MUMPS/SPRAL oracle
+timings are not present. Both Phase 2.8.1 exit partitions therefore
+report `N/A` rather than a p90:
 
-All four partitions regressed. All four still PASS their targets.
+    --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+    bucket                    count      p90     target  verdict
+    small-frontal (<200)          0        -     <= 2.0      N/A
+    medium (<500)                 0        -     <= 3.0      N/A
 
-**No Rust source changed this session.** `git diff --stat fbb1a9d HEAD
--- src/ crates/ tests/` is empty; the only changes are `dev/`
-documents. So this is not a code regression — it is run-to-run
-variance on the same binary.
+**No comparison against 2026-08-15-02's 1.61 / 2.00 / 1.67 / 1.67 is
+possible from this run.** I am not claiming the numbers held; I am
+saying they were not measured. A session with the corpus mounted should
+re-run the partition before reading anything into it.
 
-That conclusion is itself worth recording, because it bears on a claim
-made last session. 2026-08-15-01 reported a dense small-frontal
-sequence of 1.58 (baseline) -> 1.66 (regression I introduced) -> 1.54
-(after the gate reordering), and I described the final number as
-"beating the baseline". Today's run puts the same unchanged code at
-1.61. A +0.07 swing with zero code change means the bench's noise
-floor on this metric is at least as large as the 1.58 -> 1.54
-"improvement" I claimed. **The gate-reordering fix should be regarded
-as having removed the 1.66 regression, not as having beaten the
-baseline.** The 1.66 measurement is still meaningful (it exceeded the
-noise band), but the final 0.04 is not.
+What the run does confirm: correctness is intact on what it could see —
+inertia 2/2 vs MUMPS, residual 2/2, worst residual 1.26e-16.
 
-Action for a future session: establish the bench's noise floor by
-running it N times on an unchanged binary, and record a
-minimum-detectable-difference so per-session comparisons stop
-over-reading sub-0.1 movements. Until then, treat p90 deltas under
-~0.15 as noise.
-
-Also note the worst-ratio table is now **6 of 10 KIRBY2 iterates**
-(worst 9.22, up from 8.95), plus GROUPING_0205 — i.e. the outlier
-family this session diagnosed dominates the tail more clearly than
-before.
+This is also the wrong benchmark for this change, which touches the
+*solve* path and not the factor path. The relevant measurements are in
+"Benchmark Results" below.
 
 ## Goal
 
-Investigate the two items carried out of 2026-08-15-01, both approved
-by the user:
+Fix issue #177 — "parallel solve is not bit-identical to serial on
+henon120, breaking #131's stated contract".
 
-1. **#153 remainder** — MC64 warm-cache miss cost. marine_1600 spends
-   ~19% of a 1784 ms solve in cache-missed MC64 recomputes. Decide
-   whether `GROWTH_FACTOR`/`GROWTH_COUNT` can be tightened without
+## Accomplished
+
+### The report is real, but not the bug it looks like
+
+The reporter compared two runs that differed only in `FERAL_CB_THRESH`,
+held the factorization sequential to rule out #16, and found the two
+parallel runs bit-identical to each other but not to the "serial" one.
+They concluded there was a fixed ordering difference in the parallel
+path — "findable deterministically".
+
+There is no such ordering difference. feral has **two numerically
+distinct solve cores**:
+
+- `solve_sparse_core_into` — folds each front's separator update into a
+  global vector in flat postorder;
+- the contribution-block core (#131 Gap A) — assembles each front's RHS
+  from its children's contribution blocks, summed in ascending child
 ```
 
 ## Git Status
 ```
+b75da82 test(solve): pin the refined solve's arithmetic against the host (#177)
+3cafe57 fix(solve): choose the solve core from the factor, not the host (#177)
+6fb9d26 Merge pull request #174 from jkitchin/feat/scaling-router-invariance
+d00666a docs: session checkpoint 2026-08-15-02 (KIRBY2 localized, #153 closed)
 3029905 docs(compress): localize the KIRBY2 factor-ratio outlier to LdltCompress
-fbb1a9d docs: session checkpoint 2026-08-15-01 (#134B shipped, #153 falsified)
-45c80f3 perf(scaling): keep the router's symmetric pass off the common path
-e9470ca fix(scaling): count symmetric degree in the router's head gate (#134B)
-8acb1be docs(scaling): research + plan for router permutation-invariance (#134B)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 427 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.85s
+test result: ok. 428 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.90s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-15-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-01.md)
 
 
-**No Rust source changed this session** (`git diff --stat fbb1a9d HEAD
--- src/ crates/ tests/` is empty; the only changes are `dev/`
-documents). The run below is therefore a re-measurement of unchanged
-code and is expected to reproduce 2026-08-15-01.
+Refined solve, best of 7, 4 workers, microseconds. This is the
+measurement the change is about; the `bench` binary's factor-ratio
+partitions are unrelated to it and were unavailable anyway (see the
+top of this file).
 
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(us)    mumps(us)      ratio
-KIRBY2_0007                    458         1097          119       9.22
-KIRBY2_0006                    458         1075          127       8.46
-KIRBY2_0008                    458          971          122       7.96
-KIRBY2_0010                    458          992          133       7.46
-LAKES_0144                     168          372           54       6.89
-KIRBY2_0009                    458          879          128       6.87
-KIRBY2_0011                    458          820          120       6.83
-LAKES_0146                     168          350           54       6.48
-GROUPING_0205                  225          700          111       6.31
-QPCBLEND_0030                  157          362           60       6.03
+    matrix        n      shared-vector  auto-serial     auto-par(4)
+    chain_400     400         22.3      22.9 (1.03x)   22.9 (1.03x)
+    chain_2000    2000       112.9     114.8 (1.02x)  114.6 (1.01x)
+    chain_20000   20000     1276.3    1276.8 (1.00x) 1272.0 (1.00x)
+    poisson_40    1600       642.2     657.1 (1.02x)  691.8 (1.08x)
+    poisson_96    9216      4549.3    4612.6 (1.01x) 4631.5 (1.02x)
+    poisson_160   25600    27761.6   30632.9 (1.10x) 20763.6 (0.75x)
+
+Factors the predicate rejects are at parity (1.00-1.03x). On the one
+factor it routes to the CB core, a host with no workers pays ~1.10x for
+the determinism and a 4-worker host gains 25%.
+
+The `bench` binary run for this session:
+
+8 matrices benchmarked
+2 KKT matrices total
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.61     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.67     <= 2.0     PASS
-medium (<500)            153560     1.67     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 ```
 
 ## Recent Decisions
-route is gated on a bump that was actually peeled (21f5e74), so it is
-unreachable unless triangularization is on. It is one lever, not two.
 
-**AMF stays off** because no downstream measurement was taken this session. That
-is an absence of evidence, not a finding against it.
+Rejected alternatives, and why:
 
-**Known cost of this decision.** `Markowitz` ignores `factor`'s `symbolic`
-argument, because it does not use a precomputed column order. That is a silent
-semantic change for any caller that carefully chose an ordering and passed it in
-— exactly the silent-fallback shape #168 warned about. Three mitigations, and no
-claim that they eliminate it: the selector is an explicit enum rather than a
-bool, `SparseLu::used_markowitz()` makes the executed route observable so a
-measurement can assert instead of infer, and every in-repo ordering comparison
-(`examples/lu_fill_orderings.rs`, `src/bin/probe_lu_phases.rs`,
-`src/bin/probe_ft_eta.rs`) is pinned to `GilbertPeierls` in this change. An
-out-of-tree caller comparing orderings against `LuParams::default()` will
-silently compare nothing until it pins the rule. Seven in-repo test sites
-across five files failed on this change — `sparse_lu_honors_pivot_threshold`,
-`dense_bump_route_needs_the_peel_and_the_cap_together`, the whole
-`lu_dense_bump` suite, `reach_route_composes_with_the_dense_bump_route`,
-`perturb_chooses_largest_magnitude_row_matching_dense`,
-`factor_traversal_is_subquadratic`, and
-`sparse_solves_compose_with_the_dense_bump_route` — and every one was fixed by
-pinning `GilbertPeierls`, never by weakening an assertion. That seven
-independent tests failed is corroboration that the hazard is real, not
-hypothetical, and it is a fair estimate of what a downstream suite should
-expect to have to pin.
+- *Make the CB core bit-identical to the shared-vector core.* Would
+  require the CB forward to fold contributions in postorder-of-source-
+  front, but it folds a grandchild's block into its child's block before
+  that block reaches the parent. Matching the flat postorder means
+  abandoning the subtree grouping, i.e. the parallelism itself.
 
-Evidence: issue #171; `dev/research/markowitz-fill-measurement.md`;
-`dev/journal/2026-08-14-01.org`; the #166 and #168 arm harnesses.
+- *Always use the CB core when parallelism is requested.* Correct and
+  simple, but measured 1.08-1.86x slower than the shared-vector core on
+  every factor the gate rejects (path-like chains, small grids), where
+  the CB core wins nothing — its only measured win is 0.72x on
+  poisson_160 at 4 workers. It also fails to close the issue, since
+  `use_parallel` is itself defaulted from the host's core count.
+
+- *Retire the CB core, or make it opt-in only.* Restores determinism at
+  zero cost on rejected trees, but forfeits issue #131 Gap A's actual
+  win (25% on the bushy factors where tree-parallel solve pays).
+
+Accepted cost: on a factor the predicate routes to the CB core, a host
+that cannot spawn workers now pays ~1.10x on the refined solve
+(poisson_160: 27.8 ms shared-vector, 30.6 ms CB-serial), where before it
+would have silently taken the shared-vector core and a different answer.
+Factors the predicate rejects are unchanged, at 1.00-1.03x.
+
+Evidence: issue #177; `dev/journal/2026-08-19-01.org`;
+`tests/refined_solve_core_stability.rs` (fails at 6fb9d26 with 24295 of
+25600 entries differing between the pooled and pool-less arms);
+`tests/cb_core_choice_ignores_env.rs`.
 
 ## Recent Tried-and-Rejected
-**Refuted by measurement.** `diag_symbolic_stages_argv` on
-KIRBY2_0007:
 
-    TOTAL 1182 us
-      ldlt_compress   972   82.2%
-      renumber         57    4.8%
-      ordering         32    2.7%
+**Rejected on measurement.** The predicate runs on every refined solve,
+including the ones it rejects, and `CbTaskPlan::build` allocates three
+`Vec<Vec<usize>>` of length `n_nodes` (`build_children`, `owned`,
+`tr_children`). Cost of the verdict alone, versus the shared-vector
+baseline it was supposed to preserve:
 
-Ordering is 32 us — 2.7% of symbolic and ~3% of the reported
-`factor_us`. Eliminating AMD cost entirely could not move the ratio.
-The cost is `ldlt_compress` (the MC64 matching feeding Duff-Pralet
-compression), which is a different subsystem from the one the
-hypothesis named.
+    chain_400     1.29x
+    chain_2000    1.27x
+    chain_20000   1.24x
 
-A second prediction in the same hypothesis — that feral was producing
-more fill than MUMPS — is also refuted: the numeric driver is 127 us
-and `num_c ~ num_n` (149 vs 143 us), so the factorization is not the
-problem in either time or fill.
+That is the same 1.24-1.29x the design existed to avoid — the predicate
+cost as much as the core it was declining. Replaced by a flat
+`O(n_nodes)` computation (four `Vec`s of scalars, subtree costs folded
+into parents using the postorder guarantee, no child lists), which
+brings the rejected trees back to 1.00-1.03x.
 
-Superseded by `dev/research/ldlt-compress-cost-benefit-2026-08-15.md`.
+The cost of that replacement is a second implementation of one gate.
+`cb_core_profitable_matches_the_plan_gate` pins the two together across
+six fixtures landing on both sides of the gate.
 
 ## Source Files
 ```
@@ -247,9 +264,10 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
+tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -263,14 +281,6 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -283,22 +293,30 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
+tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
-tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_scaling.rs
-tests/lu_sparse_rhs.rs
 tests/lu_sparse.rs
+tests/lu_sparse_rhs.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -314,8 +332,9 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue_kkt.rs
+tests/refined_solve_core_stability.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
