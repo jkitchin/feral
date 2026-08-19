@@ -76,3 +76,17 @@ value):
 Full suite: 96 test binaries, all `ok`, 0 FAILED. `cargo clippy
 --all-targets -- -D warnings` and the `-p feral-diagnostics` variant
 both clean.
+
+* 21:10 :issue176:bench:checkpoint:
+`cargo run --bin bench --release`: 8 synthetic matrices only (no
+external corpus in this container), so both Phase 2.8.1 exit partitions
+report N/A — same situation as 2026-08-19-02, and no comparison against
+2026-08-15-02's 1.61/2.00/1.67/1.67 is possible. Correctness figures
+identical to last session: inertia 2/2 vs MUMPS, residual 2/2, worst
+1.26e-16 (densecol_kkt_300_0000). Expected: this change touches no
+arithmetic.
+
+Checkpoint written to dev/sessions/2026-08-19-03.md; policy appended to
+decisions.md. Flagged for the next session that the sibling perf issue's
+two prior measurements are void — they were taken with knobs that were
+no-ops at the time.

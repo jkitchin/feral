@@ -6821,3 +6821,47 @@ Evidence: issue #177; `dev/journal/2026-08-19-01.org`;
 `tests/refined_solve_core_stability.rs` (fails at 6fb9d26 with 24295 of
 25600 entries differing between the pooled and pool-less arms);
 `tests/cb_core_choice_ignores_env.rs`.
+
+## 2026-08-19 — Numeric `FERAL_*` knobs warn and fall back; they do not error, and they accept `1e6` notation (#176)
+
+Every numeric env knob was read with
+`env::var(NAME).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT)`,
+which discards the parse error. `FERAL_PAR_TASK_MIN_FLOPS=1e18` parsed
+as nothing and the built-in default was silently reinstated, so a
+measurement taken with the knob "set" was really a measurement of the
+default (issue #176, two such measurements).
+
+The parse policy now lives in exactly one module, `feral::env`, and is:
+
+1. **Scientific notation parses on integer knobs.** The defaults are
+   written `1e6` / `1e8` in the README and in pounce's
+   `feral_min_par_flops` help. The notation the docs teach must work.
+   The integer parse is tried first, so `18446744073709551615` stays
+   `u64::MAX` rather than round-tripping through 2^64.
+2. **A refused value warns on stderr, once per `(name, value)`, then
+   falls back.** Not an error: these knobs are read from inside a
+   factorization whose `Result` is reserved for *numerical* failure, and
+   turning an environment typo into a `FeralError` would hand pounce a
+   numeric-looking failure for an environment problem. The warn-and-fall-
+   back shape has precedent here — `FERAL_SCALING` has warned on an
+   unrecognized value since the X5 follow-up.
+3. **An above-range magnitude clamps to the type maximum** instead of
+   falling back. `FERAL_CB_THRESH=1e30` means "no subtree can reach this
+   cutoff"; falling back to the default there would be the reported bug
+   again, with the operator's intent inverted rather than merely lost.
+4. **Fractional input rounds half away from zero.** Truncation would
+   make `FERAL_PAR_MIN_SEEDS=0.9` mean 0 — "always parallel" — the
+   opposite of what the value asks for.
+
+Boolean and enum knobs are out of scope: they match a literal vocabulary
+rather than parsing a number.
+
+A source-scan test (`tests/env_knob_parsing.rs`) fails the build if a new
+`FERAL_*` read parses its own value locally, because the defect was one
+shape copied to eighteen sites, not one site. Two diagnostics-only
+comma-list knobs are exempted by name in that scan.
+
+Consequence for the public API: `numeric::factorize::par_task_min_flops`
+and `par_min_seeds` are `pub`, so a caller can confirm what value the
+process resolved a knob to. #176 could not be diagnosed from outside the
+process without that.
