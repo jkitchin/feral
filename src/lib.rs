@@ -49,8 +49,8 @@ pub use numeric::factorize::{
     factorize_multifrontal_with_schur, LdltExport, NumericParams, ProfileReport, SchurBlock,
 };
 pub use numeric::solve::{
-    solve_sparse, solve_sparse_refined, solve_sparse_refined_with_diagnostics,
-    RefinementDiagnostics, RefinementStep,
+    solve_sparse, solve_sparse_refined, solve_sparse_refined_auto, solve_sparse_refined_cb,
+    solve_sparse_refined_with_diagnostics, RefinementDiagnostics, RefinementStep, SolveCore,
 };
 pub use numeric::solver::{FactorStats, FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};

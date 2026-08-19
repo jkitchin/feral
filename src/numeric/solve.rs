@@ -411,6 +411,16 @@ fn dsolve_single(w: &mut [f64], ff: &crate::dense::factor::FrontalFactors, nelim
 // differs from that path only by floating-point reassociation (~κ·eps):
 // a valid solve, offered as an opt-in path; the default `solve_sparse`
 // is unchanged.
+//
+// Issue #177: because the two cores genuinely differ in the last bits,
+// *which core runs must be an explicit caller decision* — see
+// `SolveCore`. It previously fell out of `CbTaskPlan::worthwhile`, a
+// predicate derived from `rayon::current_num_threads()`, so the same
+// binary on a 4-core and a 32-core host solved with different
+// arithmetic; an IPM host amplified that into different iterate
+// trajectories (henon120, issues #177 and #16). The coarsening plan is
+// now confined to scheduling: it decides `cb_run_parallel` vs
+// `cb_run_serial`, and those are byte-identical.
 
 /// One front's forward contribution: the `nrow - nelim` separator-row
 /// values (in frontal separator order) it passes to its parent. Boxed
@@ -696,20 +706,74 @@ struct CbTaskPlan {
     pending_fwd: Vec<usize>,
     /// Whether each node is a task root.
     is_task_root: Vec<bool>,
-    /// Whether tree-parallel execution is expected to beat the serial
-    /// core: at least two independent task roots, and no single task
-    /// root's serial share dominates (Amdahl), and enough total work to
-    /// amortize the O(threads·n) scratch setup. When false the caller
-    /// runs the serial core.
+    /// Whether tree-parallel *execution* is expected to beat running the
+    /// same CB core serially: at least two independent task roots, and no
+    /// single task root's serial share dominates (Amdahl), and enough
+    /// total work to amortize the O(threads·n) scratch setup.
+    ///
+    /// Issue #177: this gates `cb_run_parallel` vs `cb_run_serial` only —
+    /// two byte-identical cores. It must never be used to choose between
+    /// the CB core and the shared-vector core, because it is derived from
+    /// `rayon::current_num_threads()` and would make the arithmetic a
+    /// function of the host's core count.
     worthwhile: bool,
 }
 
+/// ~1e6 flops ≈ tens of µs of solve, the floor below which the
+/// O(threads·n) scratch alloc + rayon scope is not amortized.
+const MIN_TOTAL_COST: u64 = 1_000_000;
+
+/// Amdahl ceiling: if one task root runs this share of the total work by
+/// itself, parallel overhead dominates whatever the rest of the tree does
+/// (e.g. an arrow front whose huge root front is one serial task).
+const MAX_LOCAL_SHARE: f64 = 0.7;
+
+/// Reference fan-out for the host-independent coarsening (issue #177):
+/// 16 task roots per worker on a canonical 4-worker host. Used only to
+/// judge whether the CB core suits a factor at all — a verdict that must
+/// not vary with the host — never to schedule real work.
+const CB_REFERENCE_FANOUT: u64 = 64;
+
+/// How the coarsening threshold — the subtree cost at or above which a
+/// node becomes its own task root — is chosen.
+#[derive(Debug, Clone, Copy)]
+enum CbThreshold {
+    /// Aim for ~16 task roots per worker so the pool stays fed without
+    /// per-node overhead; `FERAL_CB_THRESH` overrides. Depends on the
+    /// host, so it may drive **scheduling only** (issue #177).
+    FromWorkers,
+    /// A fixed [`CB_REFERENCE_FANOUT`]-way cut, identical on every host.
+    /// The basis for [`CbTaskPlan::core_profitable`].
+    Reference,
+    /// Explicit, for the tests that sweep the threshold.
+    #[cfg(test)]
+    Fixed(u64),
+}
+
+impl CbThreshold {
+    fn resolve(self, total: u64) -> u64 {
+        match self {
+            CbThreshold::FromWorkers => {
+                let num_threads = rayon::current_num_threads().max(1);
+                std::env::var("FERAL_CB_THRESH")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| (total / (num_threads as u64 * 16)).max(1))
+            }
+            CbThreshold::Reference => (total / CB_REFERENCE_FANOUT).max(1),
+            #[cfg(test)]
+            CbThreshold::Fixed(t) => t,
+        }
+    }
+}
+
 impl CbTaskPlan {
-    fn build(
+    fn build_with_threshold(
         children: &[Vec<usize>],
         parents: &[Option<usize>],
         nodes: &[NodeFactors],
         n_nodes: usize,
+        threshold: CbThreshold,
     ) -> Self {
         // Per-front solve cost ~ nrow·(nelim+1) (forward L-solve +
         // backward Lᵀ-solve are both O(nrow·nelim)); saturating.
@@ -729,13 +793,7 @@ impl CbTaskPlan {
             subtree_cost[i] = c;
             total = total.saturating_add(own_cost(i));
         }
-        // Threshold: aim for ~16 task roots per worker so the pool stays
-        // fed without per-node overhead. `FERAL_CB_THRESH` overrides.
-        let num_threads = rayon::current_num_threads().max(1);
-        let thresh: u64 = std::env::var("FERAL_CB_THRESH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| (total / (num_threads as u64 * 16)).max(1));
+        let thresh: u64 = threshold.resolve(total);
 
         let is_task_root: Vec<bool> = (0..n_nodes)
             .map(|i| parents[i].is_none() || subtree_cost[i] >= thresh)
@@ -799,12 +857,9 @@ impl CbTaskPlan {
             }
             max_local = max_local.max(local);
         }
-        // ~1e6 flops ≈ tens of µs of solve, the floor below which the
-        // O(threads·n) scratch alloc + rayon scope is not amortized.
-        const MIN_TOTAL_COST: u64 = 1_000_000;
         let worthwhile = fwd_seeds.len() >= 2
             && total >= MIN_TOTAL_COST
-            && (max_local as f64) < 0.7 * (total as f64);
+            && (max_local as f64) < MAX_LOCAL_SHARE * (total as f64);
 
         CbTaskPlan {
             owned,
@@ -816,6 +871,82 @@ impl CbTaskPlan {
             worthwhile,
         }
     }
+}
+
+/// Whether the contribution-block core suits this factor at all — a
+/// **host-independent** verdict (issue #177).
+///
+/// The two solve cores use different, equally valid reassociations, so
+/// which one runs is numerically visible and must not be decided by
+/// anything the host controls. This builds the coarsening at the fixed
+/// [`CB_REFERENCE_FANOUT`] granularity — never from
+/// `rayon::current_num_threads()` and never from `FERAL_CB_THRESH` — and
+/// applies the same three-part test `CbTaskPlan::worthwhile` uses.
+///
+/// Measured on this repo's fixtures (4 workers, refined solve, time
+/// relative to the shared-vector core): the CB core costs 1.27–1.86x on
+/// the trees this predicate rejects (path-like chains, small grids) and
+/// returns 0.72x on the bushy grids it accepts. Rejecting is therefore
+/// not merely conservative — it is the faster answer on those trees, and
+/// it stays the faster answer on a host with no workers at all.
+/// Runs on every refined solve, including the ones it turns down, so it
+/// is computed on flat `O(n_nodes)` arrays rather than by building a
+/// `CbTaskPlan` — that allocates three `Vec<Vec<usize>>` of length
+/// `n_nodes` and cost 1.24-1.29x of a whole chain solve when the answer
+/// is "no". `cb_core_profitable_matches_the_plan_gate` pins this against
+/// `CbTaskPlan::worthwhile` so the two cannot drift.
+fn cb_core_profitable(factors: &SparseFactors) -> bool {
+    let nodes = &factors.node_factors;
+    let parents = &factors.node_parents;
+    let n_nodes = nodes.len();
+    if n_nodes == 0 {
+        return false;
+    }
+    let own_cost = |i: usize| -> u64 {
+        let ff = &nodes[i].frontal_factors;
+        (ff.nrow as u64).saturating_mul(ff.nelim as u64 + 1)
+    };
+    // Subtree cost bottom-up. `node_factors` is postorder, so a node's
+    // own total is complete by the time we fold it into its parent — no
+    // child lists needed.
+    let mut subtree_cost: Vec<u64> = (0..n_nodes).map(own_cost).collect();
+    let mut total = 0u64;
+    for i in 0..n_nodes {
+        total = total.saturating_add(own_cost(i));
+        if let Some(p) = parents[i] {
+            subtree_cost[p] = subtree_cost[p].saturating_add(subtree_cost[i]);
+        }
+    }
+    let thresh = CbThreshold::Reference.resolve(total);
+
+    // `local[t]` = the work task root `t` runs itself = its subtree minus
+    // the subtrees of its task-root children. A task root's parent is
+    // itself a task root by subtree-cost monotonicity, so every task root
+    // with a parent is a task-root child of it.
+    let is_task_root = |i: usize| parents[i].is_none() || subtree_cost[i] >= thresh;
+    let mut local = subtree_cost.clone();
+    let mut tr_children = vec![0usize; n_nodes];
+    for i in 0..n_nodes {
+        if !is_task_root(i) {
+            continue;
+        }
+        if let Some(p) = parents[i] {
+            tr_children[p] += 1;
+            local[p] = local[p].saturating_sub(subtree_cost[i]);
+        }
+    }
+    let mut fwd_seeds = 0usize;
+    let mut max_local = 0u64;
+    for t in 0..n_nodes {
+        if !is_task_root(t) {
+            continue;
+        }
+        if tr_children[t] == 0 {
+            fwd_seeds += 1;
+        }
+        max_local = max_local.max(local[t]);
+    }
+    fwd_seeds >= 2 && total >= MIN_TOTAL_COST && (max_local as f64) < MAX_LOCAL_SHARE * total as f64
 }
 
 /// Shared, read-only context threaded through the CB solve tasks.
@@ -938,11 +1069,25 @@ pub(crate) struct CbSolveWorkspace {
 
 impl CbSolveWorkspace {
     pub(crate) fn for_factors(factors: &SparseFactors) -> Self {
+        Self::for_factors_with_threshold(factors, CbThreshold::FromWorkers)
+    }
+
+    /// `threshold` picks the coarsening granularity. Only the task
+    /// decomposition changes; the arithmetic is invariant (issue #177),
+    /// which is what `cb_coarsening_threshold_is_arithmetically_inert`
+    /// asserts.
+    fn for_factors_with_threshold(factors: &SparseFactors, threshold: CbThreshold) -> Self {
         let n = factors.n;
         let nodes = &factors.node_factors;
         let n_nodes = nodes.len();
         let children = build_children(&factors.node_parents, n_nodes);
-        let plan = CbTaskPlan::build(&children, &factors.node_parents, nodes, n_nodes);
+        let plan = CbTaskPlan::build_with_threshold(
+            &children,
+            &factors.node_parents,
+            nodes,
+            n_nodes,
+            threshold,
+        );
         let max_nrow = nodes
             .iter()
             .map(|nd| nd.frontal_factors.nrow)
@@ -964,15 +1109,29 @@ impl CbSolveWorkspace {
         }
     }
 
-    /// Whether the tree-parallel path is expected to beat the serial core
-    /// on this factor (see `CbTaskPlan::worthwhile`).
+    /// Whether tree-parallel execution is expected to beat running the
+    /// same CB core serially on this factor (see `CbTaskPlan::worthwhile`).
+    /// A scheduling predicate: both answers produce identical bits, which
+    /// is why nothing outside the CB core is allowed to branch on it
+    /// (issue #177) — hence test-only visibility.
+    #[cfg(test)]
     pub(crate) fn worthwhile(&self) -> bool {
         self.plan.worthwhile
     }
 
+    /// Number of task roots the coarsening produced — the size of the
+    /// task decomposition. Reported so the #177 threshold sweep can show
+    /// the plan really changed while the output did not.
+    #[cfg(test)]
+    pub(crate) fn task_root_count(&self) -> usize {
+        self.plan.is_task_root.iter().filter(|b| **b).count()
+    }
+
     /// Solve `A x = b` into `x_out` using this workspace. `parallel`
     /// requests tree-parallel execution, honoured only when the plan is
-    /// `worthwhile`; otherwise the byte-identical serial core runs. MC64
+    /// `worthwhile`; otherwise the byte-identical serial core runs — the
+    /// result is the same bits either way, so neither the `parallel`
+    /// argument nor the worker count is observable in the output. MC64
     /// pre/post scaling is fused into the entry permute and exit unpermute.
     pub(crate) fn solve_into(
         &mut self,
@@ -1052,10 +1211,17 @@ impl CbSolveWorkspace {
 
 /// Opt-in contribution-block sparse solve (issue #131 Gap A), single RHS.
 /// Applies the same MC64 pre/post scaling as `solve_sparse`. `parallel`
-/// selects the tree-parallel execution (honoured when the tree is
-/// `worthwhile`); serial and parallel are byte-identical. Allocates a
-/// one-shot [`CbSolveWorkspace`]; callers doing repeated solves against
-/// one factor should build and reuse a workspace instead.
+/// selects tree-parallel execution (honoured when the tree is
+/// `worthwhile`); serial and parallel execution of this core are
+/// byte-identical, and so are runs on hosts with different core counts.
+///
+/// That byte-identity is *within* this core. It is not a claim that this
+/// core agrees with [`solve_sparse`]: the two use different, equally
+/// valid reassociations (see the module notes above and [`SolveCore`]),
+/// and issue #177 records what went wrong when a runtime gate was allowed
+/// to pick between them. Allocates a one-shot [`CbSolveWorkspace`];
+/// callers doing repeated solves against one factor should build and
+/// reuse a workspace instead.
 pub fn solve_sparse_cb(
     factors: &SparseFactors,
     rhs: &[f64],
@@ -1691,25 +1857,75 @@ pub fn solve_sparse_refined(
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<Vec<f64>, FeralError> {
-    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false, false)?;
+    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false, SolveCore::SharedVector)?;
     Ok(x)
 }
 
-/// Iterative refinement using the tree-parallel contribution-block solve
-/// (issue #131 Gap A) for the initial and correction solves, pooling one
-/// `CbSolveWorkspace` across them. Falls back per-solve to the serial
-/// path when the factor's assembly tree is not `worthwhile` (path-like /
-/// small trees), so it never regresses those; on bushy trees it runs the
-/// substitutions across the rayon pool. The refined result is a valid
-/// solution equal to `solve_sparse_refined`'s up to floating-point
-/// reassociation. Used by `Solver::solve_refined` when parallelism is on.
+/// Iterative refinement through the contribution-block solve core (issue
+/// #131 Gap A) for the initial and correction solves, pooling one
+/// `CbSolveWorkspace` across them.
+///
+/// `parallel` requests tree-parallel execution over the current rayon
+/// pool; the CB core self-gates per factor (`CbTaskPlan::worthwhile`) and
+/// runs single-threaded on path-like / small trees where the scope
+/// overhead would not pay. **Neither `parallel` nor the gate's verdict
+/// changes a single result bit** — the child-reduction order is fixed at
+/// ascending child index in both. Pass `parallel: false` when no worker
+/// pool is available and you still need the CB core's arithmetic (issue
+/// #154's pool-less fallback, issue #177).
+///
+/// The refined result is a valid solution equal to
+/// `solve_sparse_refined`'s up to floating-point reassociation: the CB
+/// forward groups contributions by subtree, the shared-vector core folds
+/// them in flat postorder. Choosing between the two cores is therefore a
+/// numerically visible decision and belongs to the caller — see
+/// [`SolveCore`]. Used by `Solver::solve_refined` when parallelism is on.
+pub fn solve_sparse_refined_cb(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    parallel: bool,
+) -> Result<Vec<f64>, FeralError> {
+    let (x, _) = solve_sparse_refined_core(
+        matrix,
+        factors,
+        rhs,
+        false,
+        SolveCore::ContribBlock { parallel },
+    )?;
+    Ok(x)
+}
+
+/// Iterative refinement through whichever solve core suits the factor,
+/// chosen by [`SolveCore::Auto`] — the CB core on bushy trees where it
+/// pays, the shared-vector core elsewhere.
+///
+/// The choice is a pure function of the factor: the same factor solves
+/// with the same arithmetic on a single-core host and a 64-core one, with
+/// or without a thread pool, whatever `FERAL_CB_THRESH` says (issue
+/// #177). `parallel` requests tree-parallel execution when the CB core
+/// was chosen, and cannot move a result bit.
+///
+/// This is what [`crate::numeric::solver::Solver::solve_refined`] calls.
+pub fn solve_sparse_refined_auto(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    parallel: bool,
+) -> Result<Vec<f64>, FeralError> {
+    let (x, _) =
+        solve_sparse_refined_core(matrix, factors, rhs, false, SolveCore::Auto { parallel })?;
+    Ok(x)
+}
+
+/// [`solve_sparse_refined_cb`] with tree-parallel execution requested.
+/// Retained as the established name for the issue #131 Gap A entry point.
 pub fn solve_sparse_refined_parallel(
     matrix: &CscMatrix,
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<Vec<f64>, FeralError> {
-    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false, true)?;
-    Ok(x)
+    solve_sparse_refined_cb(matrix, factors, rhs, true)
 }
 
 /// Per-step diagnostic data emitted by
@@ -1782,7 +1998,7 @@ pub fn solve_sparse_refined_with_diagnostics(
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<(Vec<f64>, RefinementDiagnostics), FeralError> {
-    let (x, diag) = solve_sparse_refined_core(matrix, factors, rhs, true, false)?;
+    let (x, diag) = solve_sparse_refined_core(matrix, factors, rhs, true, SolveCore::SharedVector)?;
     // `with_diagnostics = true` always yields `Some`; if it ever doesn't,
     // that's a logic bug — `expect` is fine in test code, but per CLAUDE.md
     // we use Result in src/. Return DimensionMismatch as a defensive
@@ -1794,12 +2010,51 @@ pub fn solve_sparse_refined_with_diagnostics(
     Ok((x, diag))
 }
 
+/// Which numerical core a refinement run uses. Issue #177: this is the
+/// *only* thing that may change a refined solve's arithmetic, and it is
+/// always set explicitly by the caller — never inferred from the host's
+/// core count, the rayon pool's existence, or `FERAL_CB_THRESH`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveCore {
+    /// The shared-global-vector core (`solve_sparse_core_into`): each
+    /// front's separator update folded into `y` in flat postorder. The
+    /// default, and the only core available without parallelism.
+    SharedVector,
+    /// The contribution-block core (issue #131 Gap A): each front's RHS
+    /// assembled from `b` plus its children's contribution blocks, summed
+    /// in ascending child order — a subtree sum tree rather than a flat
+    /// fold, hence a different (equally valid) reassociation.
+    ///
+    /// `parallel` selects tree-parallel execution over the rayon pool;
+    /// it is a *scheduling* choice with no effect on the result bits, and
+    /// is further gated internally by `CbTaskPlan::worthwhile`.
+    ContribBlock {
+        /// Execute over the rayon pool rather than in one thread.
+        parallel: bool,
+    },
+    /// Pick between the two cores from the factor's structure alone, via
+    /// the host-independent `cb_core_profitable` predicate: the CB core
+    /// on bushy trees where it pays, the shared-vector core on path-like
+    /// and small trees where it does not.
+    ///
+    /// This is the mode `Solver` uses. It is deliberately *not* a
+    /// function of `use_parallel`, the thread pool, the worker count, or
+    /// `FERAL_CB_THRESH` — issue #177: the same factor must solve with
+    /// the same arithmetic on every host, and only the schedule may vary.
+    /// `parallel` therefore selects execution strategy alone.
+    Auto {
+        /// Execute over the rayon pool rather than in one thread, if the
+        /// factor-derived choice landed on the CB core.
+        parallel: bool,
+    },
+}
+
 fn solve_sparse_refined_core(
     matrix: &CscMatrix,
     factors: &SparseFactors,
     rhs: &[f64],
     with_diagnostics: bool,
-    parallel_cb: bool,
+    core: SolveCore,
 ) -> Result<(Vec<f64>, Option<RefinementDiagnostics>), FeralError> {
     let n = factors.n;
     if rhs.len() != n {
@@ -1821,25 +2076,40 @@ fn solve_sparse_refined_core(
         (0.0, 0.0)
     };
 
-    // Issue #131 Gap A: when the caller opts into the tree-parallel path
-    // and the factor's assembly tree is `worthwhile`, pool one
-    // contribution-block workspace across the initial + up-to-10
-    // correction solves (each reuses the plan + scratch). Otherwise keep
-    // the proven shared-vector `SolveWorkspace` path, bit-for-bit.
-    let mut cb_ws: Option<CbSolveWorkspace> = if parallel_cb && n > 0 {
-        let cb = CbSolveWorkspace::for_factors(factors);
-        cb.worthwhile().then_some(cb)
-    } else {
-        None
-    };
+    // Issue #131 Gap A: when the caller selects the contribution-block
+    // core, pool one CB workspace across the initial + up-to-10 correction
+    // solves (each reuses the plan + scratch). Otherwise use the
+    // shared-vector `SolveWorkspace` path, bit-for-bit.
+    //
+    // Issue #177: the choice is made *here*, from the caller's explicit
+    // `core` argument, and nowhere else. It used to be made by
+    // `CbSolveWorkspace::worthwhile()`, which is derived from
+    // `rayon::current_num_threads()` and `FERAL_CB_THRESH` — so the same
+    // build on hosts with different core counts silently ran different
+    // arithmetic, and an IPM host amplified the ULP difference into
+    // different iterate trajectories (henon120). `worthwhile` now only
+    // picks the CB core's *execution* strategy, and both strategies emit
+    // identical bits.
+    let use_cb = n > 0
+        && match core {
+            SolveCore::SharedVector => false,
+            SolveCore::ContribBlock { .. } => true,
+            SolveCore::Auto { .. } => cb_core_profitable(factors),
+        };
+    let mut cb_ws: Option<CbSolveWorkspace> =
+        use_cb.then(|| CbSolveWorkspace::for_factors(factors));
     let mut ws: Option<SolveWorkspace> = if cb_ws.is_none() {
         Some(SolveWorkspace::for_factors(factors))
     } else {
         None
     };
+    let cb_parallel = matches!(
+        core,
+        SolveCore::ContribBlock { parallel: true } | SolveCore::Auto { parallel: true }
+    );
     let mut x = vec![0.0; n];
     match (cb_ws.as_mut(), ws.as_mut()) {
-        (Some(cb), _) => cb.solve_into(factors, rhs, &mut x, true),
+        (Some(cb), _) => cb.solve_into(factors, rhs, &mut x, cb_parallel),
         (None, Some(w)) => solve_sparse_into_ws(factors, rhs, &mut x, w)?,
         (None, None) => unreachable!("exactly one solve workspace is built"),
     }
@@ -1909,7 +2179,7 @@ fn solve_sparse_refined_core(
         }
 
         match (cb_ws.as_mut(), ws.as_mut()) {
-            (Some(cb), _) => cb.solve_into(factors, &r, &mut dx, true),
+            (Some(cb), _) => cb.solve_into(factors, &r, &mut dx, cb_parallel),
             (None, Some(w)) => solve_sparse_into_ws(factors, &r, &mut dx, w)?,
             (None, None) => unreachable!("exactly one solve workspace is built"),
         }
@@ -2562,5 +2832,221 @@ mod tests {
     fn reg3_rejected_block_skipped_by_helper() {
         let p = (1u64 << 53) as f64;
         assert!(solve_2x2_dblock(p + 1.0, p, p, 1.0, 2.0).is_none());
+    }
+
+    /// 2-D Poisson on a `k x k` grid: a bushy nested-dissection tree.
+    fn grid_2d(k: usize) -> CscMatrix {
+        let n = k * k;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..k {
+            for i in 0..k {
+                let p = j * k + i;
+                rows.push(p);
+                cols.push(p);
+                vals.push(4.0);
+                if i + 1 < k {
+                    rows.push(p + 1);
+                    cols.push(p);
+                    vals.push(-1.0);
+                }
+                if j + 1 < k {
+                    rows.push(p + k);
+                    cols.push(p);
+                    vals.push(-1.0);
+                }
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    /// A pentadiagonal chain: path-like, so the Amdahl arm rejects it.
+    fn pentadiag_chain(n: usize) -> CscMatrix {
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(4.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+            if i + 2 < n {
+                rows.push(i + 2);
+                cols.push(i);
+                vals.push(-0.5);
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    /// Issue #177: the CB coarsening threshold is a **scheduling** knob.
+    /// It is derived from `rayon::current_num_threads()` (and overridable
+    /// via `FERAL_CB_THRESH`), so if it could move a result bit, the same
+    /// binary would solve differently on hosts with different core counts
+    /// — which is exactly what the henon120 report caught.
+    ///
+    /// Sweeps the threshold across its whole useful range, asserts the
+    /// task decomposition really changes (otherwise the test is vacuous),
+    /// and asserts every solve is byte-identical, under both serial and
+    /// tree-parallel execution.
+    #[test]
+    fn cb_coarsening_threshold_is_arithmetically_inert() {
+        // Poisson 2-D 40x40: a bushy nested-dissection tree, so the
+        // threshold has many cut points to choose between.
+        let k = 40usize;
+        let n = k * k;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..k {
+            for i in 0..k {
+                let p = j * k + i;
+                rows.push(p);
+                cols.push(p);
+                vals.push(4.0);
+                if i + 1 < k {
+                    rows.push(p + 1);
+                    cols.push(p);
+                    vals.push(-1.0);
+                }
+                if j + 1 < k {
+                    rows.push(p + k);
+                    cols.push(p);
+                    vals.push(-1.0);
+                }
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+        let (factors, _) = factorize_multifrontal(&m, &sym, &make_params()).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| 1.0 + 0.37 * (i % 7) as f64).collect();
+
+        let mut reference: Option<Vec<f64>> = None;
+        let mut root_counts = Vec::new();
+        for thresh in [1u64, 8, 64, 512, 4096, 32_768, 1 << 40, u64::MAX] {
+            for parallel in [false, true] {
+                let mut ws = CbSolveWorkspace::for_factors_with_threshold(
+                    &factors,
+                    CbThreshold::Fixed(thresh),
+                );
+                let mut x = vec![0.0; n];
+                ws.solve_into(&factors, &b, &mut x, parallel);
+                if !parallel {
+                    root_counts.push(ws.task_root_count());
+                }
+                match &reference {
+                    None => reference = Some(x),
+                    Some(r) => {
+                        for i in 0..n {
+                            assert_eq!(
+                                r[i].to_bits(),
+                                x[i].to_bits(),
+                                "thresh={thresh} parallel={parallel}: bit {i} moved \
+                                 — the coarsening plan is not arithmetically inert"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Non-vacuity: the sweep really did produce different task
+        // decompositions, from every-node-a-root down to roots-only.
+        let lo = root_counts.iter().copied().min().unwrap_or(0);
+        let hi = root_counts.iter().copied().max().unwrap_or(0);
+        assert!(
+            hi > lo,
+            "threshold sweep produced a single decomposition ({lo} task roots) — \
+             the invariance assertion above proves nothing"
+        );
+    }
+
+    /// Issue #177: `cb_core_profitable` reimplements `CbTaskPlan`'s gate
+    /// on flat arrays, because it runs on every refined solve including
+    /// the ones it turns down and the plan's three `Vec<Vec<usize>>`
+    /// allocations cost more than a whole chain solve. Two
+    /// implementations of one rule can drift, so pin them together
+    /// across tree shapes that land on both sides of the gate.
+    #[test]
+    fn cb_core_profitable_matches_the_plan_gate() {
+        let mut checked_true = false;
+        let mut checked_false = false;
+        for m in [
+            grid_2d(8),
+            grid_2d(40),
+            grid_2d(160),
+            pentadiag_chain(64),
+            pentadiag_chain(400),
+            pentadiag_chain(20_000),
+        ] {
+            let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+            let (factors, _) = factorize_multifrontal(&m, &sym, &make_params()).unwrap();
+            let n_nodes = factors.node_factors.len();
+            let children = build_children(&factors.node_parents, n_nodes);
+            let plan = CbTaskPlan::build_with_threshold(
+                &children,
+                &factors.node_parents,
+                &factors.node_factors,
+                n_nodes,
+                CbThreshold::Reference,
+            );
+            let flat = cb_core_profitable(&factors);
+            assert_eq!(
+                flat, plan.worthwhile,
+                "n={}: flat predicate says {flat}, CbTaskPlan says {}",
+                m.n, plan.worthwhile
+            );
+            checked_true |= flat;
+            checked_false |= !flat;
+        }
+        assert!(
+            checked_true && checked_false,
+            "fixtures must land on both sides of the gate \
+             (saw profitable={checked_true}, rejected={checked_false})"
+        );
+    }
+
+    /// Issue #177: `worthwhile` is a scheduling predicate, so requesting
+    /// parallel execution on a factor it rejects must still run the CB
+    /// core (serially) — not silently switch to the shared-vector core.
+    ///
+    /// A short tridiagonal chain is below `MIN_TOTAL_COST` and path-like,
+    /// so the gate rejects it; the CB result must nonetheless differ from
+    /// `solve_sparse` only as a reassociation, and must equal the CB core
+    /// run either way, bit for bit.
+    #[test]
+    fn cb_core_is_used_even_when_the_parallel_gate_rejects_the_tree() {
+        let n = 120usize;
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(4.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+        let (factors, _) = factorize_multifrontal(&m, &sym, &make_params()).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| 1.0 + 0.37 * (i % 7) as f64).collect();
+
+        let ws = CbSolveWorkspace::for_factors(&factors);
+        assert!(
+            !ws.worthwhile(),
+            "fixture must land on the rejected side of the gate"
+        );
+
+        let mut x_par = vec![0.0; n];
+        let mut x_ser = vec![0.0; n];
+        CbSolveWorkspace::for_factors(&factors).solve_into(&factors, &b, &mut x_par, true);
+        CbSolveWorkspace::for_factors(&factors).solve_into(&factors, &b, &mut x_ser, false);
+        for i in 0..n {
+            assert_eq!(
+                x_par[i].to_bits(),
+                x_ser[i].to_bits(),
+                "gate-rejected factor: requesting parallel changed bit {i}"
+            );
+        }
     }
 }
