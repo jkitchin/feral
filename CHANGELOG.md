@@ -4,6 +4,35 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — numeric `FERAL_*` knobs no longer ignore what you set them to (issue #176)
+
+- **`1e18` now means `1e18`.** Every numeric tuning knob was read as
+  `env::var(NAME).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT)`.
+  Scientific notation is not an integer literal, so `FERAL_CB_THRESH=1e18` and
+  `FERAL_PAR_TASK_MIN_FLOPS=1e18` parsed as nothing and were *silently* replaced
+  by the built-in default — while the docs and pounce's option help write those
+  same defaults as `1e6` / `1e8`. The reporter attributed two perf measurements
+  to paths they believed were switched off and were not.
+- **A value FERAL cannot use now says so.** An unparseable, negative, or
+  non-finite value prints one line to stderr —
+  `warning: FERAL_PIVTOL="-1" must be >= 0; falling back to the built-in default`
+  — before falling back, once per distinct value. A magnitude past the knob's
+  type (`1e30` on a `u64` knob) clamps to the maximum instead of falling back,
+  since that value means "switch this path off". Fractional input rounds rather
+  than truncating.
+- **Applies to every numeric knob**, not just the two reported:
+  `FERAL_CB_THRESH`, `FERAL_PAR_TASK_MIN_FLOPS`, `FERAL_PAR_MIN_SEEDS`,
+  `FERAL_INTRAFRONT_MIN_AREA`, `FERAL_PACKED_SIMD_MIN_WORK`, `FERAL_PIVTOL`,
+  `FERAL_STATIC_PIVOT`, `FERAL_AUTO_CB_BETA`, `FERAL_DENSE_MAX`,
+  `FERAL_SPARSE_MAX`, and the `feral-diagnostics` knobs. The policy lives in one
+  new module, `feral::env`; a test fails the build if a new knob parses its own
+  value locally again.
+- **No default and no gate changed** — only what a knob accepts and what it
+  reports when it refuses. `feral::numeric::factorize::par_task_min_flops()` and
+  `par_min_seeds()` are now public so a caller can confirm what the process
+  resolved a knob to.
+
+
 ### Added — caller-capped iterative refinement and in-place solves (issue #178)
 
 - **`RefineOptions`** makes the refinement step budget a per-call parameter.

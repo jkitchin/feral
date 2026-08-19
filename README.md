@@ -302,9 +302,30 @@ the C ABI reads on `feral_new()`:
 | `FERAL_PARALLEL`      | off     | `on` enables the rayon-based parallel multifrontal driver             |
 | `FERAL_FACTOR_TRACE`  | off     | `on` streams per-factor wall + delayed-pivot counts to stderr         |
 | `FERAL_MC64_TRACE`    | off     | `on` streams per-call MC64 wall to stderr                             |
+| `FERAL_STATIC_PIVOT`  | off     | static-pivot perturbation threshold (any positive float)              |
 
 The defaults are the ones validated in the v0.4.0 Mittelmann sweep
 (see `CHANGELOG.md`).
+
+The scheduling and kernel gates are read where they are used rather than
+on `feral_new()`:
+
+| variable                    | default | effect                                                          |
+|-----------------------------|---------|-----------------------------------------------------------------|
+| `FERAL_PAR_TASK_MIN_FLOPS`  | `1e6`   | subtree flops at or above which a supernode becomes its own task |
+| `FERAL_PAR_MIN_SEEDS`       | `2`     | task-graph seeds below which the factorization runs sequentially |
+| `FERAL_CB_THRESH`           | derived | coarsening cutoff for the contribution-block solve core          |
+| `FERAL_INTRAFRONT_MIN_AREA` | `32768` | front area below which intra-front parallelism is off            |
+| `FERAL_PACKED_SIMD_MIN_WORK`| `1024`  | Schur work below which the packed SIMD kernel is skipped         |
+| `FERAL_DENSE_MAX`           | `1000`  | `bench` only: dense-BK size gate                                 |
+| `FERAL_SPARSE_MAX`          | none    | `bench` only: sparse size gate                                   |
+
+**Numeric knobs take `1e6`-style notation** as well as plain integers, and
+a value FERAL cannot use — unparseable, negative, non-finite — prints a
+warning to stderr and falls back to the default rather than being ignored
+in silence (issue #176). A magnitude past the knob's type clamps to that
+maximum, so `FERAL_PAR_TASK_MIN_FLOPS=1e30` reliably means "never
+parallelize". Boolean knobs take `on`/`1`/`true`/`yes`.
 
 ### Mittelmann NLP benchmark
 
