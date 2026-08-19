@@ -6691,3 +6691,66 @@ expect to have to pin.
 
 Evidence: issue #171; `dev/research/markowitz-fill-measurement.md`;
 `dev/journal/2026-08-14-01.org`; the #166 and #168 arm harnesses.
+
+## 2026-08-19 — The refinement step budget is a per-call option, not a default change and not solver state (issue #178)
+
+FERAL's sparse iterative refinement ran a fixed budget of up to 10
+correction steps. Issue #178, filed from pounce#698, reported that this is
+the wrong budget for a caller that is *itself* iterating on the same
+system — an interior-point method — and measured the cost: on a
+118 276 × 118 276 augmented system, back-solve time was 147.3 s with
+FERAL's inner refinement on and 58.3 s with it off, 60 % of back-solve and
+20 % of wall time, and the unrefined run reached an objective *closer* to
+the MA57 reference than the refined one.
+
+**Decision: make the budget a per-call parameter carried by an options
+struct, `RefineOptions { max_steps }`, and change no default.**
+
+Three parts, each of which could have gone otherwise.
+
+**Per-call, not a `Solver` setting.** A stateful `set_refine_max_steps`
+would be a smaller diff at the call sites, but it makes a `&self` solve's
+behavior depend on prior mutation, and the ask is genuinely per-call: an
+IPM host may want one correction inside its own loop and the full budget
+for a final solve it keeps.
+
+**An options struct, not a bare `usize`.** The struct is one field today
+and looks like ceremony. It matches the repo's existing convention
+(`NumericParams`, `SupernodeParams`, `BunchKaufmanParams`, `LuParams`),
+and it means the next tunable anyone asks for — a caller-set residual
+target is the obvious candidate, since the `ε·√n` default is FERAL's
+choice and not the host's — is additive for every caller who constructs
+from `Default`, rather than another argument on six entry points.
+
+**The default stays at 10.** Issue #178 explicitly does not ask for a
+change, and the reason is worth recording because it cuts against the
+measurement above: pounce defaults `feral_refine` to *on* for a
+documented case (`pinene_3200`) whose IPM tail stalls when the residual
+floor left by cascade-break's L-factor perturbation goes uncorrected.
+Zero steps loses that case. So the problem was never that 10 is too
+many — it is that 10 and 0 were the only two values expressible. The
+value that plausibly serves both is 1, and nobody could ask for it.
+
+Two semantics follow from "cap, not target", and both are tested rather
+than merely documented. The existing exits — the `ε·√n` relative
+residual, the 100× divergence guard, the 2-strike plateau — keep
+priority, so raising `max_steps` can never add work to a system that has
+already converged. And the best-iterate contract holds under every value,
+so no cap can return an answer worse than `solve_sparse`'s.
+
+`max_steps = 0` returns before the residual matvec rather than after. The
+answer would be identical either way; the cost would not, and a caller
+opting out of refinement paying a `symv` and a `norm2` per solve would
+address only half of what was reported.
+
+Measured on this branch (20 reps, release, single trial): on
+VESUVIO_0021, a pounce KKT that uses 4 corrections, the refined solve is
+7.31× the bare solve at the default and 3.07× at `k = 1`; `k = 0` is
+1.03×, i.e. inside the bare solve's own noise. The 2.4× per-call
+reduction is the same direction and rough magnitude as pounce#698's
+independently measured 2.6× per-iteration back-solve reduction.
+
+Evidence: issue #178; pounce#698 Observation 5;
+`dev/research/refinement-cap-2026-08-19.md`;
+`dev/plans/issue-178-refine-cap-and-inplace.md`;
+`dev/journal/2026-08-19-01.org`; `tests/issue178_refine_cap.rs`.

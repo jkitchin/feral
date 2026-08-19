@@ -117,3 +117,43 @@ Evidence: 21 new tests in `tests/issue178_refine_cap.rs` (12) and
 `tests/issue178_solve_into.rs` (9), all passing; full suite
 `cargo test --workspace` green with 0 failures across 93 test binaries;
 `cargo clippy --all-targets -- -D warnings` clean.
+
+* 14:35 :issue-178:measurement:bench:
+Ran the mandatory session-end bench (`cargo run --bin bench --release`).
+**The benchmark corpus is not present in this container** —
+`data/benchmark-config.toml` is missing, so the harness fell back to its
+8 synthetic matrices and both Phase 2.8.1 partition tables report
+`count = 0`, verdict `N/A`. There is therefore **no comparison against
+2026-08-15-02's p90 numbers this session**. Not a regression, not an
+improvement — not measured. What did run passed: 2/2 inertia match vs
+MUMPS, 2/2 residual pass, worst residual 1.26e-16.
+
+So I measured the change directly instead, on real KKT matrices in the
+repo. Per-call cost of the single-RHS refined solve as a function of the
+new cap, 20 reps each, release build, one trial (no repeated trials —
+treat as indicative, not as a noise-bounded measurement):
+
+    matrix                  n      steps  bare     k=0     k=1     k=10
+    VESUVIO_0021          3083     5      0.077ms  1.03x   3.07x   7.31x
+    nuffield2_trap_iter1  26649    3      9.63ms   1.07x   2.13x   3.00x
+    twirism1_kkt           745     3      0.087ms  0.72x   2.04x   3.19x
+    sawpath_kkt           1575     3      0.069ms  0.91x   2.16x   3.16x
+
+Two things this confirms:
+
+1. `k = 0` costs what `solve_sparse` costs (0.72-1.07x, i.e. within the
+   noise of the bare solve). The early return *before* the residual
+   matvec is doing its job — had I returned after it, k=0 would sit
+   visibly above 1.0x on every row.
+2. On VESUVIO_0021 — a pounce KKT that uses 4 corrections before the
+   plateau exit — `k = 1` is 3.07x bare against the default's 7.31x, a
+   2.4x reduction in per-call refined-solve cost. That is the same
+   direction and rough magnitude as pounce#698's 2.6x per-iteration
+   back-solve reduction, measured independently at a different scale.
+
+The three matrices that stop at 3 steps do so via the 2-strike plateau
+(their residuals are large and non-decreasing — nuffield2_trap is the
+issue-54 repro and is genuinely near-singular), so their default is
+already close to `k = 2` and the cap has less to give. That is the
+expected shape: the cap pays off exactly where refinement would
+otherwise keep going.
