@@ -6822,6 +6822,43 @@ Evidence: issue #177; `dev/journal/2026-08-19-01.org`;
 25600 entries differing between the pooled and pool-less arms);
 `tests/cb_core_choice_ignores_env.rs`.
 
+## 2026-08-19-03 — the CB solve gate has two halves (issue #175)
+
+`CbTaskPlan::worthwhile` is split into:
+
+- `cb_gate_shape(fwd_seeds, total, max_local)` — the pre-existing three
+  shape terms (≥2 seeds, `total ≥ MIN_TOTAL_COST`, no task root above
+  `MAX_LOCAL_SHARE` of the work);
+- `cb_sync_amortized(total, n_nodes)` — new: `total ≥ 64 · n_nodes`,
+  i.e. a front must average ≥64 `nrow·(nelim+1)` units before
+  `cb_run_parallel`'s per-front synchronization is worth paying.
+
+`worthwhile = shape ∧ amortized`; `cb_core_profitable` — the predicate
+that chooses between the two numerically distinct solve cores (#177) —
+applies **the shape half only**.
+
+Why the split rather than one gate: the two predicates answer different
+questions. `worthwhile` picks between two byte-identical executions of
+one core, so it may model machine overhead freely. `cb_core_profitable`
+picks between two different reassociations, so it must stay a function
+of the factor alone — folding an overhead term into it would silently
+change which arithmetic wide-sparse factors solve with, which is exactly
+the failure #177 fixed. `cb_core_profitable_matches_the_plan_gate` pins
+the shared half so the two implementations cannot drift.
+
+Evidence: issue #175 (15% of an IPM run and ~3.0M involuntary context
+switches on `NARX_CFy`, 14 cores);
+`dev/research/issue-175-cb-solve-gate-overhead.md` (break-even between
+53 and 74 units/front over eight fixtures × two runs × three worker
+counts); `dev/journal/2026-08-19-03.org`.
+
+Accepted cost: a bushy factor whose fronts average under 64 units now
+runs the CB core serially even where tree-parallelism would have won a
+few percent. The floor sits at the measured break-even, so the expected
+cost of a false negative is ~0 and its worst observed case is ~1.1x,
+against a false positive's measured 1.42x locally and 15% end-to-end on
+the reporting host.
+
 ## 2026-08-19 — Numeric `FERAL_*` knobs warn and fall back; they do not error, and they accept `1e6` notation (#176)
 
 Every numeric env knob was read with
