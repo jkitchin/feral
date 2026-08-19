@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-19T15:29:43Z
+Generated: 2026-08-19T20:08:07Z
 
 ## Latest Session
-File: dev/sessions/2026-08-19-02.md
+File: dev/sessions/2026-08-19-03.md
 ```
-# Session 2026-08-19-02
+# Session 2026-08-19-03
 
 ## BENCHMARK NUMBERS ARE NOT COMPARABLE TO LAST SESSION
 
-Reported first, per the hard rule in CLAUDE.md.
+Reported first, per the hard rule in CLAUDE.md — and for the same reason
+as 2026-08-19-02: `cargo run --bin bench --release` in this container
+finds only the 8 synthetic matrices. The external corpus and the
+MUMPS/SPRAL oracle timings are absent, so both Phase 2.8.1 exit
+partitions report `N/A` and **no comparison against 2026-08-15-02's
+1.61 / 2.00 / 1.67 / 1.67 is possible from this run**. I am not claiming
+those numbers held; they were not measured.
 
-`cargo run --bin bench --release` in this container found only the 8
-synthetic matrices; the external corpus and the MUMPS/SPRAL oracle
-timings are not present. Both Phase 2.8.1 exit partitions therefore
-report `N/A` rather than a p90:
+What the run does confirm, identical to last session: inertia 2/2 vs
+MUMPS, residual 2/2, worst residual 1.26e-16.
 
-    --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-    bucket                    count      p90     target  verdict
-    small-frontal (<200)          0        -     <= 2.0      N/A
-    medium (<500)                 0        -     <= 3.0      N/A
-
-**No comparison against 2026-08-15-02's 1.61 / 2.00 / 1.67 / 1.67 is
-possible from this run.** I am not claiming the numbers held; I am
-saying they were not measured. A session with the corpus mounted should
-re-run the partition before reading anything into it.
-
-What the run does confirm: correctness is intact on what it could see —
-inertia 2/2 vs MUMPS, residual 2/2, worst residual 1.26e-16.
-
-This is also the wrong benchmark for this change, which touches the
-*solve* path and not the factor path. The relevant measurements are in
-"Benchmark Results" below.
+It is also the wrong benchmark for this change, which touches solve
+*scheduling* and not the factor path. The measurements that matter are
+in "Benchmark Results" below.
 
 ## Goal
 
-Fix issue #177 — "parallel solve is not bit-identical to serial on
-henon120, breaking #131's stated contract".
+Fix issue #175 — the tree-parallel solve added for #131 Gap A is a net
+15% loss on the wide-sparse Mittelmann KKT `NARX_CFy`, and
+`CbTaskPlan::worthwhile` has no per-call-overhead term.
 
 ## Accomplished
 
-### The report is real, but not the bug it looks like
+### The report is real, and it is purely a scheduling bug
 
-The reporter compared two runs that differed only in `FERAL_CB_THRESH`,
-held the factorization sequential to rule out #16, and found the two
-parallel runs bit-identical to each other but not to the "serial" one.
-They concluded there was a fixed ordering difference in the parallel
-path — "findable deterministically".
+The reporter serialized the tree-parallel solve with `FERAL_CB_THRESH`
+and recovered 7.35 s of 49.41 s (15%) plus ~3.0M involuntary context
+switches, on 14 cores over 100 IPM iterations. Two things follow that
+the issue does not state:
 
-There is no such ordering difference. feral has **two numerically
-distinct solve cores**:
+1. `FERAL_CB_THRESH` does not choose the solve *core* — since #177 that
+   is `cb_core_profitable`, which reads neither the worker count nor the
+   environment. A huge threshold collapses the plan to one task, so the
+   **same** CB core runs serially. The whole 7.35 s is scheduling
+   overhead, and fixing it cannot move a bit of any solve.
+2. Rows 3 and 4 of the reporter's table are within noise, so the CB core
+   running serially already matches switching parallelism off entirely
+   on this problem. Nothing in the report argues for changing which core
+   runs.
 
-- `solve_sparse_core_into` — folds each front's separator update into a
-  global vector in flat postorder;
-- the contribution-block core (#131 Gap A) — assembles each front's RHS
-  from its children's contribution blocks, summed in ascending child
+### Mechanism: the overhead is per front, not per task
+
+`cb_run_parallel` takes the shared `contribs` mutex inside its per-front
+loop — once per child drained, once to store the front's own block. That
+cost scales with the supernode count; `MIN_TOTAL_COST` is a floor on
+*total* work. `NARX_CFy` has 45,736 supernodes and a Lagrangian Hessian
 ```
 
 ## Git Status
 ```
+ffb7599 Merge pull request #180 from jkitchin/claude/quirky-bardeen-c3ynyz
+cb16458 Merge origin/main into claude/quirky-bardeen-c3ynyz (#177 + #178)
+5018575 Merge pull request #179 from jkitchin/claude/issue-178-ycwr81
 c154c92 docs: session checkpoint 2026-08-19-01 (#177 fixed)
 b75da82 test(solve): pin the refined solve's arithmetic against the host (#177)
-3cafe57 fix(solve): choose the solve core from the factor, not the host (#177)
-6fb9d26 Merge pull request #174 from jkitchin/feat/scaling-router-invariance
-d00666a docs: session checkpoint 2026-08-15-02 (KIRBY2 localized, #153 closed)
 ```
 
 ## Test Status
@@ -86,115 +86,105 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 428 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 3.11s
+test result: ok. 431 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.04s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-03.md)
 
 
-Refined solve, best of 7, 4 workers, microseconds. This is the
-measurement the change is about; the `bench` binary's factor-ratio
-partitions are unrelated to it and were unavailable anyway (see the
-top of this file).
+`issue175_cb_gate_calibration` (`#[ignore]`d, in-crate): pooled CB core,
+serial vs tree-parallel, best of 30, arms interleaved, 4-core container.
+par/ser < 1 means tree-parallel wins.
 
-    matrix        n      shared-vector  auto-serial     auto-par(4)
-    chain_400     400         22.3      22.9 (1.03x)   22.9 (1.03x)
-    chain_2000    2000       112.9     114.8 (1.02x)  114.6 (1.01x)
-    chain_20000   20000     1276.3    1276.8 (1.00x) 1272.0 (1.00x)
-    poisson_40    1600       642.2     657.1 (1.02x)  691.8 (1.08x)
-    poisson_96    9216      4549.3    4612.6 (1.01x) 4631.5 (1.02x)
-    poisson_160   25600    27761.6   30632.9 (1.10x) 20763.6 (0.75x)
+| fixture | total/n_nodes | run 1 (w=2,4,8) | run 2 (w=2,4,8) | geo. mean |
+|---|---:|---|---|---:|
+| narx_w1 | 25 | 1.07 1.10 1.42 | 0.91 0.98 1.04 | 1.08 |
+| narx_w2 | 28 | 0.97 1.08 1.04 | 0.94 1.14 0.98 | 1.02 |
+| narx_w4 | 53 | 1.01 1.11 0.93 | 0.89 1.02 0.95 | 0.98 |
+| narx_w6 | 74 | 1.15 0.95 0.88 | 0.74 0.88 0.87 | 0.91 |
+| narx_w8 | 103 | 0.74 0.94 0.70 | 0.81 0.84 0.83 | 0.81 |
+| poisson_96 | 202 | 0.70 0.76 0.70 | 0.74 0.80 0.69 | 0.73 |
+| poisson_160 | 235 | 0.74 0.78 0.73 | 0.80 0.75 0.68 | 0.75 |
+| narx_w3 | 305 | 0.87 0.64 0.64 | 0.63 0.54 0.51 | 0.63 |
 
-Factors the predicate rejects are at parity (1.00-1.03x). On the one
-factor it routes to the CB core, a host with no workers pays ~1.10x for
-the determinism and a 4-worker host gains 25%.
+Monotone in work per front; break-even between 53 and 74. `narx_w1`
+(47,228 fronts, 22 seeds, 25 units/front) is the local analogue of
+`NARX_CFy` and never pays. The local losses are milder than the reported
+15% because this container has 4 cores and the dominant cost is mutex
+contention, which worsens with worker count.
 
-The `bench` binary run for this session:
+`cargo run --bin bench --release` (unchanged from last session, see the
+top of this file):
 
 8 matrices benchmarked
-2 KKT matrices total
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
   Worst residual: 1.14e-15 (densecol_kkt_300_0000)
-
---- Sparse solver validation ---
 Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-
---- Dense perf vs oracles: no matrices have oracle timings ---
---- Sparse perf vs oracles: no matrices have oracle timings ---
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
+--- Dense/Sparse Phase 2.8.1 exit partition: N/A (no corpus, no oracles)
 
 ```
 
 ## Recent Decisions
+  `MAX_LOCAL_SHARE` of the work);
+- `cb_sync_amortized(total, n_nodes)` — new: `total ≥ 64 · n_nodes`,
+  i.e. a front must average ≥64 `nrow·(nelim+1)` units before
+  `cb_run_parallel`'s per-front synchronization is worth paying.
 
-Rejected alternatives, and why:
+`worthwhile = shape ∧ amortized`; `cb_core_profitable` — the predicate
+that chooses between the two numerically distinct solve cores (#177) —
+applies **the shape half only**.
 
-- *Make the CB core bit-identical to the shared-vector core.* Would
-  require the CB forward to fold contributions in postorder-of-source-
-  front, but it folds a grandchild's block into its child's block before
-  that block reaches the parent. Matching the flat postorder means
-  abandoning the subtree grouping, i.e. the parallelism itself.
+Why the split rather than one gate: the two predicates answer different
+questions. `worthwhile` picks between two byte-identical executions of
+one core, so it may model machine overhead freely. `cb_core_profitable`
+picks between two different reassociations, so it must stay a function
+of the factor alone — folding an overhead term into it would silently
+change which arithmetic wide-sparse factors solve with, which is exactly
+the failure #177 fixed. `cb_core_profitable_matches_the_plan_gate` pins
+the shared half so the two implementations cannot drift.
 
-- *Always use the CB core when parallelism is requested.* Correct and
-  simple, but measured 1.08-1.86x slower than the shared-vector core on
-  every factor the gate rejects (path-like chains, small grids), where
-  the CB core wins nothing — its only measured win is 0.72x on
-  poisson_160 at 4 workers. It also fails to close the issue, since
-  `use_parallel` is itself defaulted from the host's core count.
+Evidence: issue #175 (15% of an IPM run and ~3.0M involuntary context
+switches on `NARX_CFy`, 14 cores);
+`dev/research/issue-175-cb-solve-gate-overhead.md` (break-even between
+53 and 74 units/front over eight fixtures × two runs × three worker
+counts); `dev/journal/2026-08-19-03.org`.
 
-- *Retire the CB core, or make it opt-in only.* Restores determinism at
-  zero cost on rejected trees, but forfeits issue #131 Gap A's actual
-  win (25% on the bushy factors where tree-parallel solve pays).
-
-Accepted cost: on a factor the predicate routes to the CB core, a host
-that cannot spawn workers now pays ~1.10x on the refined solve
-(poisson_160: 27.8 ms shared-vector, 30.6 ms CB-serial), where before it
-would have silently taken the shared-vector core and a different answer.
-Factors the predicate rejects are unchanged, at 1.00-1.03x.
-
-Evidence: issue #177; `dev/journal/2026-08-19-01.org`;
-`tests/refined_solve_core_stability.rs` (fails at 6fb9d26 with 24295 of
-25600 entries differing between the pooled and pool-less arms);
-`tests/cb_core_choice_ignores_env.rs`.
+Accepted cost: a bushy factor whose fronts average under 64 units now
+runs the CB core serially even where tree-parallelism would have won a
+few percent. The floor sits at the measured break-even, so the expected
+cost of a false negative is ~0 and its worst observed case is ~1.1x,
+against a false positive's measured 1.42x locally and 15% end-to-end on
+the reporting host.
 
 ## Recent Tried-and-Rejected
+The winner has the *least* work per seed of the three. A floor high
+enough to reject `NARX_CFy` would reject `poisson_160` — the factor
+whose 25-37% win is the whole point of #131 Gap A — six times over.
 
-**Rejected on measurement.** The predicate runs on every refined solve,
-including the ones it rejects, and `CbTaskPlan::build` allocates three
-`Vec<Vec<usize>>` of length `n_nodes` (`build_children`, `owned`,
-`tr_children`). Cost of the verdict alone, versus the shared-vector
-baseline it was supposed to preserve:
+Work per **front** (`total / n_nodes`) does separate them (25 vs 235
+units, monotone across eight fixtures), and it is what the mechanism
+predicts: `cb_run_parallel` takes the shared `contribs` mutex inside the
+per-front loop, so its overhead scales with the supernode count, not
+with the task count.
 
-    chain_400     1.29x
-    chain_2000    1.27x
-    chain_20000   1.24x
+### Rejected: calibrating through `solve_sparse_refined_cb`
 
-That is the same 1.24-1.29x the design existed to avoid — the predicate
-cost as much as the core it was declining. Replaced by a flat
-`O(n_nodes)` computation (four `Vec`s of scalars, subtree costs folded
-into parents using the postorder guarantee, no child lists), which
-brings the rejected trees back to 1.00-1.03x.
-
-The cost of that replacement is a second implementation of one gate.
-`cb_core_profitable_matches_the_plan_gate` pins the two together across
-six fixtures landing on both sides of the gate.
+First calibration harness was an `examples/` probe timing the public
+refined-solve entry point, on the theory that it is what an IPM host
+calls. It reported par/ser 1.00-1.02 on fixtures that the in-crate
+harness later showed at 1.16-2.11 — the refined solve's residual sweeps
+and its per-call workspace construction are `O(n)` work in *both* arms,
+which dilutes a per-front effect until it disappears. Replaced by an
+in-crate `#[ignore]`d test that times `CbSolveWorkspace::solve_into`
+against a pooled workspace: the exact call `worthwhile` decides.
 
 ## Source Files
 ```
@@ -348,5 +338,4 @@ tests/symbolic_profiler.rs
 tests/task_plan_parity.rs
 tests/threshold_consistency.rs
 tests/tiny_fast_path.rs
-
-(truncated from 351 lines to 350 line budget)
+```

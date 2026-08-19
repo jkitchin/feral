@@ -5601,3 +5601,41 @@ brings the rejected trees back to 1.00-1.03x.
 The cost of that replacement is a second implementation of one gate.
 `cb_core_profitable_matches_the_plan_gate` pins the two together across
 six fixtures landing on both sides of the gate.
+
+## 2026-08-19-03 — issue #175, the tree-parallel solve gate
+
+### Rejected: the per-seed work floor the issue suggests
+
+Issue #175 proposes `total / fwd_seeds.len()` below a floor as the
+signature of a wide-but-thin tree, i.e. "wide, so lots of seeds, but
+little work behind each".
+
+**Rejected on measurement.** It does not separate the data. On the
+calibration fixtures (`issue175_cb_gate_calibration`, 4-core container),
+work per seed against the measured par/ser of the pooled CB core:
+
+    fixture       work/seed   par/ser
+    poisson_160      21,800      0.75   (wins)
+    narx_w1          54,900      1.08   (loses)
+    NARX_CFy (reported)  ~127k    1.15   (loses, 14 cores)
+
+The winner has the *least* work per seed of the three. A floor high
+enough to reject `NARX_CFy` would reject `poisson_160` — the factor
+whose 25-37% win is the whole point of #131 Gap A — six times over.
+
+Work per **front** (`total / n_nodes`) does separate them (25 vs 235
+units, monotone across eight fixtures), and it is what the mechanism
+predicts: `cb_run_parallel` takes the shared `contribs` mutex inside the
+per-front loop, so its overhead scales with the supernode count, not
+with the task count.
+
+### Rejected: calibrating through `solve_sparse_refined_cb`
+
+First calibration harness was an `examples/` probe timing the public
+refined-solve entry point, on the theory that it is what an IPM host
+calls. It reported par/ser 1.00-1.02 on fixtures that the in-crate
+harness later showed at 1.16-2.11 — the refined solve's residual sweeps
+and its per-call workspace construction are `O(n)` work in *both* arms,
+which dilutes a per-front effect until it disappears. Replaced by an
+in-crate `#[ignore]`d test that times `CbSolveWorkspace::solve_into`
+against a pooled workspace: the exact call `worthwhile` decides.
