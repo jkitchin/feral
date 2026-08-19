@@ -5639,3 +5639,73 @@ and its per-call workspace construction are `O(n)` work in *both* arms,
 which dilutes a per-front effect until it disappears. Replaced by an
 in-crate `#[ignore]`d test that times `CbSolveWorkspace::solve_into`
 against a pooled workspace: the exact call `worthwhile` decides.
+
+## 2026-08-19 — #153 item 2: two levers for dtoc1nd's dense-front gap
+
+Full measurement writeup: `dev/research/issue-153-dtoc1nd-dense-front-2026-08-19.md`.
+Both instruments are committed
+(`crates/feral-diagnostics/src/bin/probe_front_bucket_phases.rs`,
+`probe_panel_block_size.rs`) so either can be re-run.
+
+### Rejected: "dtoc1nd's fronts fall below the packed-SIMD work gate"
+
+The standing hypothesis in #153 and in the probe's own doc comment: dtoc1nd's
+33-64-column front regime sits between the eager small-front path and
+`PACKED_SIMD_MIN_WORK = 1024` (`src/dense/factor.rs:3861`), so its trailing
+updates run on the scalar tile walk.
+
+**Wrong.** The gate is `n_elim · (nrow − col_start) · ncol`; on dtoc1nd's paying
+front (`ncol = 62`, `nrow = 88`) that is ≈ 3.4e5, clearing the threshold by 330×.
+Confirmed with `FERAL_PACKED_SIMD_MIN_WORK` on `dtoc1nd_0010` (median of 7,
+paying-bucket avg_ns): `min_work = 0` gives 32910 ns — indistinguishable from the
+default's 32131, i.e. nothing was being rejected; `min_work = 1e12` (scalar
+always) gives 37173 ns, +15.7%, with schur% rising 18.1 → 26.5. The SIMD kernel
+is already engaged on exactly these fronts and already paying. There was no
+missed dispatch to recover.
+
+### Rejected: lowering `block_size` from 64 to 48
+
+`bs = params.block_size.min(ncol)` (`src/dense/factor.rs:2171`), so dtoc1nd's
+62-column front runs as one left-looking BLAS-2 panel with no inter-panel BLAS-3
+update — panel is 53.5% of the paying bucket's time while every other #153 fixture
+is panel 6-15% / Schur 17-30%. Lowering `block_size` should convert that panel
+work into BLAS-3.
+
+**It converts it, and the conversion does not pay.** `FERAL_BUCKET_BS` sweep on
+`dtoc1nd_0010`, paying bucket, median of 9 — the split moves monotonically and
+exactly as predicted:
+
+    bs      8     16     32     48     62     64
+    panel% 14.7   23.2   36.0   43.7   53.4   54.1
+    schur% 57.2   48.8   36.3   28.0   18.4   17.9
+
+The wall clock does not follow. Paired alternating sweep (60 pairs, single
+process, `min_us` per arm):
+
+    bs    min_us   vs_base   wins/60
+    16      9769     1.004         6
+    32      9673     0.994         9
+    48      9604     0.987        43
+    64      9733     1.000         2   <- default
+
+`bs = 48` does win the sign test (43/60 against an expected 15), but by **1.3% of
+total factor time** on a matrix whose paying bucket is 91% of that time. Moving
+three quarters of the panel share into BLAS-3 buys 1.3%: the two kernels cost
+nearly the same per flop at this front shape, so the 53.5% panel share is not
+recoverable time.
+
+It also does not generalize. `bs = 48` and `bs = 64` are identical for any front
+with `ncol ≤ 48`, and that is every other matrix sampled — `ncol` p90 is 1-19
+across clnlbeam, dtoc2, marine_1600, rocket, steering, gasoil_3200, pinene_3200,
+robot_1600, svanberg, nql180, qcqp1500-1c, cont5_2_4_l; only dtoc1nd is at 63. On
+the two with any wide fronts at all the paired sweep finds nothing: nql180 0.990
+(5/12 wins, tied with the default), qcqp1500-1c 0.994 (3/12). A 1.3% win on one
+corpus matrix and a no-op elsewhere is below the bar for changing a global default.
+
+**Kept from this attempt:** `block_size` is bit-neutral on all three matrices
+swept — identical inertia, zero delayed pivots, identical residual, and an
+identical hash over every `L`/`D` bit in storage order across
+`bs ∈ {8,16,24,32,48,62,64}` (`dtoc1nd_0010` 9cb93f568423e6c0, `nql180_0000`
+4f588093d6bac8c7, `qcqp1500-1c_0000` cfec17df1a4f8d38). So future retuning of it
+is a performance-only change. Not yet established on a matrix that actually
+delays a pivot — all three report `d0`.
