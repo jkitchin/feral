@@ -742,6 +742,13 @@ struct CbTaskPlan {
     /// (issue #177); `worthwhile` is this **and** the overhead half.
     #[cfg(test)]
     shape_ok: bool,
+    /// Σ `own_cost` over every front — the accumulator both halves of the
+    /// gate are computed from. Recorded so the #175 regression tests can
+    /// assert against the definition the builder actually used instead of
+    /// recomputing `nrow·(nelim+1)` themselves; a hand copy would keep
+    /// passing against a stale formula if `own_cost` ever changed.
+    #[cfg(test)]
+    total: u64,
     /// Whether tree-parallel *execution* is expected to beat running the
     /// same CB core serially: the shape terms of [`cb_gate_shape`] —
     /// at least two independent task roots, enough total work, no single
@@ -784,12 +791,23 @@ const MAX_LOCAL_SHARE: f64 = 0.7;
 /// serial vs tree-parallel at 2/4/8 workers, geometric mean over two
 /// runs — `issue175_cb_gate_calibration` reproduces it):
 ///
-/// | work/front | 25 | 28 | 53 | 74 | 103 | 202 | 235 | 305 |
+/// | work/front | 25 | 28† | 53 | 74 | 103 | 202† | 235 | 305 |
 /// |---|---:|---:|---:|---:|---:|---:|---:|---:|
 /// | par/ser | 1.08 | 1.02 | 0.98 | 0.91 | 0.81 | 0.73 | 0.75 | 0.63 |
 ///
-/// Everything at or below 53 is a wash or a loss; everything at or above
-/// 74 pays. See `dev/research/issue-175-cb-solve-gate-overhead.md`.
+/// † **not reachable in production.** The harness force-sets
+/// `plan.worthwhile` so it can time both arms on any fixture, and two of
+/// its eight fixtures are rejected by an *earlier* term than this one:
+/// `narx_w2` (28 units/front, total 958,763) and `poisson_96` (202,
+/// total 351,544) both fall under [`MIN_TOTAL_COST`], so `shape_ok` is
+/// already false and no per-front floor can change their fate. They are
+/// listed because the calibration measured them, not as evidence.
+///
+/// On the six reachable points — 25, 53, 74, 103, 235, 305 — everything
+/// at or below 53 is a wash or a loss and everything at or above 74
+/// pays, so the break-even the constant is set from does not depend on
+/// the two unreachable columns. See
+/// `dev/research/issue-175-cb-solve-gate-overhead.md`.
 const MIN_COST_PER_FRONT: u64 = 64;
 
 /// The shape half of the CB gate: at least two independent task roots,
@@ -960,6 +978,8 @@ impl CbTaskPlan {
             is_task_root,
             #[cfg(test)]
             shape_ok,
+            #[cfg(test)]
+            total,
             worthwhile,
         }
     }
@@ -2879,36 +2899,21 @@ mod tests {
         CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
     }
 
-    fn poisson_grid(k: usize) -> CscMatrix {
-        let n = k * k;
-        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
-        for j in 0..k {
-            for i in 0..k {
-                let p = j * k + i;
-                rows.push(p);
-                cols.push(p);
-                vals.push(4.0);
-                if i + 1 < k {
-                    rows.push(p + 1);
-                    cols.push(p);
-                    vals.push(-1.0);
-                }
-                if j + 1 < k {
-                    rows.push(p + k);
-                    cols.push(p);
-                    vals.push(-1.0);
-                }
-            }
-        }
-        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
-    }
-
     /// A `NodeFactors` carrying only what the coarsening reads —
     /// `frontal_factors.{nrow, nelim}` — so a tree with tens of
-    /// thousands of fronts can be built in microseconds. Factoring a
-    /// real matrix with 45k supernodes takes minutes in a debug build,
-    /// and the gate is a pure function of the tree shape and these two
-    /// numbers (`own_cost = nrow·(nelim+1)`).
+    /// thousands of fronts can be built in microseconds, and each front's
+    /// shape can be dialled directly to the value under test. The gate is
+    /// a pure function of the tree shape and these two numbers
+    /// (`own_cost = nrow·(nelim+1)`), so nothing the factorization would
+    /// add is read.
+    ///
+    /// This is a convenience, not a necessity: factoring the real
+    /// wide-sparse fixture `narx_proxy(24, 2000, 1)` (47,228 supernodes,
+    /// n = 96,001) costs ~0.7 s in a debug build, and
+    /// `cb_core_profitable_matches_the_plan_gate` does exactly that. An
+    /// earlier version of this comment claimed "minutes", which is wrong
+    /// by three orders of magnitude and would have been a reason to keep
+    /// a real wide-sparse matrix out of the pinning test.
     fn synthetic_node(nrow: usize, nelim: usize) -> NodeFactors {
         NodeFactors {
             first_col: 0,
@@ -2973,7 +2978,11 @@ mod tests {
             n_nodes,
             CbThreshold::Reference,
         );
-        let total = (n_nodes as u64) * (nrow as u64) * (nelim as u64 + 1);
+        // Read the builder's own accumulator rather than recomputing
+        // `n_nodes · nrow · (nelim+1)` here: a hand copy of `own_cost`
+        // would keep these guards passing against a stale formula if the
+        // per-front cost model ever changed.
+        let total = plan.total;
         (plan, total, n_nodes)
     }
 
@@ -2993,11 +3002,6 @@ mod tests {
             plan.shape_ok,
             "fixture must pass the shape half (seeds {}, total {total}) — \
              otherwise it is not the overhead term doing the rejecting",
-            plan.fwd_seeds.len()
-        );
-        assert!(
-            plan.fwd_seeds.len() >= 2 && total >= MIN_TOTAL_COST,
-            "fixture lost its shape: seeds {}, total {total}",
             plan.fwd_seeds.len()
         );
         // ...and it is thin: 30 units per front, under the 64 floor.
@@ -3056,10 +3060,11 @@ mod tests {
             "the shape half must not have picked up the per-front term"
         );
         assert!(!cb_sync_amortized(total, n_nodes));
-        assert!(cb_sync_amortized(
-            total,
-            (total / MIN_COST_PER_FRONT) as usize
-        ));
+        // The same total spread over few enough fronts does clear the
+        // term, so the rejection above is about work *per front* and not
+        // about the fixture being small. `n_nodes / 4` puts it at ~120
+        // units/front, comfortably over the floor.
+        assert!(cb_sync_amortized(total, n_nodes / 4));
     }
 
     /// Calibration harness for `MIN_COST_PER_FRONT`, not an assertion.
@@ -3073,13 +3078,10 @@ mod tests {
     #[test]
     #[ignore = "calibration harness (issue #175), not an assertion"]
     fn issue175_cb_gate_calibration() {
-        let reps: usize = std::env::var("FERAL_CALIB_REPS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30);
+        let reps: usize = crate::env::usize_var("FERAL_CALIB_REPS").unwrap_or(30);
         let fixtures = [
-            ("poisson_96", poisson_grid(96)),
-            ("poisson_160", poisson_grid(160)),
+            ("poisson_96", grid_2d(96)),
+            ("poisson_160", grid_2d(160)),
             ("narx_w1", narx_proxy(24, 2000, 1)),
             ("narx_w2", narx_proxy(24, 1300, 2)),
             ("narx_w3", narx_proxy(24, 1000, 3)),
@@ -3736,10 +3738,19 @@ mod tests {
     /// it decides between two byte-identical executions, not between two
     /// cores — so it is `shape_ok`, not `worthwhile`, that is pinned
     /// here.
+    ///
+    /// `narx_proxy` is load-bearing and must not be dropped from the
+    /// fixture list: it is the only shape here where `shape_ok` and
+    /// `worthwhile` disagree, so it is the only one that can catch the
+    /// #175 term leaking into the core choice. Grids and chains agree on
+    /// both halves, and against those alone the leaked-term mutation
+    /// passes the whole suite. `saw_split` asserts that such a fixture is
+    /// still present rather than trusting the list.
     #[test]
     fn cb_core_profitable_matches_the_plan_gate() {
         let mut checked_true = false;
         let mut checked_false = false;
+        let mut saw_split = false;
         for m in [
             grid_2d(8),
             grid_2d(40),
@@ -3747,6 +3758,7 @@ mod tests {
             pentadiag_chain(64),
             pentadiag_chain(400),
             pentadiag_chain(20_000),
+            narx_proxy(24, 2000, 1),
         ] {
             let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
             let (factors, _) = factorize_multifrontal(&m, &sym, &make_params()).unwrap();
@@ -3767,11 +3779,17 @@ mod tests {
             );
             checked_true |= flat;
             checked_false |= !flat;
+            saw_split |= plan.shape_ok && !plan.worthwhile;
         }
         assert!(
             checked_true && checked_false,
             "fixtures must land on both sides of the gate \
              (saw profitable={checked_true}, rejected={checked_false})"
+        );
+        assert!(
+            saw_split,
+            "no fixture separates shape_ok from worthwhile, so this test \
+             cannot detect the #175 term leaking into the core choice"
         );
     }
 

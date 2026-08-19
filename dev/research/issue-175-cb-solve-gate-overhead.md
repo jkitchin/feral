@@ -77,13 +77,37 @@ par/ser, two independent runs (<1 = tree-parallel wins):
 | fixture | total/n_nodes | run 1 (w=2,4,8) | run 2 (w=2,4,8) | geo. mean |
 |---|---:|---|---|---:|
 | narx_w1 | 25 | 1.07 1.10 1.42 | 0.91 0.98 1.04 | 1.08 |
-| narx_w2 | 28 | 0.97 1.08 1.04 | 0.94 1.14 0.98 | 1.02 |
+| narx_w2 † | 28 | 0.97 1.08 1.04 | 0.94 1.14 0.98 | 1.02 |
 | narx_w4 | 53 | 1.01 1.11 0.93 | 0.89 1.02 0.95 | 0.98 |
 | narx_w6 | 74 | 1.15 0.95 0.88 | 0.74 0.88 0.87 | 0.91 |
 | narx_w8 | 103 | 0.74 0.94 0.70 | 0.81 0.84 0.83 | 0.81 |
-| poisson_96 | 202 | 0.70 0.76 0.70 | 0.74 0.80 0.69 | 0.73 |
+| poisson_96 † | 202 | 0.70 0.76 0.70 | 0.74 0.80 0.69 | 0.73 |
 | poisson_160 | 235 | 0.74 0.78 0.73 | 0.80 0.75 0.68 | 0.75 |
 | narx_w3 | 305 | 0.87 0.64 0.64 | 0.63 0.54 0.51 | 0.63 |
+
+† **Not reachable in production.** The harness force-sets
+`ws.plan.worthwhile` so it can time both arms on any fixture, but two of
+the eight fixtures are rejected by an earlier term than the one being
+calibrated: `narx_w2` (total 958,763) and `poisson_96` (total 351,544)
+are both under `MIN_TOTAL_COST` = 1e6, so `shape_ok` is already false and
+no per-front floor can change their fate. Measured directly on this
+branch:
+
+    fixture       nodes      total   per_front  shape_ok  worthwhile
+    poisson_96     1736     351544         202     false       false
+    poisson_160    4633    1090303         235      true        true
+    narx_w1       47228    1208092          25      true       false
+    narx_w2       33138     958763          28     false       false
+    narx_w3        6024    1840981         305      true        true
+    narx_w4       21595    1155171          53      true       false
+    narx_w6       15384    1150719          74      true        true
+    narx_w8       11880    1229411         103      true        true
+
+The break-even is therefore set from the six reachable points — 25, 53,
+74, 103, 235, 305 — which are still monotone and still bracket it
+between 53 and 74. Dropping the two unreachable rows changes nothing
+about the constant; they are reported because they were measured, not
+because they carry evidence.
 
 Monotone in work per front, with break-even between 53 and 74 cost
 units. `narx_w1` (n = 96,001, 47,228 supernodes, total 1.21M, 22 seeds,
@@ -102,8 +126,9 @@ Add the missing term to the **scheduling** gate only:
 
 i.e. a front must average at least 64 `nrow·(nelim+1)` units — about an
 8×8 front — before the per-front synchronization is worth paying. 64
-sits at the measured break-even: fixtures at or below 53 are a wash or a
-loss (geo. mean 0.98–1.08), fixtures at or above 74 pay (0.63–0.91).
+sits at the measured break-even: reachable fixtures at or below 53 are a
+wash or a loss (geo. mean 0.98–1.08), reachable fixtures at or above 74
+pay (0.63–0.91).
 `NARX_CFy`, at ~30 units/front, is rejected; every measured winner keeps
 a ≥1.1× margin over the floor.
 
