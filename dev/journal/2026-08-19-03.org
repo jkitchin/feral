@@ -1,0 +1,78 @@
+* 19:45 :issue176:env:start:
+Session goal: issue #176 — `FERAL_CB_THRESH` and
+`FERAL_PAR_TASK_MIN_FLOPS` silently ignore unparseable values such as
+`1e18` and fall back to the built-in default with no warning.
+
+Reproduced the shape by reading, not running (the reporter's evidence is
+a pounce run against a corpus this container does not have):
+`src/numeric/solve.rs:788` and `src/numeric/factorize.rs:3431` both do
+`.ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(DEFAULT)`.
+`"1e18".parse::<u64>()` is an `Err(InvalidDigit)`, so the value is
+dropped on the floor.
+
+Swept the tree for the same shape: 16 numeric-valued read sites across
+`src/`, `src/bin/`, and `crates/feral-diagnostics` (four of them behind
+local `env_usize`/`env_f64` copies). All silent. Table in
+`dev/research/env-knob-parsing-2026-08-19.md`.
+
+Precedent found for the fix: `FERAL_SCALING` already warns on an
+unrecognized value (`src/capi.rs:110`) rather than falling through
+quietly. The numeric knobs will copy that message shape.
+
+* 20:05 :issue176:env:design:
+Wrote `src/env.rs`: `u64_var` / `usize_var` / `f64_var` (+ `_where`
+variants for the knobs with validity checks), each returning `Option<T>`
+so every call site keeps its own default expression — including
+`solve.rs`, whose default is a closure over `total` and thread count.
+
+Policy decisions and why:
+- integer parse tried *before* the f64 parse, because `u64::MAX as f64`
+  is 2^64: routing `18446744073709551615` through f64 would report a
+  clamp on a value that is exactly representable. Unit test
+  `u64_max_survives_exactly` pins this.
+- `1e30` on a u64 knob clamps to `u64::MAX` instead of falling back.
+  Falling back would be the #176 bug again — the operator asked for
+  "no path can reach this".
+- fractional input rounds (half away from zero), not truncates:
+  `FERAL_PAR_MIN_SEEDS=0.9` truncating to 0 would mean "always
+  parallel", the opposite of the request.
+- warn-once per (name, raw): `intrafront_min_area()` is read per front.
+
+9 unit tests green (`cargo test --lib env::`).
+
+* 20:30 :issue176:env:sweep:
+Converted 18 read sites. The source-scan test found two I had missed by
+reading (`diag_fill_parity.rs:350`, `produce_dense_schur.rs:246`) — the
+scan is worth more than the manual inventory, which is the point of
+keeping it.
+
+Test output before fixing those two:
+
+    these FERAL_* env reads parse locally instead of going through
+    feral::env, which is how issue #176 happened:
+    ["crates/.../diag_fill_parity.rs:350", "crates/.../produce_dense_schur.rs:246"]
+
+Exempted in the scan: `FERAL_NEMIN_LIST` and `FERAL_MERGE_BUDGET_LIST`
+(diagnostics-only comma lists that parse per token after `.split(',')`).
+
+* 20:40 :issue176:evidence:
+End-to-end, the reporter's own probe, now with the fix:
+
+    $ FERAL_DEBUG_TASK_PLAN=1 FERAL_PAR_TASK_MIN_FLOPS=1e18 \
+        cargo test --release --test parallel_parity -- --nocapture
+    task_plan: n_snodes=501 seeds=1 cutoff=1000000000000000000 min_seeds=2 -> sequential
+
+`cutoff` is the value that was set (issue #176 reported `cutoff=1000000`,
+the default, for the same input) and the plan falls back to sequential —
+the behaviour the operator was asking for.
+
+Warnings observed on the rejected values (stderr, one per distinct
+value):
+
+    warning: FERAL_PAR_TASK_MIN_FLOPS="1e18x" is not a number; falling back to the built-in default
+    warning: FERAL_PAR_TASK_MIN_FLOPS="1e30" is larger than this knob can hold; clamped to its maximum
+    warning: FERAL_PIVTOL="-1" must be >= 0; falling back to the built-in default
+
+Full suite: 96 test binaries, all `ok`, 0 FAILED. `cargo clippy
+--all-targets -- -D warnings` and the `-p feral-diagnostics` variant
+both clean.
