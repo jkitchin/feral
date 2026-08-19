@@ -115,19 +115,14 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
         if let Some(strategy) = scaling_strategy_from_env_value(&scaling_raw) {
             np.scaling = strategy;
         }
-        if let Ok(s) = std::env::var("FERAL_PIVTOL") {
-            if let Ok(v) = s.parse::<f64>() {
-                if v.is_finite() && v >= 0.0 {
-                    np.bk.pivot_threshold = v;
-                }
-            }
+        // Both parsed through `crate::env`, which warns on a value it
+        // cannot use instead of leaving the default silently in place
+        // (issue #176).
+        if let Some(v) = crate::env::f64_var_where("FERAL_PIVTOL", ">= 0", |v| v >= 0.0) {
+            np.bk.pivot_threshold = v;
         }
-        if let Ok(s) = std::env::var("FERAL_STATIC_PIVOT") {
-            if let Ok(v) = s.parse::<f64>() {
-                if v.is_finite() && v > 0.0 {
-                    np.static_pivot_threshold = Some(v);
-                }
-            }
+        if let Some(v) = crate::env::f64_var_where("FERAL_STATIC_PIVOT", "> 0", |v| v > 0.0) {
+            np.static_pivot_threshold = Some(v);
         }
         if matches!(
             std::env::var("FERAL_WARN_PARTIAL_SINGULAR").as_deref(),
@@ -152,10 +147,7 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
             // n=24000 in late-IPM iters); FERAL_CASCADE_BREAK=on cuts
             // it to 2.4 s (5.6×). The auto-arm gives the same rescue
             // without per-problem opt-in.
-            let beta = std::env::var("FERAL_AUTO_CB_BETA")
-                .ok()
-                .and_then(|s| s.parse::<f64>().ok())
-                .filter(|v| v.is_finite() && *v >= 0.0)
+            let beta = crate::env::f64_var_where("FERAL_AUTO_CB_BETA", ">= 0", |v| v >= 0.0)
                 .unwrap_or(0.05);
             if beta > 0.0 {
                 solver = solver.with_auto_cascade_break(beta);

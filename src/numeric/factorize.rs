@@ -3418,20 +3418,22 @@ pub const PAR_MIN_SEEDS: usize = 2;
 /// factorization (not per panel, unlike the dense-kernel knobs), so
 /// caching buys nothing and would prevent in-process calibration and
 /// the parity sweep in `tests/task_plan_parity.rs`.
+///
+/// Public so a caller (and `tests/env_knob_parsing.rs`) can ask what
+/// value this process actually resolved the knob to — the question
+/// issue #176 could not answer from outside.
 #[inline]
-fn par_min_seeds() -> usize {
-    std::env::var("FERAL_PAR_MIN_SEEDS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(PAR_MIN_SEEDS)
+pub fn par_min_seeds() -> usize {
+    crate::env::usize_var("FERAL_PAR_MIN_SEEDS").unwrap_or(PAR_MIN_SEEDS)
 }
 
+/// The resolved `FERAL_PAR_TASK_MIN_FLOPS` cutoff: the env value when
+/// it is set and usable, [`PAR_TASK_MIN_FLOPS`] otherwise. Public for
+/// the same reason as [`par_min_seeds`] — an operator who sets the knob
+/// needs a way to confirm it took (issue #176).
 #[inline]
-fn par_task_min_flops() -> u64 {
-    std::env::var("FERAL_PAR_TASK_MIN_FLOPS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(PAR_TASK_MIN_FLOPS)
+pub fn par_task_min_flops() -> u64 {
+    crate::env::u64_var("FERAL_PAR_TASK_MIN_FLOPS").unwrap_or(PAR_TASK_MIN_FLOPS)
 }
 
 /// Task partition of the supernode tree (issue #148): one rayon task

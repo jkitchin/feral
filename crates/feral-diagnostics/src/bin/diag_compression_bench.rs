@@ -167,10 +167,7 @@ fn main() {
     let mut matrices = Vec::new();
     collect(Path::new("data/matrices/kkt"), &mut matrices);
     matrices.sort();
-    let sample_stride = std::env::var("SAMPLE_STRIDE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(500);
+    let sample_stride = feral::env::usize_var("SAMPLE_STRIDE").unwrap_or(500);
 
     println!();
     println!(

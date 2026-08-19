@@ -95,7 +95,7 @@ fn main() {
         .unwrap_or_else(|| "/tmp/rkt".to_string());
     let start: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let stop_arg: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(18);
-    let only: Option<usize> = std::env::var("ONLY").ok().and_then(|s| s.parse().ok());
+    let only: Option<usize> = feral::env::usize_var("ONLY");
 
     let pivots_env =
         std::env::var("STATIC_PIVOTS").unwrap_or_else(|_| "0,1e-12,1e-10,1e-8,1e-6".to_string());

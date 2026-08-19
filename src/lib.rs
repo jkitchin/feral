@@ -10,6 +10,7 @@
 
 pub mod capi;
 pub mod dense;
+pub mod env;
 pub mod error;
 pub mod inertia;
 pub mod io;

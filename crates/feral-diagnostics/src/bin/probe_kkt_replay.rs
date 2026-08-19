@@ -44,8 +44,8 @@ fn build_solver() -> Solver {
     if env::var("SQD").is_ok() {
         s = s.with_sqd_mode(true);
     }
-    if let Ok(s_) = env::var("AUTO_CB") {
-        let beta: f64 = s_.parse().unwrap_or(0.05);
+    if env::var("AUTO_CB").is_ok() {
+        let beta = feral::env::f64_var("AUTO_CB").unwrap_or(0.05);
         s = s.with_auto_cascade_break(beta);
     }
     // Track B2: value-bounded MC64 scaling cache. On by default;
@@ -68,10 +68,7 @@ fn main() {
     }
 
     let fresh = env::var("FRESH").is_ok();
-    let max_iter: usize = env::var("MAX_ITER")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
+    let max_iter: usize = feral::env::usize_var("MAX_ITER").unwrap_or(200);
 
     if fresh {
         eprintln!("[probe] FRESH solver every iteration");
@@ -85,8 +82,8 @@ fn main() {
     if env::var("SQD").is_ok() {
         eprintln!("[probe] SQD mode ON (diagonal pivots only)");
     }
-    if let Ok(s_) = env::var("AUTO_CB") {
-        let beta: f64 = s_.parse().unwrap_or(0.05);
+    if env::var("AUTO_CB").is_ok() {
+        let beta = feral::env::f64_var("AUTO_CB").unwrap_or(0.05);
         eprintln!("[probe] AUTO_CB ON (β={beta})");
     }
     if matches!(env::var("MC64_CACHE").as_deref(), Ok("0") | Ok("off")) {

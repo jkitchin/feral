@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-19T15:29:43Z
+Generated: 2026-08-19T19:56:19Z
 
 ## Latest Session
-File: dev/sessions/2026-08-19-02.md
+File: dev/sessions/2026-08-19-03.md
 ```
-# Session 2026-08-19-02
+# Session 2026-08-19-03
 
 ## BENCHMARK NUMBERS ARE NOT COMPARABLE TO LAST SESSION
 
-Reported first, per the hard rule in CLAUDE.md.
+Reported first, per the hard rule in CLAUDE.md. `cargo run --bin bench
+--release` in this container found only the 8 synthetic matrices — the
+external corpus and the MUMPS/SPRAL oracle timings are not mounted — so
+both Phase 2.8.1 exit partitions report `N/A`, exactly as in
+2026-08-19-02. **No comparison against 2026-08-15-02's 1.61 / 2.00 /
+1.67 / 1.67 is possible from this run.** The numbers were not measured;
+I am not claiming they held.
 
-`cargo run --bin bench --release` in this container found only the 8
-synthetic matrices; the external corpus and the MUMPS/SPRAL oracle
-timings are not present. Both Phase 2.8.1 exit partitions therefore
-report `N/A` rather than a p90:
-
-    --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-    bucket                    count      p90     target  verdict
-    small-frontal (<200)          0        -     <= 2.0      N/A
-    medium (<500)                 0        -     <= 3.0      N/A
-
-**No comparison against 2026-08-15-02's 1.61 / 2.00 / 1.67 / 1.67 is
-possible from this run.** I am not claiming the numbers held; I am
-saying they were not measured. A session with the corpus mounted should
-re-run the partition before reading anything into it.
-
-What the run does confirm: correctness is intact on what it could see —
-inertia 2/2 vs MUMPS, residual 2/2, worst residual 1.26e-16.
-
-This is also the wrong benchmark for this change, which touches the
-*solve* path and not the factor path. The relevant measurements are in
-"Benchmark Results" below.
+This is also the wrong benchmark for this change: nothing in it touches
+factor or solve arithmetic. What the run does confirm is that the change
+is inert where it should be — inertia 2/2 vs MUMPS, residual 2/2, worst
+residual 1.26e-16 (`densecol_kkt_300_0000`), byte-for-byte the same
+figures 2026-08-19-02 reported.
 
 ## Goal
 
-Fix issue #177 — "parallel solve is not bit-identical to serial on
-henon120, breaking #131's stated contract".
+Fix issue #176 — `FERAL_CB_THRESH` and `FERAL_PAR_TASK_MIN_FLOPS`
+silently ignore unparseable values (e.g. `1e18`) instead of erroring.
 
 ## Accomplished
 
-### The report is real, but not the bug it looks like
+### The bug is one shape, copied eighteen times
 
-The reporter compared two runs that differed only in `FERAL_CB_THRESH`,
-held the factorization sequential to rule out #16, and found the two
-parallel runs bit-identical to each other but not to the "serial" one.
-They concluded there was a fixed ordering difference in the parallel
-path — "findable deterministically".
+Every numeric `FERAL_*` knob in the tree was read as
 
-There is no such ordering difference. feral has **two numerically
-distinct solve cores**:
+    std::env::var(NAME).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT)
 
-- `solve_sparse_core_into` — folds each front's separator update into a
-  global vector in flat postorder;
-- the contribution-block core (#131 Gap A) — assembles each front's RHS
-  from its children's contribution blocks, summed in ascending child
+`"1e18".parse::<u64>()` is `Err(InvalidDigit)`, `.ok()` discards it, and
+`unwrap_or` puts the default back. The knob is set; the process behaves
+as if it were unset; nothing is printed. The reporter's evidence:
+
+    $ FERAL_PAR_TASK_MIN_FLOPS=1e18 pounce NARX_CFy.nl --no-sol max_iter=1
+    task_plan: n_snodes=45736 n_tasks=21 seeds=11 cutoff=1000000 min_seeds=2
+
+`cutoff=1000000` is `PAR_TASK_MIN_FLOPS`, the built-in default. Two perf
+attributions in the sibling issue were taken from runs like this.
+
+The sweep the issue asked for found the same shape at 18 sites (the
+inventory is in `dev/research/env-knob-parsing-2026-08-19.md`), four of
+them behind local `env_usize`/`env_f64` copies in `feral-diagnostics`.
+
+### One parse policy, in one module
+
+New `src/env.rs` (`feral::env`), `u64_var` / `usize_var` / `f64_var` plus
+`_where` variants carrying a validity check. Each returns `Option<T>`,
+so every call site keeps its own default expression — including
 ```
 
 ## Git Status
 ```
-c154c92 docs: session checkpoint 2026-08-19-01 (#177 fixed)
-b75da82 test(solve): pin the refined solve's arithmetic against the host (#177)
-3cafe57 fix(solve): choose the solve core from the factor, not the host (#177)
-6fb9d26 Merge pull request #174 from jkitchin/feat/scaling-router-invariance
-d00666a docs: session checkpoint 2026-08-15-02 (KIRBY2 localized, #153 closed)
+2b84177 docs: document the numeric FERAL_* knobs and their parse policy (#176)
+12e3330 fix(knobs): route every numeric FERAL_* read through feral::env (#176)
+647202a feat(env): one parse policy for the numeric FERAL_* knobs (#176)
+45429f1 docs: research note and plan for the FERAL_* knob parse policy (#176)
+ffb7599 Merge pull request #180 from jkitchin/claude/quirky-bardeen-c3ynyz
 ```
 
 ## Test Status
@@ -86,37 +86,18 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 428 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 3.11s
+test result: ok. 437 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.93s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-03.md)
 
-
-Refined solve, best of 7, 4 workers, microseconds. This is the
-measurement the change is about; the `bench` binary's factor-ratio
-partitions are unrelated to it and were unavailable anyway (see the
-top of this file).
-
-    matrix        n      shared-vector  auto-serial     auto-par(4)
-    chain_400     400         22.3      22.9 (1.03x)   22.9 (1.03x)
-    chain_2000    2000       112.9     114.8 (1.02x)  114.6 (1.01x)
-    chain_20000   20000     1276.3    1276.8 (1.00x) 1272.0 (1.00x)
-    poisson_40    1600       642.2     657.1 (1.02x)  691.8 (1.08x)
-    poisson_96    9216      4549.3    4612.6 (1.01x) 4631.5 (1.02x)
-    poisson_160   25600    27761.6   30632.9 (1.10x) 20763.6 (0.75x)
-
-Factors the predicate rejects are at parity (1.00-1.03x). On the one
-factor it routes to the CB core, a host with no workers pays ~1.10x for
-the determinism and a 4-worker host gains 25%.
-
-The `bench` binary run for this session:
 
 8 matrices benchmarked
-2 KKT matrices total
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
+
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
   Worst residual: 1.14e-15 (densecol_kkt_300_0000)
@@ -143,36 +124,36 @@ medium (<500)                 0        -     <= 3.0      N/A
 ```
 
 ## Recent Decisions
+   `feral_min_par_flops` help. The notation the docs teach must work.
+   The integer parse is tried first, so `18446744073709551615` stays
+   `u64::MAX` rather than round-tripping through 2^64.
+2. **A refused value warns on stderr, once per `(name, value)`, then
+   falls back.** Not an error: these knobs are read from inside a
+   factorization whose `Result` is reserved for *numerical* failure, and
+   turning an environment typo into a `FeralError` would hand pounce a
+   numeric-looking failure for an environment problem. The warn-and-fall-
+   back shape has precedent here — `FERAL_SCALING` has warned on an
+   unrecognized value since the X5 follow-up.
+3. **An above-range magnitude clamps to the type maximum** instead of
+   falling back. `FERAL_CB_THRESH=1e30` means "no subtree can reach this
+   cutoff"; falling back to the default there would be the reported bug
+   again, with the operator's intent inverted rather than merely lost.
+4. **Fractional input rounds half away from zero.** Truncation would
+   make `FERAL_PAR_MIN_SEEDS=0.9` mean 0 — "always parallel" — the
+   opposite of what the value asks for.
 
-Rejected alternatives, and why:
+Boolean and enum knobs are out of scope: they match a literal vocabulary
+rather than parsing a number.
 
-- *Make the CB core bit-identical to the shared-vector core.* Would
-  require the CB forward to fold contributions in postorder-of-source-
-  front, but it folds a grandchild's block into its child's block before
-  that block reaches the parent. Matching the flat postorder means
-  abandoning the subtree grouping, i.e. the parallelism itself.
+A source-scan test (`tests/env_knob_parsing.rs`) fails the build if a new
+`FERAL_*` read parses its own value locally, because the defect was one
+shape copied to eighteen sites, not one site. Two diagnostics-only
+comma-list knobs are exempted by name in that scan.
 
-- *Always use the CB core when parallelism is requested.* Correct and
-  simple, but measured 1.08-1.86x slower than the shared-vector core on
-  every factor the gate rejects (path-like chains, small grids), where
-  the CB core wins nothing — its only measured win is 0.72x on
-  poisson_160 at 4 workers. It also fails to close the issue, since
-  `use_parallel` is itself defaulted from the host's core count.
-
-- *Retire the CB core, or make it opt-in only.* Restores determinism at
-  zero cost on rejected trees, but forfeits issue #131 Gap A's actual
-  win (25% on the bushy factors where tree-parallel solve pays).
-
-Accepted cost: on a factor the predicate routes to the CB core, a host
-that cannot spawn workers now pays ~1.10x on the refined solve
-(poisson_160: 27.8 ms shared-vector, 30.6 ms CB-serial), where before it
-would have silently taken the shared-vector core and a different answer.
-Factors the predicate rejects are unchanged, at 1.00-1.03x.
-
-Evidence: issue #177; `dev/journal/2026-08-19-01.org`;
-`tests/refined_solve_core_stability.rs` (fails at 6fb9d26 with 24295 of
-25600 entries differing between the pooled and pool-less arms);
-`tests/cb_core_choice_ignores_env.rs`.
+Consequence for the public API: `numeric::factorize::par_task_min_flops`
+and `par_min_seeds` are `pub`, so a caller can confirm what value the
+process resolved a knob to. #176 could not be diagnosed from outside the
+process without that.
 
 ## Recent Tried-and-Rejected
 
@@ -212,6 +193,7 @@ src/dense/mod.rs
 src/dense/rook.rs
 src/dense/schur_kernel.rs
 src/dense/solve.rs
+src/env.rs
 src/error.rs
 src/inertia.rs
 src/io/mod.rs
@@ -274,6 +256,7 @@ tests/d7_block32_dispatch_pooled.rs
 tests/delayed_pivoting.rs
 tests/dense_fast_path.rs
 tests/dense_ldlt.rs
+tests/env_knob_parsing.rs
 tests/factor_scratch_parity.rs
 tests/factor_workspace_parity.rs
 tests/factors_ld_export.rs
@@ -348,5 +331,4 @@ tests/symbolic_profiler.rs
 tests/task_plan_parity.rs
 tests/threshold_consistency.rs
 tests/tiny_fast_path.rs
-
-(truncated from 351 lines to 350 line budget)
+```

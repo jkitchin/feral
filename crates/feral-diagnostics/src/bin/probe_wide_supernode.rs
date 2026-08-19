@@ -405,10 +405,10 @@ fn print_result(label_prefix: &str, r: &ShapeResult) {
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
+    // Shared parse policy (issue #176): `1e6` notation parses, and a
+    // value that cannot be used warns instead of vanishing into the
+    // default.
+    feral::env::usize_var(name).unwrap_or(default)
 }
 
 fn env_bool(name: &str, default: bool) -> bool {

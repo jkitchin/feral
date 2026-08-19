@@ -136,10 +136,10 @@ fn discover_iterates(family: &str) -> Vec<String> {
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
+    // Shared parse policy (issue #176): `1e6` notation parses, and a
+    // value that cannot be used warns instead of vanishing into the
+    // default.
+    feral::env::f64_var(key).unwrap_or(default)
 }
 
 fn main() {

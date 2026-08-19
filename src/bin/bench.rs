@@ -1156,10 +1156,7 @@ fn write_feral_sidecar(
 /// path will never touch (the bench corpus has n up to ~195k; a single
 /// dense allocation would OOM).
 fn dense_max_from_env() -> usize {
-    std::env::var("FERAL_DENSE_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000)
+    feral::env::usize_var("FERAL_DENSE_MAX").unwrap_or(1000)
 }
 
 /// `FERAL_SPARSE_MAX` — gate above which the sparse multifrontal loop skips
@@ -1171,10 +1168,7 @@ fn dense_max_from_env() -> usize {
 /// completes end-to-end. Skipped matrices count toward sp_total but are
 /// reported separately as "size-skipped".
 fn sparse_max_from_env() -> usize {
-    std::env::var("FERAL_SPARSE_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(usize::MAX)
+    feral::env::usize_var("FERAL_SPARSE_MAX").unwrap_or(usize::MAX)
 }
 
 /// Load metadata only (sidecar + oracle timings) for all KKT matrices in `dir`.
