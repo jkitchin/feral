@@ -1,130 +1,92 @@
-#+TITLE: Session journal 2026-08-19-03
-#+STARTUP: showall
+* 19:45 :issue176:env:start:
+Session goal: issue #176 — `FERAL_CB_THRESH` and
+`FERAL_PAR_TASK_MIN_FLOPS` silently ignore unparseable values such as
+`1e18` and fall back to the built-in default with no warning.
 
-* 19:40 :issue-175:orientation:
-Goal: issue #175 — tree-parallel solve (#131 Gap A) is a net 15% loss on
-the wide-sparse KKT =NARX_CFy=; =CbTaskPlan::worthwhile= has no
-per-call-overhead term.
+Reproduced the shape by reading, not running (the reporter's evidence is
+a pounce run against a corpus this container does not have):
+`src/numeric/solve.rs:788` and `src/numeric/factorize.rs:3431` both do
+`.ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(DEFAULT)`.
+`"1e18".parse::<u64>()` is an `Err(InvalidDigit)`, so the value is
+dropped on the floor.
 
-Reporter's evidence (feral 0.15.1 under POUNCE, Apple M-series, 14 cores,
-100 IPM iterations):
+Swept the tree for the same shape: 16 numeric-valued read sites across
+`src/`, `src/bin/`, and `crates/feral-diagnostics` (four of them behind
+local `env_usize`/`env_f64` copies). All silent. Table in
+`dev/research/env-knob-parsing-2026-08-19.md`.
 
-    baseline (all parallel)          49.41 s   4,523,354 invol. ctx switches
-    + FERAL_CB_THRESH raised         42.06 s   1,483,565
-    + FERAL_PAR_TASK_MIN_FLOPS       39.84 s      71,769
-    FERAL_PARALLEL=0                 39.72 s      35,532
+Precedent found for the fix: `FERAL_SCALING` already warns on an
+unrecognized value (`src/capi.rs:110`) rather than falling through
+quietly. The numeric knobs will copy that message shape.
 
-Attribution: the tree-parallel *solve* is 7.35 s of 49.41 (15%). Note
-rows 3 and 4 are within noise of each other, and =FERAL_CB_THRESH= does
-not change which *core* runs (that is =cb_core_profitable=, the
-host-independent predicate of #177) — only whether the CB core runs over
-the rayon pool. So the whole 15% is scheduling overhead, not a
-core-selection or arithmetic question. Fixing it cannot change any
-solve's bits.
+* 20:05 :issue176:env:design:
+Wrote `src/env.rs`: `u64_var` / `usize_var` / `f64_var` (+ `_where`
+variants for the knobs with validity checks), each returning `Option<T>`
+so every call site keeps its own default expression — including
+`solve.rs`, whose default is a closure over `total` and thread count.
 
-* 19:55 :issue-175:mechanism:
-Where the per-call cost actually lives, read off =cb_run_parallel=
-(src/numeric/solve.rs): the forward pass takes the *shared*
-=contribs= mutex twice per front (once per child drained, once to store
-its own block) — =ctx.contribs.lock()= inside the per-front loop — plus a
-=scratch= mutex per task and two =rayon::scope=s per solve. The
-=contribs= traffic is O(n_nodes) and contended by every worker, which is
-what 45,736 supernodes × 14 threads turns into 3M involuntary context
-switches. The work available to hide it is =total= (Σ nrow·(nelim+1)).
+Policy decisions and why:
+- integer parse tried *before* the f64 parse, because `u64::MAX as f64`
+  is 2^64: routing `18446744073709551615` through f64 would report a
+  clamp on a value that is exactly representable. Unit test
+  `u64_max_survives_exactly` pins this.
+- `1e30` on a u64 knob clamps to `u64::MAX` instead of falling back.
+  Falling back would be the #176 bug again — the operator asked for
+  "no path can reach this".
+- fractional input rounds (half away from zero), not truncates:
+  `FERAL_PAR_MIN_SEEDS=0.9` truncating to 0 would mean "always
+  parallel", the opposite of the request.
+- warn-once per (name, raw): `intrafront_min_area()` is read per front.
 
-So the overhead the gate is missing is *per front*, not per task: it
-scales with the number of supernodes, while every term in the current
-gate is a property of the tree's shape.
+9 unit tests green (`cargo test --lib env::`).
 
-* 20:20 :issue-175:calibration:measurement:
-Calibration harness added as an =#[ignore]=d test
-(=issue175_cb_gate_calibration=, src/numeric/solve.rs) so the constant
-can be re-derived on another host: it times the *pooled* CB core
-(=CbSolveWorkspace::solve_into=) serial vs tree-parallel, best of 30,
-both arms interleaved, over a NARX-shaped proxy family whose front size
-is a parameter.
+* 20:30 :issue176:env:sweep:
+Converted 18 read sites. The source-scan test found two I had missed by
+reading (`diag_fill_parity.rs:350`, `produce_dense_schur.rs:246`) — the
+scan is worth more than the manual inventory, which is the point of
+keeping it.
 
-Fixtures: =narx_proxy(blocks, steps, width)= = 24 independent
-dynamic-system KKT blocks (near-empty Hessian, one multiplier per step)
-joined by a light coupling row; =width= sets the frontal size. Plus 2-D
-Poisson grids as the known parallel winners. This container has 4 cores.
+Test output before fixing those two:
 
-par/ser (<1 = tree-parallel wins), by work per front = total/n_nodes:
+    these FERAL_* env reads parse locally instead of going through
+    feral::env, which is how issue #176 happened:
+    ["crates/.../diag_fill_parity.rs:350", "crates/.../produce_dense_schur.rs:246"]
 
-    fixture      tot/node    w=2    w=4    w=8
-    narx_w1            25   1.07   1.10   1.42
-    narx_w2            28   0.97   1.08   1.04
-    narx_w4            53   1.01   1.11   0.93
-    narx_w6            74   1.15   0.95   0.88
-    narx_w8           103   0.74   0.94   0.70
-    poisson_96        202   0.70   0.76   0.70
-    poisson_160       235   0.74   0.78   0.73
-    narx_w3           305   0.87   0.64   0.64
+Exempted in the scan: `FERAL_NEMIN_LIST` and `FERAL_MERGE_BUDGET_LIST`
+(diagnostics-only comma lists that parse per token after `.split(',')`).
 
-Monotone in work-per-front, crossover at ~60-80 cost units. Everything
-at or below 53 is a loss or a wash; everything at or above 74 pays.
-=narx_w1= (n=96001, 47,228 supernodes, total 1.21M, 22 seeds) is the
-local analogue of =NARX_CFy= (45,736 supernodes, 11 seeds): it passes
-every term of the current gate and loses at every worker count.
+* 20:40 :issue176:evidence:
+End-to-end, the reporter's own probe, now with the fix:
 
-* 20:35 :issue-175:finding:
-The reporter's suggested signature — =total / fwd_seeds.len()= below a
-floor — does not separate the data. =poisson_160= at 8 workers has
-1.09M/50 = 21.8k per seed and *wins* 0.73; =NARX_CFy= has ~11 seeds over
-~1.4M ≈ 127k per seed and loses. A per-seed floor that rejected NARX_CFy
-would reject the winners first. Work per *front* is the discriminator,
-which matches the mechanism (a mutex acquisition per front, not per
-task). Recorded in dev/tried-and-rejected.md.
+    $ FERAL_DEBUG_TASK_PLAN=1 FERAL_PAR_TASK_MIN_FLOPS=1e18 \
+        cargo test --release --test parallel_parity -- --nocapture
+    task_plan: n_snodes=501 seeds=1 cutoff=1000000000000000000 min_seeds=2 -> sequential
 
-* 21:05 :issue-175:implementation:
-Gate split into halves in src/numeric/solve.rs:
+`cutoff` is the value that was set (issue #176 reported `cutoff=1000000`,
+the default, for the same input) and the plan falls back to sequential —
+the behaviour the operator was asking for.
 
-  cb_gate_shape(fwd_seeds, total, max_local)   — the three shape terms
-  cb_sync_amortized(total, n_nodes)            — total >= 64 * n_nodes
+Warnings observed on the rejected values (stderr, one per distinct
+value):
 
-=worthwhile = shape ∧ amortized=; =cb_core_profitable= (core choice,
-#177) applies the shape half only, so no factor's arithmetic moves.
-=CbTaskPlan= records =shape_ok= under =cfg(test)= so
-=cb_core_profitable_matches_the_plan_gate= keeps pinning the half the
-two implementations actually share.
+    warning: FERAL_PAR_TASK_MIN_FLOPS="1e18x" is not a number; falling back to the built-in default
+    warning: FERAL_PAR_TASK_MIN_FLOPS="1e30" is larger than this knob can hold; clamped to its maximum
+    warning: FERAL_PIVTOL="-1" must be >= 0; falling back to the built-in default
 
-* 21:20 :issue-175:tests:
-Three regression tests, built on synthetic =NodeFactors= (the gate reads
-only =frontal_factors.{nrow, nelim}= and the parent table, and factoring
-a real 45k-supernode matrix takes minutes in a debug build):
+Full suite: 96 test binaries, all `ok`, 0 FAILED. `cargo clippy
+--all-targets -- -D warnings` and the `-p feral-diagnostics` variant
+both clean.
 
-- =issue175_wide_thin_tree_is_not_scheduled_in_parallel= — 16 branches ×
-  2858 fronts at 30 units each: passes the shape half (22 seeds, total
-  1.37M) and must be rejected;
-- =issue175_wide_tree_with_real_fronts_still_schedules_in_parallel= —
-  the same tree at 256 units/front must stay parallel;
-- =issue175_overhead_term_is_scheduling_only= — the shape half ignores
-  front size.
+* 21:10 :issue176:bench:checkpoint:
+`cargo run --bin bench --release`: 8 synthetic matrices only (no
+external corpus in this container), so both Phase 2.8.1 exit partitions
+report N/A — same situation as 2026-08-19-02, and no comparison against
+2026-08-15-02's 1.61/2.00/1.67/1.67 is possible. Correctness figures
+identical to last session: inertia 2/2 vs MUMPS, residual 2/2, worst
+1.26e-16 (densecol_kkt_300_0000). Expected: this change touches no
+arithmetic.
 
-Non-vacuity checked by setting =MIN_COST_PER_FRONT = 1=: two of the
-three fail (=wide_thin= and =scheduling_only=); back at 64 all pass.
-
-Full suite green: =cargo test --release= 431 lib + all integration
-targets, 0 failed; =cargo test= (debug) 0 failed; =cargo fmt --check=
-and =cargo clippy --all-targets -- -D warnings= clean.
-
-* 21:35 :issue-175:benchmark:
-=cargo run --bin bench --release=: same 8 synthetic matrices as
-2026-08-19-02 (external corpus and oracle timings still absent in this
-container), so both Phase 2.8.1 exit partitions are again =N/A= and *no
-comparison with the 1.61 / 2.00 / 1.67 / 1.67 of 2026-08-15-02 is
-possible*. Correctness unchanged and matching last session exactly:
-inertia 2/2 vs MUMPS, residual 2/2, worst residual 1.26e-16
-(=densecol_kkt_300_0000=). The bench binary exercises the factor path,
-not the solve scheduling this change touches; the measurement that
-matters is the calibration table above.
-
-* 21:45 :issue-175:scope:
-Left alone deliberately, both recorded in the research note:
-- the factorization task graph's further 2.2 s (4.5%) on the same
-  problem — its gate (=PAR_TASK_MIN_FLOPS=, #148) already has a per-task
-  work floor, so it is a calibration question, not a missing term;
-- removing the per-front =contribs= mutex outright (each slot is written
-  by one task and drained by one parent, ordered by the pending
-  counters). That would shrink the overhead this gate now avoids, but it
-  is an optimization needing its own =unsafe= safety argument.
+Checkpoint written to dev/sessions/2026-08-19-03.md; policy appended to
+decisions.md. Flagged for the next session that the sibling perf issue's
+two prior measurements are void — they were taken with knobs that were
+no-ops at the time.

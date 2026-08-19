@@ -373,10 +373,7 @@ fn main() {
         args.iter().map(PathBuf::from).collect()
     };
 
-    let max_n = std::env::var("FERAL_DIAG_MAX_N")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(50_000);
+    let max_n = feral::env::usize_var("FERAL_DIAG_MAX_N").unwrap_or(50_000);
     let verbose = std::env::var("FERAL_DIAG_VERBOSE")
         .map(|v| v == "1")
         .unwrap_or(false);

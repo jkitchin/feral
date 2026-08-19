@@ -48,10 +48,7 @@ fn to_dense(col: &SparseCol, m: usize) -> Vec<f64> {
 /// pivoting, feral's current default). Lower values (0.1, 0.01) enable the
 /// within-threshold diagonal/sparsity-preserving pivot — issue #133 Stage 1.
 fn pivtol_from_env() -> f64 {
-    std::env::var("FERAL_PIVTOL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1.0)
+    feral::env::f64_var_where("FERAL_PIVTOL", ">= 0", |v| v >= 0.0).unwrap_or(1.0)
 }
 
 /// ‖B·x − rhs‖∞ / ‖rhs‖∞ for basis `b` (sparse columns) and solution `x`.

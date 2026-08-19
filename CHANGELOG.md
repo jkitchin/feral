@@ -27,6 +27,46 @@ All notable changes to FERAL will be documented in this file.
   contract holds). Bushy factors still take the tree-parallel path and keep
   their measured 25–37% win.
 
+### Fixed — numeric `FERAL_*` knobs no longer ignore what you set them to (issue #176)
+
+- **`1e18` now means `1e18`.** Every numeric tuning knob was read as
+  `env::var(NAME).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT)`.
+  Scientific notation is not an integer literal, so `FERAL_CB_THRESH=1e18` and
+  `FERAL_PAR_TASK_MIN_FLOPS=1e18` parsed as nothing and were *silently* replaced
+  by the built-in default — while the docs and pounce's option help write those
+  same defaults as `1e6` / `1e8`. The reporter attributed two perf measurements
+  to paths they believed were switched off and were not.
+- **A value FERAL cannot use now says so.** An unparseable, negative, or
+  `nan` value prints one line to stderr —
+  `warning: FERAL_PIVTOL="-1" must be >= 0; falling back to the built-in default`
+  — before falling back, once per distinct value. A magnitude past the knob's
+  type (`1e30` on a `u64` knob) clamps to the maximum instead of falling back,
+  since that value means "switch this path off"; so do `1e400` and `inf`, which
+  are that same request written past the range of `f64`. On a float-valued knob
+  (`FERAL_PIVTOL`, `FERAL_STATIC_PIVOT`) `inf` has no such reading and is
+  refused. Fractional input rounds rather than truncating.
+- **Applies to every numeric knob**, not just the two reported:
+  `FERAL_CB_THRESH`, `FERAL_PAR_TASK_MIN_FLOPS`, `FERAL_PAR_MIN_SEEDS`,
+  `FERAL_INTRAFRONT_MIN_AREA`, `FERAL_PACKED_SIMD_MIN_WORK`, `FERAL_PIVTOL`,
+  `FERAL_STATIC_PIVOT`, `FERAL_AUTO_CB_BETA`, `FERAL_DENSE_MAX`,
+  `FERAL_SPARSE_MAX`, and the `feral-diagnostics` knobs — including the
+  unprefixed ones (`MAX_N`, `LIMIT`, `PROBE_REPS`, `START`, `STOP`, `ONLY`, ...),
+  which carried the identical defect and had only been hidden by not being named
+  `FERAL_*`. Comma-separated sweep lists (`FERAL_NEMIN_LIST`,
+  `FERAL_MERGE_BUDGET_LIST`) go through it too, via `env::u128_list_var` /
+  `env::usize_list_var`: a locally-parsed list drops its unusable tokens and
+  hands the caller a *shorter* sweep, so `0,1e3,1e6` ran one arm and reported
+  "no difference" from an experiment that never had a second arm. The policy
+  lives in one new module, `feral::env`; a source-scan test
+  (`tests/env_knob_scan.rs`) fails the build if any env read in `src/` or
+  `crates/` parses its own value locally again — with no exemption but
+  `feral::env` itself.
+- **No default and no gate changed** — only what a knob accepts and what it
+  reports when it refuses. `feral::numeric::factorize::par_task_min_flops()` and
+  `par_min_seeds()` are now public so a caller can confirm what the process
+  resolved a knob to.
+
+
 ### Added — caller-capped iterative refinement and in-place solves (issue #178)
 
 - **`RefineOptions`** makes the refinement step budget a per-call parameter.

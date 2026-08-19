@@ -209,11 +209,8 @@ fn run_one_method(matrix: &CscMatrix, method: OrderingMethod) -> Result<(usize, 
 }
 
 fn main() {
-    let max_n: usize = env::var("MAX_N")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200_000);
-    let limit: Option<usize> = env::var("LIMIT").ok().and_then(|s| s.parse().ok());
+    let max_n: usize = feral::env::usize_var("MAX_N").unwrap_or(200_000);
+    let limit: Option<usize> = feral::env::usize_var("LIMIT");
     let roots: Vec<PathBuf> = env::var("ROOTS")
         .unwrap_or_else(|_| "data/matrices/kkt,data/matrices/kkt-expansion".to_string())
         .split(',')

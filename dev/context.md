@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-19T20:08:07Z
+Generated: 2026-08-19T19:56:19Z
 
 ## Latest Session
 File: dev/sessions/2026-08-19-03.md
@@ -9,61 +9,61 @@ File: dev/sessions/2026-08-19-03.md
 
 ## BENCHMARK NUMBERS ARE NOT COMPARABLE TO LAST SESSION
 
-Reported first, per the hard rule in CLAUDE.md — and for the same reason
-as 2026-08-19-02: `cargo run --bin bench --release` in this container
-finds only the 8 synthetic matrices. The external corpus and the
-MUMPS/SPRAL oracle timings are absent, so both Phase 2.8.1 exit
-partitions report `N/A` and **no comparison against 2026-08-15-02's
-1.61 / 2.00 / 1.67 / 1.67 is possible from this run**. I am not claiming
-those numbers held; they were not measured.
+Reported first, per the hard rule in CLAUDE.md. `cargo run --bin bench
+--release` in this container found only the 8 synthetic matrices — the
+external corpus and the MUMPS/SPRAL oracle timings are not mounted — so
+both Phase 2.8.1 exit partitions report `N/A`, exactly as in
+2026-08-19-02. **No comparison against 2026-08-15-02's 1.61 / 2.00 /
+1.67 / 1.67 is possible from this run.** The numbers were not measured;
+I am not claiming they held.
 
-What the run does confirm, identical to last session: inertia 2/2 vs
-MUMPS, residual 2/2, worst residual 1.26e-16.
-
-It is also the wrong benchmark for this change, which touches solve
-*scheduling* and not the factor path. The measurements that matter are
-in "Benchmark Results" below.
+This is also the wrong benchmark for this change: nothing in it touches
+factor or solve arithmetic. What the run does confirm is that the change
+is inert where it should be — inertia 2/2 vs MUMPS, residual 2/2, worst
+residual 1.26e-16 (`densecol_kkt_300_0000`), byte-for-byte the same
+figures 2026-08-19-02 reported.
 
 ## Goal
 
-Fix issue #175 — the tree-parallel solve added for #131 Gap A is a net
-15% loss on the wide-sparse Mittelmann KKT `NARX_CFy`, and
-`CbTaskPlan::worthwhile` has no per-call-overhead term.
+Fix issue #176 — `FERAL_CB_THRESH` and `FERAL_PAR_TASK_MIN_FLOPS`
+silently ignore unparseable values (e.g. `1e18`) instead of erroring.
 
 ## Accomplished
 
-### The report is real, and it is purely a scheduling bug
+### The bug is one shape, copied eighteen times
 
-The reporter serialized the tree-parallel solve with `FERAL_CB_THRESH`
-and recovered 7.35 s of 49.41 s (15%) plus ~3.0M involuntary context
-switches, on 14 cores over 100 IPM iterations. Two things follow that
-the issue does not state:
+Every numeric `FERAL_*` knob in the tree was read as
 
-1. `FERAL_CB_THRESH` does not choose the solve *core* — since #177 that
-   is `cb_core_profitable`, which reads neither the worker count nor the
-   environment. A huge threshold collapses the plan to one task, so the
-   **same** CB core runs serially. The whole 7.35 s is scheduling
-   overhead, and fixing it cannot move a bit of any solve.
-2. Rows 3 and 4 of the reporter's table are within noise, so the CB core
-   running serially already matches switching parallelism off entirely
-   on this problem. Nothing in the report argues for changing which core
-   runs.
+    std::env::var(NAME).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT)
 
-### Mechanism: the overhead is per front, not per task
+`"1e18".parse::<u64>()` is `Err(InvalidDigit)`, `.ok()` discards it, and
+`unwrap_or` puts the default back. The knob is set; the process behaves
+as if it were unset; nothing is printed. The reporter's evidence:
 
-`cb_run_parallel` takes the shared `contribs` mutex inside its per-front
-loop — once per child drained, once to store the front's own block. That
-cost scales with the supernode count; `MIN_TOTAL_COST` is a floor on
-*total* work. `NARX_CFy` has 45,736 supernodes and a Lagrangian Hessian
+    $ FERAL_PAR_TASK_MIN_FLOPS=1e18 pounce NARX_CFy.nl --no-sol max_iter=1
+    task_plan: n_snodes=45736 n_tasks=21 seeds=11 cutoff=1000000 min_seeds=2
+
+`cutoff=1000000` is `PAR_TASK_MIN_FLOPS`, the built-in default. Two perf
+attributions in the sibling issue were taken from runs like this.
+
+The sweep the issue asked for found the same shape at 18 sites (the
+inventory is in `dev/research/env-knob-parsing-2026-08-19.md`), four of
+them behind local `env_usize`/`env_f64` copies in `feral-diagnostics`.
+
+### One parse policy, in one module
+
+New `src/env.rs` (`feral::env`), `u64_var` / `usize_var` / `f64_var` plus
+`_where` variants carrying a validity check. Each returns `Option<T>`,
+so every call site keeps its own default expression — including
 ```
 
 ## Git Status
 ```
+2b84177 docs: document the numeric FERAL_* knobs and their parse policy (#176)
+12e3330 fix(knobs): route every numeric FERAL_* read through feral::env (#176)
+647202a feat(env): one parse policy for the numeric FERAL_* knobs (#176)
+45429f1 docs: research note and plan for the FERAL_* knob parse policy (#176)
 ffb7599 Merge pull request #180 from jkitchin/claude/quirky-bardeen-c3ynyz
-cb16458 Merge origin/main into claude/quirky-bardeen-c3ynyz (#177 + #178)
-5018575 Merge pull request #179 from jkitchin/claude/issue-178-ycwr81
-c154c92 docs: session checkpoint 2026-08-19-01 (#177 fixed)
-b75da82 test(solve): pin the refined solve's arithmetic against the host (#177)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 431 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.04s
+test result: ok. 437 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.93s
 
 ```
 
@@ -95,96 +95,87 @@ test result: ok. 431 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; fi
 (skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-03.md)
 
 
-`issue175_cb_gate_calibration` (`#[ignore]`d, in-crate): pooled CB core,
-serial vs tree-parallel, best of 30, arms interleaved, 4-core container.
-par/ser < 1 means tree-parallel wins.
-
-| fixture | total/n_nodes | run 1 (w=2,4,8) | run 2 (w=2,4,8) | geo. mean |
-|---|---:|---|---|---:|
-| narx_w1 | 25 | 1.07 1.10 1.42 | 0.91 0.98 1.04 | 1.08 |
-| narx_w2 | 28 | 0.97 1.08 1.04 | 0.94 1.14 0.98 | 1.02 |
-| narx_w4 | 53 | 1.01 1.11 0.93 | 0.89 1.02 0.95 | 0.98 |
-| narx_w6 | 74 | 1.15 0.95 0.88 | 0.74 0.88 0.87 | 0.91 |
-| narx_w8 | 103 | 0.74 0.94 0.70 | 0.81 0.84 0.83 | 0.81 |
-| poisson_96 | 202 | 0.70 0.76 0.70 | 0.74 0.80 0.69 | 0.73 |
-| poisson_160 | 235 | 0.74 0.78 0.73 | 0.80 0.75 0.68 | 0.75 |
-| narx_w3 | 305 | 0.87 0.64 0.64 | 0.63 0.54 0.51 | 0.63 |
-
-Monotone in work per front; break-even between 53 and 74. `narx_w1`
-(47,228 fronts, 22 seeds, 25 units/front) is the local analogue of
-`NARX_CFy` and never pays. The local losses are milder than the reported
-15% because this container has 4 cores and the dominant cost is mutex
-contention, which worsens with worker count.
-
-`cargo run --bin bench --release` (unchanged from last session, see the
-top of this file):
-
 8 matrices benchmarked
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
+
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
   Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+
+--- Sparse solver validation ---
 Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
---- Dense/Sparse Phase 2.8.1 exit partition: N/A (no corpus, no oracles)
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
+
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 ```
 
 ## Recent Decisions
-  `MAX_LOCAL_SHARE` of the work);
-- `cb_sync_amortized(total, n_nodes)` — new: `total ≥ 64 · n_nodes`,
-  i.e. a front must average ≥64 `nrow·(nelim+1)` units before
-  `cb_run_parallel`'s per-front synchronization is worth paying.
+   `feral_min_par_flops` help. The notation the docs teach must work.
+   The integer parse is tried first, so `18446744073709551615` stays
+   `u64::MAX` rather than round-tripping through 2^64.
+2. **A refused value warns on stderr, once per `(name, value)`, then
+   falls back.** Not an error: these knobs are read from inside a
+   factorization whose `Result` is reserved for *numerical* failure, and
+   turning an environment typo into a `FeralError` would hand pounce a
+   numeric-looking failure for an environment problem. The warn-and-fall-
+   back shape has precedent here — `FERAL_SCALING` has warned on an
+   unrecognized value since the X5 follow-up.
+3. **An above-range magnitude clamps to the type maximum** instead of
+   falling back. `FERAL_CB_THRESH=1e30` means "no subtree can reach this
+   cutoff"; falling back to the default there would be the reported bug
+   again, with the operator's intent inverted rather than merely lost.
+4. **Fractional input rounds half away from zero.** Truncation would
+   make `FERAL_PAR_MIN_SEEDS=0.9` mean 0 — "always parallel" — the
+   opposite of what the value asks for.
 
-`worthwhile = shape ∧ amortized`; `cb_core_profitable` — the predicate
-that chooses between the two numerically distinct solve cores (#177) —
-applies **the shape half only**.
+Boolean and enum knobs are out of scope: they match a literal vocabulary
+rather than parsing a number.
 
-Why the split rather than one gate: the two predicates answer different
-questions. `worthwhile` picks between two byte-identical executions of
-one core, so it may model machine overhead freely. `cb_core_profitable`
-picks between two different reassociations, so it must stay a function
-of the factor alone — folding an overhead term into it would silently
-change which arithmetic wide-sparse factors solve with, which is exactly
-the failure #177 fixed. `cb_core_profitable_matches_the_plan_gate` pins
-the shared half so the two implementations cannot drift.
+A source-scan test (`tests/env_knob_parsing.rs`) fails the build if a new
+`FERAL_*` read parses its own value locally, because the defect was one
+shape copied to eighteen sites, not one site. Two diagnostics-only
+comma-list knobs are exempted by name in that scan.
 
-Evidence: issue #175 (15% of an IPM run and ~3.0M involuntary context
-switches on `NARX_CFy`, 14 cores);
-`dev/research/issue-175-cb-solve-gate-overhead.md` (break-even between
-53 and 74 units/front over eight fixtures × two runs × three worker
-counts); `dev/journal/2026-08-19-03.org`.
-
-Accepted cost: a bushy factor whose fronts average under 64 units now
-runs the CB core serially even where tree-parallelism would have won a
-few percent. The floor sits at the measured break-even, so the expected
-cost of a false negative is ~0 and its worst observed case is ~1.1x,
-against a false positive's measured 1.42x locally and 15% end-to-end on
-the reporting host.
+Consequence for the public API: `numeric::factorize::par_task_min_flops`
+and `par_min_seeds` are `pub`, so a caller can confirm what value the
+process resolved a knob to. #176 could not be diagnosed from outside the
+process without that.
 
 ## Recent Tried-and-Rejected
-The winner has the *least* work per seed of the three. A floor high
-enough to reject `NARX_CFy` would reject `poisson_160` — the factor
-whose 25-37% win is the whole point of #131 Gap A — six times over.
 
-Work per **front** (`total / n_nodes`) does separate them (25 vs 235
-units, monotone across eight fixtures), and it is what the mechanism
-predicts: `cb_run_parallel` takes the shared `contribs` mutex inside the
-per-front loop, so its overhead scales with the supernode count, not
-with the task count.
+**Rejected on measurement.** The predicate runs on every refined solve,
+including the ones it rejects, and `CbTaskPlan::build` allocates three
+`Vec<Vec<usize>>` of length `n_nodes` (`build_children`, `owned`,
+`tr_children`). Cost of the verdict alone, versus the shared-vector
+baseline it was supposed to preserve:
 
-### Rejected: calibrating through `solve_sparse_refined_cb`
+    chain_400     1.29x
+    chain_2000    1.27x
+    chain_20000   1.24x
 
-First calibration harness was an `examples/` probe timing the public
-refined-solve entry point, on the theory that it is what an IPM host
-calls. It reported par/ser 1.00-1.02 on fixtures that the in-crate
-harness later showed at 1.16-2.11 — the refined solve's residual sweeps
-and its per-call workspace construction are `O(n)` work in *both* arms,
-which dilutes a per-front effect until it disappears. Replaced by an
-in-crate `#[ignore]`d test that times `CbSolveWorkspace::solve_into`
-against a pooled workspace: the exact call `worthwhile` decides.
+That is the same 1.24-1.29x the design existed to avoid — the predicate
+cost as much as the core it was declining. Replaced by a flat
+`O(n_nodes)` computation (four `Vec`s of scalars, subtree costs folded
+into parents using the postorder guarantee, no child lists), which
+brings the rejected trees back to 1.00-1.03x.
+
+The cost of that replacement is a second implementation of one gate.
+`cb_core_profitable_matches_the_plan_gate` pins the two together across
+six fixtures landing on both sides of the gate.
 
 ## Source Files
 ```
@@ -202,6 +193,7 @@ src/dense/mod.rs
 src/dense/rook.rs
 src/dense/schur_kernel.rs
 src/dense/solve.rs
+src/env.rs
 src/error.rs
 src/inertia.rs
 src/io/mod.rs
@@ -264,6 +256,7 @@ tests/d7_block32_dispatch_pooled.rs
 tests/delayed_pivoting.rs
 tests/dense_fast_path.rs
 tests/dense_ldlt.rs
+tests/env_knob_parsing.rs
 tests/factor_scratch_parity.rs
 tests/factor_workspace_parity.rs
 tests/factors_ld_export.rs

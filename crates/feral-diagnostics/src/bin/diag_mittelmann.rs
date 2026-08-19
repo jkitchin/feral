@@ -345,10 +345,7 @@ fn list_problems(filter: &[String]) -> Vec<PathBuf> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let verbose = std::env::var("DIAG_VERBOSE").is_ok();
-    let max_n: usize = std::env::var("FERAL_DIAG_MAX_N")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50_000);
+    let max_n: usize = feral::env::usize_var("FERAL_DIAG_MAX_N").unwrap_or(50_000);
     let problems = list_problems(&args);
     if problems.is_empty() {
         eprintln!("no problem directories matched");

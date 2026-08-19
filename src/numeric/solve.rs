@@ -842,9 +842,10 @@ impl CbThreshold {
         match self {
             CbThreshold::FromWorkers => {
                 let num_threads = rayon::current_num_threads().max(1);
-                std::env::var("FERAL_CB_THRESH")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
+                // Parsed through `crate::env` so `1e18` means 1e18 and a
+                // typo warns instead of silently restoring the default
+                // (issue #176).
+                crate::env::u64_var("FERAL_CB_THRESH")
                     .unwrap_or_else(|| (total / (num_threads as u64 * 16)).max(1))
             }
             CbThreshold::Reference => (total / CB_REFERENCE_FANOUT).max(1),

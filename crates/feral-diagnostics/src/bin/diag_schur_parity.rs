@@ -490,18 +490,10 @@ fn main() {
         args.iter().map(PathBuf::from).collect()
     };
 
-    let max_n: usize = std::env::var("FERAL_DIAG_MAX_N")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2000);
-    let tol: f64 = std::env::var("FERAL_DIAG_TOL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_TOL);
-    let slack: f64 = std::env::var("FERAL_DIAG_OPTIONB_SLACK")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_OPTIONB_SLACK);
+    let max_n: usize = feral::env::usize_var("FERAL_DIAG_MAX_N").unwrap_or(2000);
+    let tol: f64 = feral::env::f64_var("FERAL_DIAG_TOL").unwrap_or(DEFAULT_TOL);
+    let slack: f64 =
+        feral::env::f64_var("FERAL_DIAG_OPTIONB_SLACK").unwrap_or(DEFAULT_OPTIONB_SLACK);
     let verbose = std::env::var("FERAL_DIAG_VERBOSE")
         .ok()
         .map(|s| s != "0")
