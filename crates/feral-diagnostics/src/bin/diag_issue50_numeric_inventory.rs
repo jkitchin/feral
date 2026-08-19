@@ -218,16 +218,9 @@ fn run_one(matrix: &CscMatrix, method: OrderingMethod) -> (Option<usize>, Option
 }
 
 fn main() {
-    let max_n: usize = env::var("MAX_N")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200_000);
-    let limit: Option<usize> = env::var("LIMIT").ok().and_then(|s| s.parse().ok());
-    let chain_only: bool = env::var("CHAIN_CATCH_ONLY")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1)
-        != 0;
+    let max_n: usize = feral::env::usize_var("MAX_N").unwrap_or(200_000);
+    let limit: Option<usize> = feral::env::usize_var("LIMIT");
+    let chain_only: bool = feral::env::usize_var("CHAIN_CATCH_ONLY").unwrap_or(1) != 0;
     let roots: Vec<PathBuf> = env::var("ROOTS")
         .unwrap_or_else(|_| "data/matrices/kkt,data/matrices/kkt-expansion".to_string())
         .split(',')

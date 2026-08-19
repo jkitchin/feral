@@ -6865,3 +6865,61 @@ Consequence for the public API: `numeric::factorize::par_task_min_flops`
 and `par_min_seeds` are `pub`, so a caller can confirm what value the
 process resolved a knob to. #176 could not be diagnosed from outside the
 process without that.
+
+## 2026-08-19 — #176 follow-up: `+inf` clamps, and the env source-scan carries no exemptions
+
+Review of PR #182 found the entry above stated the policy more broadly
+than the code enforced it, in two places. Both are corrected in the same
+PR; this entry supersedes those two sentences.
+
+**The clamp rule had a hole past `f64` range.** Item 3 above says an
+above-range magnitude clamps rather than falling back, "because falling
+back would be the reported bug again, with the operator's intent
+inverted". Measured against the shipped code:
+
+    1e30  -> 18446744073709551615   (clamped, as documented)
+    1e309 -> 1000000                (the default — intent inverted)
+
+`1e309` parses to `+inf`, which fell into the `is not a finite number`
+arm. An operator escalating past `1e30` to be *more* emphatic about
+"never parallelize" got aggressive parallelization. `+inf` now has its
+own arm ahead of the non-finite refusal and clamps like any other
+over-range magnitude; `-inf` and `nan` stay refused. The asymmetry with
+`parse_float` is deliberate — the unsigned knobs count work and saturate,
+the float knobs are thresholds and `inf` has no reading there.
+
+**The source scan is now unexempted, which cost 21 further conversions.**
+The scan matched the literal `env::var("FERAL_` and skipped any window
+containing `.split(`. Both narrowings were wrong in the same direction:
+
+- The literal-name match could not see `env::var(key)` inside a local
+  `fn env_usize(key: &str, ...)` helper — and four such helpers are
+  exactly what this PR converted, i.e. the guard would not have caught
+  the sites the PR describes as the sneakiest.
+- The `.split(` skip was written for two comma-list knobs but is a
+  pattern, not a name: every future list knob would have been exempt.
+  `FERAL_MERGE_BUDGET_LIST` documented `0,1e3,..` in its own usage text
+  and dropped the `1e3` — the sweep ran baseline-only and reported "no
+  difference" from an experiment with one arm.
+
+The scan now matches `env::var(` with any argument and exempts only
+`src/env.rs`. Making that pass required converting 21 further reads, all
+in `feral-diagnostics` and all *unprefixed* (`MAX_N`, `LIMIT`,
+`PROBE_REPS`, `SAMPLE_STRIDE`, `START`, `STOP`, `MAX_ITER`, `ONLY`,
+`PIVTOL`, `AUTO_CB`, `CHAIN_CATCH_ONLY`, `SCALING_SWEEP_REPEATS`). They
+had the identical defect; the `FERAL_` prefix was the only thing that had
+been hiding them. List knobs now go through `env::u128_list_var` /
+`env::usize_list_var`, which warn per refused token and return `None` —
+the caller's own default list — rather than a silently shortened sweep.
+
+**And the two tests are now in separate binaries.** `set_var` is sound
+only when no other thread reads the environment; libtest runs a binary's
+tests on concurrent threads, so a file whose header claims "cannot race
+tests in the same process" must actually contain one test. The
+behavioural test keeps `tests/env_knob_parsing.rs`; the source scan moved
+to `tests/env_knob_scan.rs`.
+
+Evidence: `src/env.rs` (`past_f64_range_clamps_like_any_other_magnitude`);
+`tests/env_knob_scan.rs` (fails with 21 offenders before the conversions);
+`tests/env_knob_parsing.rs` (`1e400` -> `u64::MAX`);
+`dev/research/env-knob-parsing-2026-08-19.md` addendum.

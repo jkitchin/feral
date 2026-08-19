@@ -107,10 +107,49 @@ so the oracle is this note plus the values in the issue text:
 
 - `1e18` -> 1_000_000_000_000_000_000 (the reporter's case, verbatim)
 - `1e6` -> 1_000_000, `1000000` -> 1_000_000 (the two spellings agree)
-- `""`, `"abc"`, `"1e"`, `"-1"`, `"nan"`, `"inf"` -> warn + `None`
+- `""`, `"abc"`, `"1e"`, `"-1"`, `"nan"`, `"-inf"` -> warn + `None`
 - `"1e30"` on a u64 knob -> clamp to `u64::MAX`, warn
+- `"1e400"`, `"inf"` on a u64 knob -> clamp to `u64::MAX`, warn. These
+  parse to `+inf`, which is the same request as `1e30` spelled past the
+  range of `f64`; routing them to the fallback instead would leave the
+  clamp rule with a hole an operator hits precisely by trying to be more
+  emphatic. On a *float* knob (`FERAL_PIVTOL`) there is no such reading
+  and `inf` stays refused — the asymmetry is deliberate: the unsigned
+  knobs count work and saturate, the float knobs are thresholds.
 - `"18446744073709551615"` -> exact `u64::MAX` (the integer path must be
   tried before the f64 path: `u64::MAX as f64` is not representable and
   would round to 2^64)
 
 The last row is why parsing goes integer-first and only then float.
+
+
+## Addendum, 2026-08-19 (review of PR #182)
+
+Two gaps the review found, both now closed, recorded here because each
+was a case of the policy being *stated* more broadly than it was
+*enforced*.
+
+1. **The clamp had a hole above `f64` range.** `1e30` clamped to
+   `u64::MAX`; `1e309` fell back to the default. Both are the operator
+   saying "never", and the second silently meant the opposite. Fixed by
+   giving `+inf` its own arm ahead of the non-finite refusal.
+
+2. **The source-scan guard was narrower than its claim.** It matched
+   only the literal `env::var("FERAL_`, so the local
+   `fn env_usize(key: &str, ...)` helpers — the sites easiest to
+   reintroduce, because the name is not visible at the read — could not
+   trip it; and it exempted anything containing `.split(`, which was
+   meant to spare two comma-list knobs but would have spared every
+   future one. The scan now matches `env::var(` with any argument and
+   carries no exemption but `src/env.rs`. Making it enforceable meant
+   converting 21 further sites, all in `feral-diagnostics` and all
+   unprefixed (`MAX_N`, `LIMIT`, `PROBE_REPS`, `START`, `STOP`,
+   `SAMPLE_STRIDE`, `ONLY`, `PIVTOL`, `AUTO_CB`, ...). They carried the
+   identical defect; only the `FERAL_` prefix had been hiding them.
+
+Also split: the behavioural test and the source scan now live in
+separate integration binaries (`tests/env_knob_parsing.rs`,
+`tests/env_knob_scan.rs`). The first mutates process-global environment
+under `unsafe`, which is sound only with no other thread reading the
+environment; libtest threads the tests in a binary, so "one test per
+binary" is what makes that claim true rather than merely asserted.

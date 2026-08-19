@@ -321,11 +321,20 @@ on `feral_new()`:
 | `FERAL_SPARSE_MAX`          | none    | `bench` only: sparse size gate                                   |
 
 **Numeric knobs take `1e6`-style notation** as well as plain integers, and
-a value FERAL cannot use — unparseable, negative, non-finite — prints a
-warning to stderr and falls back to the default rather than being ignored
-in silence (issue #176). A magnitude past the knob's type clamps to that
+a value FERAL cannot use — unparseable, negative, `nan` — prints a warning
+to stderr and falls back to the default rather than being ignored in
+silence (issue #176). A magnitude past the knob's type clamps to that
 maximum, so `FERAL_PAR_TASK_MIN_FLOPS=1e30` reliably means "never
-parallelize". Boolean knobs take `on`/`1`/`true`/`yes`.
+parallelize"; so do `1e400` and `inf`, which are the same request spelled
+past the range of `f64`. On a float-valued knob (`FERAL_PIVTOL`,
+`FERAL_STATIC_PIVOT`) there is no such reading, and `inf` is refused
+alongside `nan`.
+
+The knobs listed in the `feral_new()` table above that read as on/off
+(`FERAL_PARALLEL`, `FERAL_FACTOR_TRACE`, `FERAL_MC64_TRACE`,
+`FERAL_CASCADE_BREAK`) take `on`/`1`/`true`/`yes`. The stderr-tracing
+knobs used only by the diagnostics binaries have not been given a common
+vocabulary and are documented at their own call sites.
 
 ### Mittelmann NLP benchmark
 

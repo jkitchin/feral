@@ -312,14 +312,8 @@ fn bench_one(shape: Shape, reps: usize, warmup: usize) {
 }
 
 fn main() {
-    let reps: usize = std::env::var("PROBE_REPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_REPS);
-    let warmup: usize = std::env::var("PROBE_WARMUP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_WARMUP);
+    let reps: usize = feral::env::usize_var("PROBE_REPS").unwrap_or(DEFAULT_REPS);
+    let warmup: usize = feral::env::usize_var("PROBE_WARMUP").unwrap_or(DEFAULT_WARMUP);
 
     println!(
         "probe_fma_kernel: reps={}, warmup={}, target_arch={}",

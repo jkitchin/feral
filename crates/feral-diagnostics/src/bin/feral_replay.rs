@@ -88,14 +88,8 @@ fn main() {
         .nth(1)
         .expect("usage: feral_replay <prefix>");
     let fresh_each = std::env::var("FRESH").is_ok();
-    let start: usize = std::env::var("START")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let stop: usize = std::env::var("STOP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
+    let start: usize = feral::env::usize_var("START").unwrap_or(0);
+    let stop: usize = feral::env::usize_var("STOP").unwrap_or(200);
     if std::env::var("CB").is_ok() {
         eprintln!("[replay] cascade_break ON");
     }

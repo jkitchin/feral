@@ -430,10 +430,7 @@ fn main() {
     let mut generated: Option<String> = None;
     let mut sizes: Vec<usize> = Vec::new();
     let mut pinned: Option<ScalingStrategy> = None;
-    let mut repeats: usize = std::env::var("SCALING_SWEEP_REPEATS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
+    let mut repeats: usize = feral::env::usize_var("SCALING_SWEEP_REPEATS").unwrap_or(5);
     let mut out: Option<String> = std::env::var("SCALING_SWEEP_DUMP").ok();
 
     let mut i = 0;

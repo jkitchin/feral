@@ -85,10 +85,8 @@ fn load(path: &str) -> Option<(usize, Vec<usize>, Vec<usize>, Vec<f64>, Vec<f64>
 
 fn build_solver(cb: bool) -> Solver {
     let mut np = NumericParams::default();
-    if let Ok(s) = std::env::var("PIVTOL") {
-        if let Ok(v) = s.parse::<f64>() {
-            np.bk.pivot_threshold = v;
-        }
+    if let Some(v) = feral::env::f64_var("PIVTOL") {
+        np.bk.pivot_threshold = v;
     }
     let mut s = Solver::with_params(np, SupernodeParams::default());
     if cb {
@@ -202,7 +200,7 @@ fn main() {
         .unwrap_or_else(|| "/tmp/rkt".to_string());
     let start: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let stop_arg: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(18);
-    let only: Option<usize> = std::env::var("ONLY").ok().and_then(|s| s.parse().ok());
+    let only: Option<usize> = feral::env::usize_var("ONLY");
     let synth = std::env::var("SYNTH").is_ok();
 
     let iter_range: Vec<usize> = if let Some(o) = only {

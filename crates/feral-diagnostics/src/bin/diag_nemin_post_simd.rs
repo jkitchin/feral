@@ -155,23 +155,15 @@ fn main() {
     }
     // Budget mode takes precedence when both are set: the budget sweep
     // is the newer lever and holding `nemin` fixed is what isolates it.
-    let arms: Vec<Arm> = match std::env::var("FERAL_MERGE_BUDGET_LIST") {
-        Ok(s) => {
+    let arms: Vec<Arm> = match feral::env::u128_list_var("FERAL_MERGE_BUDGET_LIST") {
+        Some(budgets) => {
             let mut v: Vec<Arm> = vec![Arm::Budget(None)];
-            v.extend(
-                s.split(',')
-                    .filter_map(|t| t.trim().parse::<u128>().ok())
-                    .map(|b| Arm::Budget(Some(b))),
-            );
+            v.extend(budgets.into_iter().map(|b| Arm::Budget(Some(b))));
             v
         }
-        Err(_) => match std::env::var("FERAL_NEMIN_LIST") {
-            Ok(s) => s
-                .split(',')
-                .filter_map(|t| t.trim().parse().ok())
-                .map(Arm::Nemin)
-                .collect(),
-            Err(_) => [1, 4, 8, 16, 32, 64].into_iter().map(Arm::Nemin).collect(),
+        None => match feral::env::usize_list_var("FERAL_NEMIN_LIST") {
+            Some(nemins) => nemins.into_iter().map(Arm::Nemin).collect(),
+            None => [1, 4, 8, 16, 32, 64].into_iter().map(Arm::Nemin).collect(),
         },
     };
     let pairs: usize = feral::env::usize_var("FERAL_NEMIN_PAIRS").unwrap_or(10);

@@ -133,6 +133,13 @@ fn parse_unsigned(raw: &str, max: u128) -> Knob<u128> {
             }
         }
         Ok(v) if v.is_finite() => Knob::Bad("is negative, and this knob counts work"),
+        // `+inf` (any magnitude past f64 range, e.g. `1e400`) is the
+        // operator asking for "as large as possible". It clamps for the
+        // same reason `1e30` does: falling back to the default here
+        // would invert the intent rather than merely lose it, which is
+        // issue #176's failure mode. Anything else non-finite (`-inf`,
+        // `nan`) has no such reading.
+        Ok(v) if v == f64::INFINITY => Knob::Clamped(max),
         Ok(_) => Knob::Bad("is not a finite number"),
         Err(_) => Knob::Bad("is not a number"),
     }
@@ -199,6 +206,50 @@ pub fn usize_var_where(
         &format!("must be {requirement}; falling back to the built-in default"),
     );
     None
+}
+
+/// A comma-separated list knob (the diagnostics sweeps: `arms` lists
+/// like `FERAL_NEMIN_LIST=1,4,8`), parsed token-by-token under the same
+/// policy as [`usize_var`].
+///
+/// The failure this exists to prevent is narrower than #176 but worse:
+/// a locally-parsed list drops its unusable tokens through `filter_map`
+/// and hands the caller a *shorter* list, so a sweep written
+/// `0,1e3,1e6` silently runs with one arm and reports "no difference"
+/// from an experiment that never had a second arm. Refused tokens warn
+/// individually, and a list with nothing usable left returns `None` so
+/// the caller's own default list is used rather than an empty sweep.
+fn unsigned_list_raw(name: &str, max: u128) -> Option<Vec<u128>> {
+    let raw = std::env::var(name).ok()?;
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(v) = report(name, token, parse_unsigned(token, max)) {
+            out.push(v);
+        }
+    }
+    if out.is_empty() {
+        warn_once(
+            name,
+            &raw,
+            "has no usable values; falling back to the built-in default list",
+        );
+        return None;
+    }
+    Some(out)
+}
+
+/// [`unsigned_list_raw`] for the `u128`-typed sweep knobs.
+pub fn u128_list_var(name: &str) -> Option<Vec<u128>> {
+    unsigned_list_raw(name, u128::MAX)
+}
+
+/// [`unsigned_list_raw`] for the `usize`-typed sweep knobs.
+pub fn usize_list_var(name: &str) -> Option<Vec<usize>> {
+    unsigned_list_raw(name, usize::MAX as u128).map(|v| v.into_iter().map(|x| x as usize).collect())
 }
 
 /// `None` when the knob is unset, or when it is set to something that is
@@ -268,6 +319,22 @@ mod tests {
         );
     }
 
+    /// The hole the first version of this module left: `1e30` clamped
+    /// but `1e400` did not, because it parses to `+inf` and fell into
+    /// the non-finite arm. An operator escalating past `1e30` to be
+    /// *extra* sure of "never" would have landed back on the default —
+    /// more parallelism, not less. Intent inverted, which is exactly
+    /// what the clamp policy exists to prevent.
+    #[test]
+    fn past_f64_range_clamps_like_any_other_magnitude() {
+        assert_eq!(parse_unsigned("1e400", U64), Knob::Clamped(U64));
+        assert_eq!(parse_unsigned("inf", U64), Knob::Clamped(U64));
+        assert_eq!(parse_unsigned("infinity", U64), Knob::Clamped(U64));
+        assert_eq!(parse_unsigned("1e400", 255), Knob::Clamped(255));
+        // The sign still matters: `-inf` is not a count of work.
+        assert!(matches!(parse_unsigned("-inf", U64), Knob::Bad(_)));
+    }
+
     #[test]
     fn unusable_values_are_refused_not_defaulted_silently() {
         assert!(matches!(parse_unsigned("", U64), Knob::Bad(_)));
@@ -278,7 +345,9 @@ mod tests {
         assert!(matches!(parse_unsigned("-1", U64), Knob::Bad(_)));
         assert!(matches!(parse_unsigned("-1e6", U64), Knob::Bad(_)));
         assert!(matches!(parse_unsigned("nan", U64), Knob::Bad(_)));
-        assert!(matches!(parse_unsigned("inf", U64), Knob::Bad(_)));
+        // `-inf` has no "as large as possible" reading; `+inf` does and
+        // clamps instead (see `past_f64_range_clamps_like_any_other_magnitude`).
+        assert!(matches!(parse_unsigned("-inf", U64), Knob::Bad(_)));
     }
 
     #[test]
@@ -303,12 +372,29 @@ mod tests {
         assert_eq!(parse_unsigned("255", 255), Knob::Ok(255));
     }
 
+    /// A list knob's tokens go through the same policy as a scalar
+    /// one — the point of routing them here rather than through a local
+    /// `filter_map(|t| t.parse().ok())`, which drops `1e3` and silently
+    /// shortens the sweep.
+    #[test]
+    fn list_tokens_use_the_same_policy_as_scalar_knobs() {
+        for token in ["0", "1e3", " 1e6 ", "2.5"] {
+            assert!(
+                matches!(parse_unsigned(token.trim(), U64), Knob::Ok(_)),
+                "list token {token:?} must be usable"
+            );
+        }
+        assert_eq!(parse_unsigned("1e3", U64), Knob::Ok(1000));
+    }
+
     #[test]
     fn float_knobs_take_the_usual_pivot_threshold_spellings() {
         assert_eq!(parse_float("1e-8"), Knob::Ok(1e-8));
         assert_eq!(parse_float("0.001"), Knob::Ok(0.001));
         assert_eq!(parse_float("-0.5"), Knob::Ok(-0.5));
         assert!(matches!(parse_float("nan"), Knob::Bad(_)));
+        // Unlike the counting knobs, a float knob is a threshold or a
+        // ratio: `inf` has no usable reading and stays refused.
         assert!(matches!(parse_float("inf"), Knob::Bad(_)));
         assert!(matches!(parse_float("1e-"), Knob::Bad(_)));
         assert!(matches!(parse_float(""), Knob::Bad(_)));

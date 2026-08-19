@@ -171,7 +171,7 @@ fn run_one(matrix: &CscMatrix, method: OrderingMethod) -> (Option<usize>, Option
 }
 
 fn main() {
-    let limit: Option<usize> = env::var("LIMIT").ok().and_then(|s| s.parse().ok());
+    let limit: Option<usize> = feral::env::usize_var("LIMIT");
     let roots: Vec<PathBuf> = env::var("ROOTS")
         .unwrap_or_else(|_| "data/matrices/kkt,data/matrices/kkt-expansion".to_string())
         .split(',')
