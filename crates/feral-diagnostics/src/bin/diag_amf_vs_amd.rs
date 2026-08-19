@@ -56,10 +56,10 @@ struct PerMatrix {
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default)
+    // Shared parse policy (issue #176): `1e6` notation parses, and a
+    // value that cannot be used warns instead of vanishing into the
+    // default.
+    feral::env::usize_var(key).unwrap_or(default)
 }
 
 fn main() {

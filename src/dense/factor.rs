@@ -725,10 +725,7 @@ fn intrafront_min_area() -> usize {
     // one-shot read is the right semantics.
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        std::env::var("FERAL_INTRAFRONT_MIN_AREA")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v > 0)
+        crate::env::usize_var_where("FERAL_INTRAFRONT_MIN_AREA", "> 0", |v| v > 0)
             .unwrap_or(INTRAFRONT_MIN_AREA)
     })
 }
@@ -3867,10 +3864,7 @@ fn apply_schur_panel_range_packed_impl(
     // panel before issue #148's review caught it.
     static MIN_WORK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let min_work = *MIN_WORK.get_or_init(|| {
-        std::env::var("FERAL_PACKED_SIMD_MIN_WORK")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(PACKED_SIMD_MIN_WORK)
+        crate::env::usize_var("FERAL_PACKED_SIMD_MIN_WORK").unwrap_or(PACKED_SIMD_MIN_WORK)
     });
     if use_simd && simd_work >= min_work {
         if fma {

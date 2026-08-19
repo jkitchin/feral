@@ -347,10 +347,7 @@ fn walk_root(root: &Path, po: &mut PerOrdering, max_n: usize, verbose: bool) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let max_n: usize = std::env::var("FERAL_DIAG_MAX_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50_000);
+    let max_n: usize = feral::env::usize_var("FERAL_DIAG_MAX_N").unwrap_or(50_000);
     let verbose = std::env::var("FERAL_DIAG_VERBOSE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

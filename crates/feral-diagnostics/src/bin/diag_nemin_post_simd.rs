@@ -174,10 +174,7 @@ fn main() {
             Err(_) => [1, 4, 8, 16, 32, 64].into_iter().map(Arm::Nemin).collect(),
         },
     };
-    let pairs: usize = std::env::var("FERAL_NEMIN_PAIRS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+    let pairs: usize = feral::env::usize_var("FERAL_NEMIN_PAIRS").unwrap_or(10);
     let base_idx = arms.iter().position(|a| a.is_baseline());
 
     println!(
