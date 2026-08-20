@@ -7218,3 +7218,36 @@ points; and all 13 `tests/multi_rhs.rs` green including both
 `BLAS3_NRHS_THRESHOLD` stays at 32 — the crossover constant was the
 suspect, but the defect was underneath it, and the threshold is load-bearing
 for the bit-identity contract.
+
+## 2026-08-20 — Scope correction: which pounce call sites the padded stride reaches
+
+Appended rather than editing the entry above, per the append-only rule. The
+preceding entry states the padded-stride decision correctly but says nothing
+about how much of a real host it reaches; a reader could take "1.36x on the
+multi-RHS solve" for "1.36x on pounce". It is much narrower than that.
+
+Prompted by pounce issue #698, comment 5359027510, which named a multi-RHS
+call site the 2026-08-20-02 checkpoint had not enumerated.
+
+pounce has three multi-RHS-capable call sites. The padded stride reaches one:
+
+| pounce call site | nrhs | reached? |
+|---|---|---|
+| `std_aug_system_solver.rs:497,625` (IPM) | 1, hardcoded | no |
+| `pounce-feral/src/lib.rs:1004,1006` (batched backsolve) | 6 | no — below the threshold |
+| `pounce-feral/src/schur.rs:303,304` | `n_s` | yes, when `n_s >= 32` |
+
+The batched backsolve's width is `limited_memory_max_history`, which defaults
+to 6 (`alg_builder.rs:1037`, `:1508`). Below `BLAS3_NRHS_THRESHOLD = 32`, so
+it takes the rank-1 kernel, which the change does not touch. That dispatch is
+already correct — measured rank1/blas3 at `nrhs = 6` is 0.68-0.86 across all
+seven probe matrices, i.e. rank-1 wins — so there is no unclaimed gain there
+and no argument for lowering the threshold to capture it.
+
+The Schur path is the one that benefits, and it can be wide:
+`schur_aug_system_solver.rs:36` sets `DEFAULT_MAX_SCHUR_FRAC = 0.5`, so `n_s`
+reaches half the KKT dimension before the backend refuses the partition.
+
+**Consequence for release decisions:** the 1.36x figure is a property of the
+multi-RHS solve at `nrhs >= 32` and not a multiple of 8. It is not a pounce
+end-to-end number and must not be quoted as one.

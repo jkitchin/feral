@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-20T16:15:53Z
+Generated: 2026-08-20T17:16:31Z
 
 ## Latest Session
 File: dev/sessions/2026-08-20-02.md
@@ -59,26 +59,26 @@ Evidence, all within a single process so no cross-process drift can reach it.
 
 ## Git Status
 ```
+ffb5862 docs: session checkpoint 2026-08-20-02 (multi-RHS stride alignment)
 a0b4d64 perf(solve): align the multi-RHS row stride to a cache line
 c34475e docs: session checkpoint 2026-08-20-01 (measurement corrections, #189 Step 1)
 c09da70 bench: time the solve core hosts actually run (#189 item 1)
 2ba437d probe: separate core, schedule, and depth in the solve measurement (#131, #189)
-0ac4fb1 probe: measure the solve-phase levers claimed in #131 and #189
 ```
 
 ## Test Status
 ```
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
@@ -86,7 +86,7 @@ test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 445 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.44s
+test result: ok. 445 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.67s
 
 ```
 
@@ -116,36 +116,36 @@ medium (<500)            153560     1.65     <= 3.0     PASS
 ```
 
 ## Recent Decisions
-**Decision:** the panel path allocates and indexes at
-`padded_ldw(nrhs) = nrhs.div_ceil(NR) * NR`, i.e. a multiple of 64 bytes.
-The rank-1 path keeps the raw `nrhs` stride — it is row-major but not
-tiled, and it carries the bit-identity band contract that
-`tests/multi_rhs.rs:227,256` assert and pounce's `schur.rs:303` consumes.
+Appended rather than editing the entry above, per the append-only rule. The
+preceding entry states the padded-stride decision correctly but says nothing
+about how much of a real host it reaches; a reader could take "1.36x on the
+multi-RHS solve" for "1.36x on pounce". It is much narrower than that.
 
-The padding is paid for in flops: the kernels solve `padded_ldw(nrhs)`
-columns, of which up to 7 are zero padding. That is 21% extra arithmetic at
-`nrhs = 33`, 7% at 100, under 1% at 1000 — and it is still a net 1.36×
-geomean win in the shipped regime (`nrhs >= 32`, not a multiple of 8),
-because the alignment is worth more than the wasted lanes. After the fix
-`t(33)/t(32) ≈ 1.21`, which is exactly `40/33`: the residual is entirely
-the padding columns, with no misalignment left.
+Prompted by pounce issue #698, comment 5359027510, which named a multi-RHS
+call site the 2026-08-20-02 checkpoint had not enumerated.
 
-**Alternative not taken:** pad the *allocation* for alignment but iterate
-only the `nrhs` live columns, masking the final tile. `gemm_tile` already
-takes a `live` argument, so the kernel side is ready. It recovers roughly
-the remaining 18% at `nrhs = 33`. It is not part of this decision because
-it requires distinguishing stride from live width through five kernels, and
-that belongs in its own commit with its own before/after.
+pounce has three multi-RHS-capable call sites. The padded stride reaches one:
 
-**Bit-neutral**, verified three independent ways: an 800-shape `to_bits()`
-test against a scalar left-fold reference (`gemm_tail_tests`); the probe's
-`max |rank1 - blas3|` column unchanged at all 105 measured (matrix, `nrhs`)
-points; and all 13 `tests/multi_rhs.rs` green including both
-`assert_eq!(max_diff, 0.0)` band contracts. No tolerance was touched.
+| pounce call site | nrhs | reached? |
+|---|---|---|
+| `std_aug_system_solver.rs:497,625` (IPM) | 1, hardcoded | no |
+| `pounce-feral/src/lib.rs:1004,1006` (batched backsolve) | 6 | no — below the threshold |
+| `pounce-feral/src/schur.rs:303,304` | `n_s` | yes, when `n_s >= 32` |
 
-`BLAS3_NRHS_THRESHOLD` stays at 32 — the crossover constant was the
-suspect, but the defect was underneath it, and the threshold is load-bearing
-for the bit-identity contract.
+The batched backsolve's width is `limited_memory_max_history`, which defaults
+to 6 (`alg_builder.rs:1037`, `:1508`). Below `BLAS3_NRHS_THRESHOLD = 32`, so
+it takes the rank-1 kernel, which the change does not touch. That dispatch is
+already correct — measured rank1/blas3 at `nrhs = 6` is 0.68-0.86 across all
+seven probe matrices, i.e. rank-1 wins — so there is no unclaimed gain there
+and no argument for lowering the threshold to capture it.
+
+The Schur path is the one that benefits, and it can be wide:
+`schur_aug_system_solver.rs:36` sets `DEFAULT_MAX_SCHUR_FRAC = 0.5`, so `n_s`
+reaches half the KKT dimension before the backend refuses the partition.
+
+**Consequence for release decisions:** the 1.36x figure is a property of the
+multi-RHS solve at `nrhs >= 32` and not a multiple of 8. It is not a pounce
+end-to-end number and must not be quoted as one.
 
 ## Recent Tried-and-Rejected
 **Why.** A full sweep is ~25 minutes, so two "adjacent" runs are 25 minutes

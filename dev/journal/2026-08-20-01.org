@@ -544,3 +544,31 @@ anything into it.
 * 16:50 :checkpoint:
 Checkpoint written to dev/sessions/2026-08-20-02.md, leading with the
 unfavorable bench comparison per CLAUDE.md. context.md refreshed (329 lines).
+
+* 17:20 :scope:pounce:correction:
+Read pounce issue #698 comment 5359027510 (srikanth-gm). Its subject is a
+residual 946 KB copy-back in pounce's backsolve and a possible feral
+`solve_in_place`, which the reporter bounds themselves at ~95 us against a
+0.2162 s per-iteration back-solve — under their ~30% run-to-run noise. Agreed;
+no feral issue filed, belongs as a line item under #134 if anywhere.
+
+The useful part was incidental: the comment mentions "six times that under the
+column batching at limited_memory_max_history = 6", naming a third multi-RHS
+call site I had not enumerated. Confirmed in the pounce tree (e1173385):
+alg_builder.rs:1037 and :1508 both set limited_memory_max_history: 6, and
+pounce-feral/src/lib.rs:1004,1006 is the batched backsolve.
+
+6 < BLAS3_NRHS_THRESHOLD = 32, so that path takes rank-1 and a0b4d64 cannot
+reach it. Checked whether that is a missed opportunity: probe rank1/blas3 at
+nrhs=6 is 0.79/0.86/0.73/0.81/0.68/0.75/0.70 across the seven matrices —
+rank-1 is FASTER at that width, so the dispatch is already right and there is
+no case for lowering the threshold.
+
+Net: pounce has three multi-RHS sites (nrhs=1 IPM hardcoded, nrhs=6 batched
+backsolve, n_s Schur) and a0b4d64 reaches only the third, and only when
+n_s >= 32. Schur can be wide — schur_aug_system_solver.rs:36 sets
+DEFAULT_MAX_SCHUR_FRAC = 0.5 — but this is one path under one condition.
+The 1.36x is a solve-kernel number, NOT a pounce end-to-end number.
+
+Amended dev/sessions/2026-08-20-02.md in place (marked as a correction) and
+appended a new decisions.md entry rather than editing the prior one.
