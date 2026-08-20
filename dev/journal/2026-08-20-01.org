@@ -401,3 +401,123 @@ changed identity (CRESC100/MUONSINE -> ACOPR14/KIRBY2). That tail is
 resample-loop noise on sub-millisecond matrices, not a real factor
 change; the max column is not a stable statistic here and should not be
 quoted as a result.
+
+* 14:05 :measurement:rejected:blas3:
+Discarded the entire two-build kernel comparison. Built stock (threshold 32)
+and patched (threshold 2) binaries of probe_blas3_crossover and ran them
+alternating, on the theory that alternation cancels drift. Two controls say
+otherwise. The looped single-RHS path is byte-identical in both builds and
+must read 1.00 across builds; it read 1.15, 1.58, 1.97, 2.10. And nrhs in
+{32,40,48}, where both builds dispatch to the same kernel so the ratio must be
+exactly 1.00, read 0.86-0.90 — a >=10% systematic bias with no code cause.
+A sweep takes ~25 min, so "adjacent" runs are 25 min apart: blocked
+measurement wearing an interleaved label. Same error as this morning's two
+retractions, one level down. Killed the remaining runs (pkill, 0 left) and
+reported no number from the paired dataset. Logged in tried-and-rejected.md.
+
+* 14:20 :method:blas3:
+Replaced it with an in-process design: new `kernel-probe` Cargo feature (off
+by default, compiled out entirely — with it off the dispatch reads the const
+directly as before) exposes set_blas3_nrhs_threshold. One process now times
+rank-1 and BLAS-3 at the *same* nrhs, alternating within each of 9 reps —
+microseconds apart, not 25 minutes. Both `cargo build --release` and
+`--features kernel-probe` compile clean.
+
+* 14:40 :finding:blas3:confirmed:
+The threshold was the wrong question. Timing both kernels at the same nrhs
+shows a sawtooth with period 8, not a crossover. bcsstk38 rank1/blas3:
+nrhs=8 2.12, 10 1.40, 12 1.06, 14 0.89, 16 1.60, 20 1.00, 24 1.36, 28 1.14,
+31 1.03, 32 1.31. BLAS-3 wins decisively at every multiple of NR=8 and decays
+as nrhs moves off one.
+
+Cause: gemm_scalar_block handled the nrhs%NR column tail with an unblocked
+triple loop — for every output element it re-walked all of A's row (stride
+col_stride) and B's column (stride nrhs), no reuse. Fitting blas3_us on the
+multiples of 8 and attributing the excess to tail columns puts a tail column
+at 1.6-5.1x a blocked column, consistent across all five matrices analysed.
+
+Cleanest evidence, needing no fit and no cross-process comparison: within a
+single run, t(31)/t(32) should be ~0.97 (31 is 3% less work). Measured:
+bcsstk38 1.61, r05_kkt 1.41, bratu3d 1.79, qap15_kkt 1.47, dirichlet120_kkt
+1.80, cont-201 1.47, cont5_late_kkt 1.64. All seven. nrhs=31 costs 1.4-1.8x
+nrhs=32.
+
+This is a defect, not a tuning parameter, and it is orthogonal to the
+threshold: it hits every nrhs>=32 caller whose nrhs is not a multiple of 8 —
+7 cases in 8, including pounce's Schur path where nrhs = n_s is problem data.
+
+* 14:55 :fix:blas3:bitneutral:
+Replaced gemm_scalar_block with gemm_tile<const R: usize>: runs the tails at
+full NR register width with unused lanes zero-padded. Padded lanes compute
+0.0 - a*0.0 == 0.0 every step and are never stored, so each stored element
+stays a left fold over increasing k. The MR x NR main loop is untouched —
+deliberately, to put zero risk on the path that already works.
+
+Bit-neutral, two independent checks:
+- New test panel_gemm_is_bit_identical_to_the_reference_on_every_tail_shape
+  asserts to_bits() equality against a scalar left-fold reference over 800
+  shapes (16 nrhs x 10 m_dim x 5 k_dim), covering every nrhs%8 and m_dim%4
+  residue. Passes.
+- The probe's max|rank1-blas3| column is unchanged at all 89 (matrix,nrhs)
+  points compared before vs after. rank-1 is untouched, so any change in the
+  BLAS-3 output would move it. Zero moved.
+
+Because it is bit-neutral it needs no threshold change, no tolerance change,
+and no sign-off on the assert_eq!(max_diff, 0.0) band contract.
+
+* 15:10 :measurement:selfinflicted:
+First after-fix probe run is contaminated and discarded: I ran
+`cargo test --release` (full release compile + 451 tests) while it was timing.
+Signature is unambiguous — matrices early in the sweep (bcsstk38, r05_kkt,
+qap15_kkt) show tail excess *worse* than before, matrices late in it
+(dirichlet120_kkt, cont-201) show it collapsed to ~0-1x. That is the compile
+finishing partway through, not a property of the kernel. Re-running with the
+machine quiet, and switching the headline metric to within-run t(31)/t(32),
+which needs no fit and no cross-process comparison.
+
+* 15:40 :finding:refuted:alignment:
+The tail hypothesis was wrong as the *cause*. Discriminating experiment:
+nrhs=33 has ONE tail column, nrhs=31 has SEVEN. If tail count drove cost they
+would differ sharply. bratu3d blas3: 31->72298, 32->46582, 33->74154,
+34->74043, 36->76060, 38->80859, 40->58760. 33 costs 1.59x 32 while doing 3%
+MORE work, and matches 31 to within 3%. Tail count does not predict cost.
+Stride does: 32 and 40 doubles are 256 and 320 bytes, whole cache lines;
+31/33/34/36/38 are not.
+
+Cause is cache-line alignment of the row-major leading dimension. y and w are
+row-major with ld = nrhs (issue #57), so a non-multiple-of-8 nrhs makes every
+panel row straddle cache lines, compounding across gather, kernels, scatter.
+
+Fix: padded_ldw(nrhs) = nrhs.div_ceil(8)*8 as the row stride on the panel
+path. Padding columns carry a zero RHS and are never read back, so every real
+column's arithmetic and order is untouched. Rank-1 path keeps the raw stride —
+it gains nothing and would only pay for the extra columns.
+
+The tail fix (gemm_tile) is kept: it moved t(31)/t(32) from 1.41-1.80 to
+1.39-1.51 on its own, is bit-neutral, and is a prerequisite for the follow-up
+below.
+
+* 16:05 :result:confirmed:alignment:
+Sawtooth eliminated. Within-run t(31)/t(32), which needs no cross-process
+comparison: 1.61->1.06, 1.41->0.73, 1.79->1.38, 1.47->0.88, 1.80->0.96,
+1.47->0.97, 1.64->1.00 across the seven KKTs. Anchored on nrhs=32, which is
+byte-identical code before and after (padded_ldw(32)==32), so uniform drift
+cancels.
+
+Bit-identical: max|rank1-blas3| unchanged at all 105 (matrix,nrhs) points;
+new 800-shape to_bits() test passes; all 13 tests/multi_rhs.rs pass including
+both assert_eq!(max_diff, 0.0) band contracts. Full suite green, clippy clean
+with --all-features.
+
+IMPORTANT scoping correction: the probe forces blas3 at every nrhs, but the
+library only dispatches to it at nrhs>=32. So the big ratios at nrhs 6-31 are
+diagnostic, not shipped gain — quoting the 1.83x geomean over those points as
+the headline would overstate by ~35%. Shipped regime is nrhs>=32 and not a
+multiple of 8. At nrhs=33, two independent framings agree: anchored 1.21/1.59/
+1.32x, raw absolute 1.22/1.22/1.32x. Geomean 1.36x.
+
+Residual t(33)/t(32) ~ 1.21 after the fix is exactly 40/33 — the cost of the
+7 padding columns, not leftover misalignment. Follow-up available: keep the
+aligned stride but iterate only the live columns with a masked final tile
+(gemm_tile already takes `live`). Recovers ~18% more at nrhs=33; needs a
+stride-vs-live parameter through five kernels, so it is a separate change.

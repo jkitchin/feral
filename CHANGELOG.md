@@ -4,6 +4,35 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - multi-RHS solve was up to 1.6x slower when `nrhs` was not a multiple of 8
+
+- **What changed.** The row-major multi-RHS work buffers (`y`, `w`) used a
+  leading dimension of exactly `nrhs`. When `nrhs` is not a multiple of 8,
+  every row of every supernode panel straddles cache lines, and the
+  misalignment compounds across the gather, the panel kernels, and the
+  scatter. The BLAS-3 path now pads the row stride up to a whole 8-column
+  tile, so every row starts on a 64-byte boundary. Separately, the panel
+  GEMM's `nrhs % 8` column tail ran an unblocked triple loop with no data
+  reuse; it now runs full-width register tiles with the unused lanes
+  zero-padded.
+- **Who is affected.** Anyone calling `solve_sparse_many`,
+  `solve_sparse_many_into`, or `solve_many_refined` with `nrhs >= 32` that is
+  not a multiple of 8 — 7 values in 8.
+- **Measured.** Geomean **1.36x** faster on the multi-RHS solve at
+  `nrhs = 33` across bcsstk38, r05_kkt and bratu3d (1.21x, 1.59x, 1.32x
+  anchored on `nrhs = 32`, whose code path is unchanged; raw times 1.22x,
+  1.22x, 1.32x). Before the fix, `nrhs = 31` cost **1.4-1.8x** `nrhs = 32` on
+  all seven large KKT matrices despite doing 3% less work; it is now ~1.0x.
+- **Results are bit-for-bit unchanged.** The padding columns carry a zero
+  right-hand side and are never read back, so every real column's arithmetic
+  and its order are untouched. Verified three ways: a new 800-shape
+  `to_bits()` equality test over every `nrhs % 8` and `m_dim % 4` residue; the
+  rank-1-vs-BLAS-3 difference unchanged at all 105 measured (matrix, `nrhs`)
+  points; and all 13 multi-RHS tests including the two
+  `assert_eq!(max_diff, 0.0)` band contracts. `BLAS3_NRHS_THRESHOLD` is
+  unchanged at 32.
+- See `dev/research/blas3-threshold-refit.md`.
+
 ### Changed - the benchmark harness now times the solve core a host actually gets (issue #189)
 
 - **What changed.** `cargo run --bin bench` measured its sparse solve column

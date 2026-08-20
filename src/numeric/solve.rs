@@ -16,6 +16,47 @@ use crate::sparse::csc::CscMatrix;
 /// setup. See `dev/research/issue-57-blas3-panel.md`.
 const BLAS3_NRHS_THRESHOLD: usize = 32;
 
+/// In-process override for [`BLAS3_NRHS_THRESHOLD`], compiled in only under
+/// the `kernel-probe` feature. It exists so a probe can time the rank-1 and
+/// BLAS-3 multi-RHS kernels at the *same* `nrhs`, interleaved within one
+/// process.
+///
+/// The alternative — building two binaries and alternating runs — was tried
+/// and does not work here: a full sweep takes ~25 minutes, so "adjacent" runs
+/// are 25 minutes apart, and the control (the looped single-RHS path, which is
+/// byte-identical in both builds) drifted by up to 2x between them. The
+/// `nrhs >= 32` rows, where both builds run the *same* kernel and the ratio
+/// must be exactly 1.00, read 0.86-0.90 instead. See
+/// `dev/research/blas3-threshold-refit.md`.
+///
+/// `usize::MAX` means "no override"; the const applies.
+#[cfg(feature = "kernel-probe")]
+static BLAS3_NRHS_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Override the multi-RHS BLAS-3 dispatch threshold for this process.
+/// Measurement scaffolding only — not part of the supported API, and absent
+/// unless the `kernel-probe` feature is enabled.
+#[cfg(feature = "kernel-probe")]
+#[doc(hidden)]
+pub fn set_blas3_nrhs_threshold(threshold: usize) {
+    BLAS3_NRHS_OVERRIDE.store(threshold, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The active multi-RHS BLAS-3 dispatch threshold. With `kernel-probe` off
+/// this is the const, inlined — identical codegen to reading it directly.
+#[inline(always)]
+fn blas3_nrhs_threshold() -> usize {
+    #[cfg(feature = "kernel-probe")]
+    {
+        let overridden = BLAS3_NRHS_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if overridden != usize::MAX {
+            return overridden;
+        }
+    }
+    BLAS3_NRHS_THRESHOLD
+}
+
 /// Multi-RHS refinement dispatch crossover (issue #58). At or above this
 /// `nrhs`, `Solver::solve_many_refined` refines through the batched
 /// `solve_sparse_many_refined` (one panel solve per refinement step over
@@ -1412,10 +1453,14 @@ impl SolveManyWorkspace {
         } else {
             n * nrhs
         };
+        // Allocate at the padded row stride unconditionally: the solve
+        // picks `ldw` per call, and under the `kernel-probe` feature the
+        // dispatch threshold can move between construction and use.
+        let ldw = padded_ldw(nrhs);
         Self {
-            y: vec![0.0; n * nrhs],
-            w: vec![0.0; max_nrow * nrhs],
-            acc: vec![0.0; nrhs],
+            y: vec![0.0; n * ldw],
+            w: vec![0.0; max_nrow * ldw],
+            acc: vec![0.0; ldw],
             scaled_rhs: vec![0.0; scaled_rhs_len],
             nrhs,
             n,
@@ -1561,11 +1606,17 @@ fn solve_sparse_core_many_into(
     acc_buf: &mut [f64],
 ) {
     let n = factors.n;
-    let y = &mut y_buf[..n * nrhs];
 
     // Route wide solves through the BLAS-3 panel kernels (issue #57
     // fix #2); narrow solves stay on the bit-identical rank-1 kernels.
-    let use_blas3 = nrhs >= BLAS3_NRHS_THRESHOLD;
+    let use_blas3 = nrhs >= blas3_nrhs_threshold();
+
+    // Row stride of the row-major buffers. Padded to a whole `NR` tile for
+    // the panel path so every row is cache-line aligned (see `padded_ldw`);
+    // left at `nrhs` for the rank-1 path, which gains nothing from the
+    // padding and would only pay for the extra columns.
+    let ldw = if use_blas3 { padded_ldw(nrhs) } else { nrhs };
+    let y = &mut y_buf[..n * ldw];
 
     // Permute the RHS into the **row-major** working layout
     // `y[new*nrhs + c] = rhs[c, perm[new]]`. The caller's `rhs` stays
@@ -1575,7 +1626,10 @@ fn solve_sparse_core_many_into(
     // hot per-supernode loops was the multi-RHS bottleneck, badly so
     // when `n` is a power of two and columns alias in cache).
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
-        let dst = new_idx * nrhs;
+        let dst = new_idx * ldw;
+        for c in nrhs..ldw {
+            y[dst + c] = 0.0;
+        }
         for c in 0..nrhs {
             y[dst + c] = rhs[c * n + old_idx];
         }
@@ -1593,10 +1647,10 @@ fn solve_sparse_core_many_into(
 
         // Gather the supernode's rows from `y` into `w` (both row-major):
         // w[i, :] = y[row_indices[perm[i]], :], a contiguous memcpy.
-        let w = &mut w_buf[..nrow * nrhs];
+        let w = &mut w_buf[..nrow * ldw];
         for i in 0..nrow {
-            let src = node.row_indices[ff.perm[i]] * nrhs;
-            w[i * nrhs..(i + 1) * nrhs].copy_from_slice(&y[src..src + nrhs]);
+            let src = node.row_indices[ff.perm[i]] * ldw;
+            w[i * ldw..(i + 1) * ldw].copy_from_slice(&y[src..src + ldw]);
         }
 
         // L-solve. At small `nrhs` the row-major rank-1 cascade runs
@@ -1604,9 +1658,9 @@ fn solve_sparse_core_many_into(
         // BLAS3_NRHS_THRESHOLD` the register-blocked panel kernel runs
         // (TRSM on L_11 + GEMM on L_21, issue #57 fix #2).
         if use_blas3 {
-            fwd_blas3(w, &ff.l, nrow, nelim, nrhs);
+            fwd_blas3(w, &ff.l, nrow, nelim, ldw);
         } else {
-            fwd_rank1(w, &ff.l, nrow, nelim, nrhs);
+            fwd_rank1(w, &ff.l, nrow, nelim, ldw);
         }
 
         // D-block solve, fused into the forward pass. A node's
@@ -1614,18 +1668,18 @@ fn solve_sparse_core_many_into(
         // completes — ancestors only ever touch its separator rows — so
         // D⁻¹ can be applied here instead of in a second postorder pass,
         // saving one gather/scatter round trip per supernode (issue #57).
-        dsolve_node(w, ff, nelim, nrhs);
+        dsolve_node(w, ff, nelim, ldw);
 
         // Scatter back into `y` (both row-major), undoing the BK
         // permutation: y[row_indices[perm[i]], :] = w[i, :].
         for i in 0..nrow {
-            let dst = node.row_indices[ff.perm[i]] * nrhs;
-            y[dst..dst + nrhs].copy_from_slice(&w[i * nrhs..(i + 1) * nrhs]);
+            let dst = node.row_indices[ff.perm[i]] * ldw;
+            y[dst..dst + ldw].copy_from_slice(&w[i * ldw..(i + 1) * ldw]);
         }
     }
 
     // Phase 3: Backward substitution (reverse postorder).
-    let acc = &mut acc_buf[..nrhs];
+    let acc = &mut acc_buf[..ldw];
     for node in factors.node_factors.iter().rev() {
         let ff = &node.frontal_factors;
         let nelim = ff.nelim;
@@ -1634,24 +1688,24 @@ fn solve_sparse_core_many_into(
             continue;
         }
 
-        let w = &mut w_buf[..nrow * nrhs];
+        let w = &mut w_buf[..nrow * ldw];
         for i in 0..nrow {
             // y is row-major (`y[node*nrhs + c]`), so each supernode row
             // gathers a contiguous run — a memcpy, not a stride-`n` walk.
-            let src = node.row_indices[ff.perm[i]] * nrhs;
-            w[i * nrhs..(i + 1) * nrhs].copy_from_slice(&y[src..src + nrhs]);
+            let src = node.row_indices[ff.perm[i]] * ldw;
+            w[i * ldw..(i + 1) * ldw].copy_from_slice(&y[src..src + ldw]);
         }
 
         // L^T-solve (mirror of the forward dispatch).
         if use_blas3 {
-            back_blas3(w, &ff.l, nrow, nelim, nrhs, acc);
+            back_blas3(w, &ff.l, nrow, nelim, ldw, acc);
         } else {
-            back_rank1(w, &ff.l, nrow, nelim, nrhs, acc);
+            back_rank1(w, &ff.l, nrow, nelim, ldw, acc);
         }
 
         for i in 0..nrow {
-            let dst = node.row_indices[ff.perm[i]] * nrhs;
-            y[dst..dst + nrhs].copy_from_slice(&w[i * nrhs..(i + 1) * nrhs]);
+            let dst = node.row_indices[ff.perm[i]] * ldw;
+            y[dst..dst + ldw].copy_from_slice(&w[i * ldw..(i + 1) * ldw]);
         }
     }
 
@@ -1659,7 +1713,7 @@ fn solve_sparse_core_many_into(
     // `x_out`: x[c, old] = y[new*nrhs + c]. One-time scatter (mirror of
     // the entry permute).
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
-        let src = new_idx * nrhs;
+        let src = new_idx * ldw;
         for c in 0..nrhs {
             x_out[c * n + old_idx] = y[src + c];
         }
@@ -1841,6 +1895,31 @@ struct PanelBlock<'a> {
     col_stride: usize,
 }
 
+/// Register-tile height for the multi-RHS panel GEMM: 4 output rows held
+/// in registers at once.
+const MR: usize = 4;
+/// Register-tile width: 8 right-hand-side columns per tile.
+const NR: usize = 8;
+
+/// Row stride for the row-major multi-RHS work buffers, rounded up to a
+/// whole `NR`-column tile — i.e. to a multiple of 64 bytes.
+///
+/// The padding is what makes every row of `y`/`w` start on a cache-line
+/// boundary. Measured 2026-08-20 across seven KKT matrices: with the stride
+/// left at a raw `nrhs`, the BLAS-3 solve is ~1.5x slower at every `nrhs`
+/// that is not a multiple of 8. `nrhs = 33` costs 1.59x `nrhs = 32` on
+/// bratu3d (74.2 ms vs 46.6 ms) despite doing 3% *more* work, and it costs
+/// the same as `nrhs = 31` — which has seven tail columns to 33's one. The
+/// tail-column count does not predict the cost; the stride does.
+///
+/// The padded columns carry a zero right-hand side, so they are numerically
+/// inert: every real column's arithmetic, and its order, is untouched.
+/// See `dev/research/blas3-threshold-refit.md`.
+#[inline]
+fn padded_ldw(nrhs: usize) -> usize {
+    nrhs.div_ceil(NR) * NR
+}
+
 /// Register-blocked panel GEMM: `C[m, c] -= sum_k A[m, k] · B[k, c]`,
 /// `C` (`m_dim × nrhs`) and `B` (`k_dim × nrhs`) row-major with leading
 /// dimension `nrhs`, `A` an `m_dim × k_dim` view into the column-major
@@ -1857,8 +1936,6 @@ fn gemm_panel_minus(
     k_dim: usize,
     nrhs: usize,
 ) {
-    const MR: usize = 4;
-    const NR: usize = 8;
     let m_main = m_dim - m_dim % MR;
     let c_main = nrhs - nrhs % NR;
 
@@ -1910,37 +1987,79 @@ fn gemm_panel_minus(
         m0 += MR;
     }
 
-    // Column tail (nrhs % NR) for the MR-tiled rows.
-    gemm_scalar_block(c_rows, a, b_rows, 0, m_main, c_main, nrhs, k_dim, nrhs);
-    // Row tail (m_dim % MR), full column range.
-    gemm_scalar_block(c_rows, a, b_rows, m_main, m_dim, 0, nrhs, k_dim, nrhs);
+    // Column tail (nrhs % NR) for the MR-tiled rows: one padded full-width
+    // tile per row block, not a scalar sweep.
+    if c_main < nrhs {
+        let live = nrhs - c_main;
+        let mut m0 = 0;
+        while m0 < m_main {
+            gemm_tile::<MR>(c_rows, a, b_rows, m0, c_main, live, k_dim, nrhs);
+            m0 += MR;
+        }
+    }
+    // Row tail (m_dim % MR), full column range, one row at a time.
+    for m in m_main..m_dim {
+        let mut c0 = 0;
+        while c0 < nrhs {
+            let live = NR.min(nrhs - c0);
+            gemm_tile::<1>(c_rows, a, b_rows, m, c0, live, k_dim, nrhs);
+            c0 += NR;
+        }
+    }
 }
 
-/// Scalar fallback for the GEMM tails: `C[m, c] -= sum_k A[m, k]·B[k, c]`
-/// over `m ∈ [m_lo, m_hi)`, `c ∈ [c_lo, c_hi)`. Accumulates per `(m, c)`
-/// in increasing `k` (left fold), matching the core kernel's order.
+/// Register-blocked GEMM tile: `R` contiguous output rows starting at row
+/// `m0`, and the `live` columns starting at `c0`.
+///
+/// `live` may be shorter than `NR`. The lanes past it hold zero in both the
+/// accumulator and the `B` buffer, so they compute `0.0 - a·0.0 == 0.0` at
+/// every step and are never stored back. The stored elements are therefore
+/// bit-identical to computing only `live` lanes, and each remains a left
+/// fold over increasing `k` — matching the main kernel above and the rank-1
+/// cascade, so the panel path's parity with the scalar path is unchanged.
+///
+/// Running the tails at full register width is the point. The scalar tail
+/// this replaced re-walked all of `A`'s row and `B`'s column for *every*
+/// output element — strides `col_stride` and `nrhs`, no reuse — which made a
+/// tail column cost 2.0-5.1x a blocked column, measured across seven KKT
+/// matrices on 2026-08-20. That was enough to make `nrhs = 31` slower than
+/// `nrhs = 32` on every one of them despite 3% less work (bratu3d 85.3 ms vs
+/// 47.8 ms). See `dev/research/blas3-threshold-refit.md`.
+#[inline]
 #[allow(clippy::too_many_arguments)]
-fn gemm_scalar_block(
+fn gemm_tile<const R: usize>(
     c_rows: &mut [f64],
     a: &PanelBlock,
     b_rows: &[f64],
-    m_lo: usize,
-    m_hi: usize,
-    c_lo: usize,
-    c_hi: usize,
+    m0: usize,
+    c0: usize,
+    live: usize,
     k_dim: usize,
     nrhs: usize,
 ) {
-    for m in m_lo..m_hi {
-        let ab = a.base + m * a.row_stride;
-        let row = &mut c_rows[m * nrhs..(m + 1) * nrhs];
-        for c in c_lo..c_hi {
-            let mut sum = row[c];
-            for k in 0..k_dim {
-                sum -= a.l[ab + k * a.col_stride] * b_rows[k * nrhs + c];
+    debug_assert!(live > 0 && live <= NR);
+    let mut acc = [[0.0f64; NR]; R];
+    let mut ab = [0usize; R];
+    for r in 0..R {
+        ab[r] = a.base + (m0 + r) * a.row_stride;
+        let off = (m0 + r) * nrhs + c0;
+        acc[r][..live].copy_from_slice(&c_rows[off..off + live]);
+    }
+    let mut bb = [0.0f64; NR];
+    for k in 0..k_dim {
+        let boff = k * nrhs + c0;
+        bb[..live].copy_from_slice(&b_rows[boff..boff + live]);
+        let kc = k * a.col_stride;
+        for r in 0..R {
+            let av = a.l[ab[r] + kc];
+            for s in 0..NR {
+                acc[r][s] -= av * bb[s];
             }
-            row[c] = sum;
         }
+    }
+    for r in 0..R {
+        let off = (m0 + r) * nrhs + c0;
+        c_rows[off..off + live].copy_from_slice(&acc[r][..live]);
     }
 }
 
@@ -3859,6 +3978,94 @@ mod tests {
                 x_ser[i].to_bits(),
                 "gate-rejected factor: requesting parallel changed bit {i}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod gemm_tail_tests {
+    use super::*;
+
+    /// Reference GEMM with the summation order the panel kernel documents:
+    /// each `C[m, c]` accumulates over increasing `k` as a left fold. This is
+    /// the specification `gemm_panel_minus` has always claimed to implement
+    /// (see its doc comment and the rank-1 cascade it must stay parity with),
+    /// so equality here is equality with the pre-tail-rewrite kernel too.
+    fn reference(
+        c_rows: &mut [f64],
+        a: &PanelBlock,
+        b_rows: &[f64],
+        m_dim: usize,
+        k_dim: usize,
+        nrhs: usize,
+    ) {
+        for m in 0..m_dim {
+            let ab = a.base + m * a.row_stride;
+            for c in 0..nrhs {
+                let mut sum = c_rows[m * nrhs + c];
+                for k in 0..k_dim {
+                    sum -= a.l[ab + k * a.col_stride] * b_rows[k * nrhs + c];
+                }
+                c_rows[m * nrhs + c] = sum;
+            }
+        }
+    }
+
+    /// Deterministic, sign-varying, non-dyadic values, so a reassociation
+    /// would change the low bits rather than cancel out.
+    fn fill(v: &mut [f64], seed: u64) {
+        let mut x = seed | 1;
+        for e in v.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let u = ((x >> 11) as f64) / ((1u64 << 53) as f64);
+            *e = (u - 0.5) * 3.7;
+        }
+    }
+
+    /// Every `nrhs % NR` and `m_dim % MR` residue, including the shapes that
+    /// exercise the column tail, the row tail, and both at once.
+    #[test]
+    fn panel_gemm_is_bit_identical_to_the_reference_on_every_tail_shape() {
+        for &nrhs in &[1, 2, 3, 5, 7, 8, 9, 12, 14, 16, 20, 24, 31, 32, 33, 40] {
+            for &m_dim in &[1, 2, 3, 4, 5, 7, 8, 11, 16, 19] {
+                for &k_dim in &[1, 2, 5, 13, 32] {
+                    // `A` is a strided view, exactly as the solve builds it:
+                    // `row_stride = 1`, `col_stride = nrow`, offset `base`.
+                    let nrow = m_dim + 6;
+                    let base = 3;
+                    let mut lbuf = vec![0.0f64; base + nrow * k_dim + nrow];
+                    fill(&mut lbuf, 0x9E37_79B9_7F4A_7C15 ^ (nrhs as u64) << 8);
+                    let a = PanelBlock {
+                        l: &lbuf,
+                        base,
+                        row_stride: 1,
+                        col_stride: nrow,
+                    };
+
+                    let mut b = vec![0.0f64; k_dim * nrhs];
+                    fill(&mut b, 0xD1B5_4A32_D192_ED03 ^ (m_dim as u64) << 8);
+                    let mut c0 = vec![0.0f64; m_dim * nrhs];
+                    fill(&mut c0, 0xA24B_AED4_963E_E407 ^ (k_dim as u64) << 8);
+
+                    let mut got = c0.clone();
+                    gemm_panel_minus(&mut got, &a, &b, m_dim, k_dim, nrhs);
+                    let mut want = c0;
+                    reference(&mut want, &a, &b, m_dim, k_dim, nrhs);
+
+                    for i in 0..m_dim * nrhs {
+                        assert_eq!(
+                            got[i].to_bits(),
+                            want[i].to_bits(),
+                            "bit mismatch at {i} for nrhs={nrhs} m_dim={m_dim} k_dim={k_dim}: \
+                             {} vs {}",
+                            got[i],
+                            want[i]
+                        );
+                    }
+                }
+            }
         }
     }
 }

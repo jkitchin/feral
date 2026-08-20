@@ -5709,3 +5709,41 @@ identical hash over every `L`/`D` bit in storage order across
 4f588093d6bac8c7, `qcqp1500-1c_0000` cfec17df1a4f8d38). So future retuning of it
 is a performance-only change. Not yet established on a matrix that actually
 delays a pivot — all three report `d0`.
+
+## 2026-08-20 — Two-build cross-process comparison of the multi-RHS kernels (rejected: contaminated)
+
+To find where the rank-1 and BLAS-3 multi-RHS kernels actually cross over, I
+built two release binaries of `probe_blas3_crossover` — one stock
+(`BLAS3_NRHS_THRESHOLD = 32`) and one patched to 2 — and ran them alternating,
+on the theory that alternation cancels machine drift. It does not, and the data
+had to be thrown away.
+
+**Symptoms.** Two independent controls failed:
+
+1. *Anchor drift.* The probe also timed the looped single-RHS path, which is
+   byte-identical in both builds. Its cross-build ratio must read 1.00. Across
+   four run pairs it read **1.15, 1.58, 1.97, 2.10**.
+2. *Null control.* At `nrhs ∈ {32, 40, 48}` both builds dispatch to the *same*
+   BLAS-3 kernel, so the batched ratio must be exactly 1.00. It read
+   **0.86–0.90** — a ≥10% systematic bias with no possible code cause.
+
+**Why.** A full sweep is ~25 minutes, so two "adjacent" runs are 25 minutes
+apart. That is blocked measurement with an interleaved label on it — the same
+error behind the two claim retractions earlier the same day, one level up the
+stack. Cross-process A/B of a few-millisecond kernel does not work on this
+machine at this cadence.
+
+The remaining runs were killed (`pkill -f probe_blas3_crossover`, 0 left) and
+no number from the paired dataset was reported as a result.
+
+**Replaced by** an in-process design: the `kernel-probe` feature (off by
+default, compiled out entirely) exposes
+`set_blas3_nrhs_threshold`, so one process can time rank-1 and BLAS-3 at the
+*same* `nrhs`, alternating within each repetition — microseconds apart instead
+of 25 minutes. See `dev/research/blas3-threshold-refit.md`.
+
+**Kept from this attempt:** the single-build, single-process runs are valid,
+because looped-vs-batched was measured within one process. Two findings survive
+and are recorded in the research note: the 31→32 dispatch discontinuity (3% more
+work, batched time *drops* 1.36–1.77×), and that at `nrhs ∈ {2, 4}` batching is
+**21–27% slower** than looping single-RHS solves.
