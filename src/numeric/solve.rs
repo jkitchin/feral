@@ -848,7 +848,7 @@ enum CbThreshold {
     /// host, so it may drive **scheduling only** (issue #177).
     FromWorkers,
     /// A fixed [`CB_REFERENCE_FANOUT`]-way cut, identical on every host.
-    /// The basis for [`CbTaskPlan::core_profitable`].
+    /// The basis for [`cb_core_profitable`].
     Reference,
     /// Explicit, for the tests that sweep the threshold.
     #[cfg(test)]
@@ -1946,9 +1946,9 @@ fn gemm_scalar_block(
 
 /// Default cap on iterative-refinement **correction** steps: 10.
 ///
-/// MUMPS's `ICNTL(10)` default. Below this, some near-rank-deficient KKT
-/// matrices (CERI651C/ELS, HAHN1, MEYER3NE) bounce in and out of the
-/// machine-precision basin before settling — see
+/// Chosen from FERAL's own corpus, not inherited: below 10, some
+/// near-rank-deficient KKT matrices (CERI651C/ELS, HAHN1, MEYER3NE)
+/// bounce in and out of the machine-precision basin before settling — see
 /// `dev/journal/2026-04-18-06.org`. Issue #178 makes the cap settable
 /// per call but explicitly does **not** change this default.
 pub const DEFAULT_REFINE_MAX_STEPS: usize = 10;
@@ -2035,8 +2035,10 @@ impl RefineOptions {
 /// the returned `x` is no worse than the unrefined `solve_sparse()` output.
 ///
 /// Convergence test: stop when `||r||₂ / ||b||₂ < ε·√n` (we've reached
-/// machine precision) or after 10 steps. 10 is MUMPS's ICNTL(10)
-/// default; below that some near-rank-deficient KKT matrices
+/// machine precision) or after 10 steps. 10 comes from FERAL's corpus,
+/// not from MUMPS (whose `ICNTL(10)` default is `0` — no refinement at
+/// all; the comparison harness sets it to `2`): below 10 some
+/// near-rank-deficient KKT matrices
 /// (CERI651C/ELS, HAHN1, MEYER3NE) bounce in and out of the machine-
 /// precision basin before settling, and the best-iterate tracker below
 /// guarantees no regression from the extra steps.
@@ -2300,7 +2302,7 @@ pub fn solve_sparse_refined_parallel_into(
 ///
 /// Step 0 is the unrefined initial solve; subsequent steps are refinement
 /// iterations. The number of steps is bounded by the refinement cap
-/// (currently 10 + 1 initial = 11) and may exit early on convergence,
+/// (`RefineOptions::max_steps` + 1 initial) and may exit early on convergence,
 /// divergence, or plateau.
 #[derive(Debug, Clone, Copy)]
 pub struct RefinementStep {
@@ -2481,7 +2483,7 @@ fn solve_sparse_refined_core(
     };
 
     // Issue #131 Gap A: when the caller selects the contribution-block
-    // core, pool one CB workspace across the initial + up-to-10 correction
+    // core, pool one CB workspace across the initial + capped correction
     // solves (each reuses the plan + scratch). Otherwise use the
     // shared-vector `SolveWorkspace` path, bit-for-bit.
     //

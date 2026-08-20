@@ -57,10 +57,16 @@ All notable changes to FERAL will be documented in this file.
   `env::usize_list_var`: a locally-parsed list drops its unusable tokens and
   hands the caller a *shorter* sweep, so `0,1e3,1e6` ran one arm and reported
   "no difference" from an experiment that never had a second arm. The policy
-  lives in one new module, `feral::env`; a source-scan test
+  lives in one new **public** module, `feral::env` (`usize_var`, `u64_var`,
+  `usize_var_where`, `f64_var`, `f64_var_where`, `usize_list_var`,
+  `u128_list_var`), so a caller that reads its own knobs can apply the same
+  rules; a source-scan test
   (`tests/env_knob_scan.rs`) fails the build if any env read in `src/` or
-  `crates/` parses its own value locally again — with no exemption but
-  `feral::env` itself.
+  `crates/` parses its own value in the same statement again — with no
+  exemption but `feral::env` itself. Reads that stash the raw string in a
+  local and parse it further down are outside that scan's reach; the two
+  live instances (`SIZES`, `STATIC_PIVOTS`) were found by review and
+  converted too.
 - **No default and no gate changed** — only what a knob accepts and what it
   reports when it refuses. `feral::numeric::factorize::par_task_min_flops()` and
   `par_min_seeds()` are now public so a caller can confirm what the process
@@ -86,9 +92,14 @@ All notable changes to FERAL will be documented in this file.
 - **No default changed.** The cap is an upper bound only: the `eps*sqrt(n)`
   relative-residual target, the 100x divergence guard, and the 2-strike plateau
   exit all keep priority, and the best-iterate contract holds under every `k`, so
-  no cap can return an answer worse than `solve_sparse`. `k = 0` equals
-  `solve_sparse` bit-for-bit — and costs the same, since the residual matvec is
-  skipped rather than computed and discarded.
+  no cap can return an answer worse than `solve_sparse`. `k = 0` skips the
+  residual matvec rather than computing and discarding it, so it costs what the
+  unrefined solve costs — and on the shared-vector entry points
+  (`solve_sparse_refined_opts`) it is `solve_sparse` bit-for-bit. On an entry
+  point that may route to the contribution-block core (`Solver`,
+  `solve_sparse_refined_auto*`, `solve_sparse_refined_cb*`) `k = 0` is that
+  core's unrefined solve, which is a different reassociation of the same
+  answer — compare against `Solver::solve`, not `solve_sparse`.
 - **In-place entry points.** `Solver::solve_into`, `solve_refined_into`,
   `solve_many_into`, `solve_many_refined_into`, plus free-function
   `solve_sparse_into`, `solve_sparse_refined_into`,
@@ -98,7 +109,12 @@ All notable changes to FERAL will be documented in this file.
   its allocating twin; a wrong-length `rhs` or `x_out` returns
   `DimensionMismatch` rather than panicking; `NoFactor` keeps precedence.
   Aliasing `rhs` with `x_out` is unrepresentable in safe Rust rather than
-  checked at runtime.
+  checked at runtime. The crate root re-exports the single-RHS free
+  functions (`feral::solve_sparse_into`, `feral::solve_sparse_refined_into`,
+  `feral::RefineOptions`, ...); the multi-RHS and `_parallel` forms
+  (`solve_sparse_many_refined`, `_opts`, `_into`, and
+  `solve_sparse_refined_parallel`, `_opts`, `_into`) live at their module path,
+  `feral::numeric::solve`.
 - The refined paths also lost an internal allocation: the caller's `x_out` is
   now the best-iterate storage, and the multi-RHS refiner runs its initial
   batched solve directly into it.
@@ -112,6 +128,9 @@ All notable changes to FERAL will be documented in this file.
   `rayon::current_num_threads()` and overridable by `FERAL_CB_THRESH`, plus a
   fall-back to the shared-vector core whenever `ThreadPoolBuilder::build()` had
   failed — and `use_parallel` itself defaults from `available_parallelism()`.
+  (At `nrhs >= 16`, `solve_many_refined` takes the batched panel kernel
+  instead — a third reassociation, host-independent like the other two, so the
+  contract holds; it is simply not one of the two named cores.)
 - **The bug.** The two cores use different (equally valid) floating-point
   reassociations: the shared-vector core folds each front's separator update
   into a global vector in flat postorder, the contribution-block core sums a
@@ -129,10 +148,32 @@ All notable changes to FERAL will be documented in this file.
   (1.00–1.03x). On a factor routed to the contribution-block core, a host that
   cannot spawn workers pays ~1.10x for the determinism (poisson_160, refined
   solve: 27.8 ms → 30.6 ms) while a 4-worker host gains 25% (20.8 ms).
+  Best-of-7 on a 4-worker container over synthetic Poisson grids and chains;
+  the Mittelmann corpus was not re-measured for this change, so treat the
+  ratios as characteristic of bushy grid-like factors rather than as a bound.
 - **New API.** `SolveCore`, `solve_sparse_refined_auto` (the factor-derived
   choice, what `Solver` uses) and `solve_sparse_refined_cb` (the explicit
-  contribution-block entry point, with an execution-strategy argument).
-  `solve_sparse_refined` and `solve_sparse_refined_parallel` are unchanged.
+  contribution-block entry point, with an execution-strategy argument), plus
+  their `_opts` and `_into` forms: `solve_sparse_refined_auto_opts`,
+  `solve_sparse_refined_auto_into`, `solve_sparse_refined_cb_opts`. All are
+  re-exported at the crate root.
+- **`solve_sparse_refined` is unchanged.** `solve_sparse_refined_parallel` keeps
+  the shared-vector fallback it has always had — it is now
+  `solve_sparse_refined_auto(.., parallel: true)` — but the *predicate* behind
+  that fallback changed with everything else here, from the host-dependent
+  `CbSolveWorkspace::worthwhile()` to `cb_core_profitable`. On a factor where
+  the two disagree it returns a different (equally valid) reassociation than
+  v0.16.0 did on that host. Pinned by
+  `tests/issue177_parallel_entry_point_core.rs`.
+- **This release can change your numbers.** `Solver::solve_refined`,
+  `Solver::solve_many_refined` and `solve_sparse_refined_parallel` return the
+  bits the *factor* selects, where v0.16.0 returned the bits the *host*
+  selected. Any host whose core count, pool availability or `FERAL_CB_THRESH`
+  put it on the other side of the old gate will see its refined solves move in
+  the last bits — and, per issue #16, an interior-point host can amplify that
+  into a different iterate trajectory. This is the fix, not a side effect, but
+  it is not a no-op: re-baseline before comparing 0.17.0 runs against 0.16.0
+  ones. Python callers of `Solver.solve_refined` get the same change.
 
 ### Fixed — scaling router no longer routes on index order (issue #134 item B)
 
