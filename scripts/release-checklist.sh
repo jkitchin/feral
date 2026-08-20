@@ -259,8 +259,10 @@ Remaining manual steps (this script does NOT commit, tag, or release):
      feral_solver-$ver wheels and publishes to PyPI — that version's
      files can never be re-uploaded). Make sure $ver is final first.
 
-  8. Verify:
-       curl -s https://crates.io/api/v1/crates/feral | \\
+  8. Verify (crates.io rejects a request with no User-Agent, and does it
+     silently — without the header even 'serde' reads as unpublished):
+       curl -s -H 'User-Agent: feral-release (jkitchin@andrew.cmu.edu)' \\
+         https://crates.io/api/v1/crates/feral | \\
          python3 -c 'import sys,json;print(json.load(sys.stdin)["crate"]["max_version"])'
        curl -s https://pypi.org/pypi/feral-solver/json | \\
          python3 -c 'import sys,json;print(json.load(sys.stdin)["info"]["version"])'

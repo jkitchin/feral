@@ -1,0 +1,326 @@
+#+TITLE: Session 2026-08-19-05 journal
+#+DATE: 2026-08-19
+
+* 22:10 :issue-153:triage:rescope:
+Read #153 cold and checked each of its three items against `main` at
+0.16.0. Items 1 and 3 are closed by prior sessions; item 2 (dtoc1nd's
+dense-front gap) is the only live one.
+
+- Item 1 (warm-path scaling): KR warm-start falsified twice
+  (`dev/tried-and-rejected.md` 2026-08-15), MC64 cache-miss cost closed
+  with a mechanism (2026-08-15-02). Separately, 0.15.1 already shipped
+  the real "never warms" fix on the MC64 side — the value-bound gate's
+  condition 3 compared the current *minimum* scaled diagonal against the
+  baseline *mean*, so it rejected reuse on unmoved matrices. robot_1600:
+  scaling -39.8%, factor -14.3%. The issue's profiling table predates it.
+- Item 3 (nemin): rejected in the issue's own thread.
+- Sizing correction carried forward: only 2 of the 6 fixtures (clnlbeam,
+  steering_12800) actually run KR; dtoc1nd/rocket/marine steady-state on
+  MC64. So "scaling = 34% of rocket_12800" is MC64 cost, not the KR loop.
+
+Posted the rescoping comment and retitled the issue to item 2.
+
+* 22:35 :issue-153:tooling:profiler:
+Needed the front-size histogram weighted by *loop time* that the issue
+asked for. `profile_supernode_distribution` buckets by nrow but on a
+hardcoded matrix list with no phase split; `diag_factor_phases` splits
+phases but aggregates over all fronts. Neither can say which size class
+a phase's time sits in. Wrote
+`crates/feral-diagnostics/src/bin/probe_front_bucket_phases.rs`:
+argv-driven, sequential supernodal driver (per-supernode phase deltas
+come from process-global counters, so a parallel driver would interleave
+them), warm workspace, median of N runs, buckets matching
+`Profiler::report()` so the numbers are comparable with prior probes.
+
+* 18:05 :issue153:blocksize:bitparity:
+Wrote =crates/feral-diagnostics/src/bin/probe_panel_block_size.rs= — paired
+alternating sweep over =BunchKaufmanParams.block_size= ∈ {8,16,24,32,48,64},
+=min_us= per arm plus a sign test over pairs, and per arm an inertia,
+delayed-pivot count, and a hash of every =d_diag=/=d_subdiag=/=l= bit in
+storage order. Motivation: dtoc1nd's paying bucket is ncol≈62 against
+=block_size: 64=, so =bs = params.block_size.min(ncol)= (src/dense/factor.rs:2171)
+makes the whole front one BLAS-2 left-looking panel; panel is 56.5% of that
+bucket's time while every other fixture is panel 7-15% / schur 26-31%.
+
+First run on dtoc1nd_0010 (n=9685, 482 supernodes, ncol p90 = 63, ncol max = 63):
+
+: bs   min_us  vs_base  wins  inertia/delayed  digest             resid
+:  8    14357   0.865     1   5960/3725 d0     9cb93f568423e6c0   5.54e-6
+: 16    16896   1.018     0   5960/3725 d0     9cb93f568423e6c0   5.54e-6
+: 24    17703   1.067     1   5960/3725 d0     9cb93f568423e6c0   5.54e-6
+: 32    12075   0.728     3   5960/3725 d0     9cb93f568423e6c0   5.54e-6
+: 48    15285   0.921     2   5960/3725 d0     9cb93f568423e6c0   5.54e-6
+: 64    16597   1.000     1   5960/3725 d0     9cb93f568423e6c0   5.54e-6  <- default
+
+Two results, of very different quality.
+
+1. **=block_size= is bit-neutral here.** All six arms produce the same
+   inertia, the same zero delayed pivots, the same residual, and the *same
+   hash over every L and D bit*. So on this matrix the knob is pure
+   scheduling — it does not perturb the pivot sequence. That is a
+   load-independent result and it is the precondition for the lever being
+   shippable at all. Not yet generalized: needs the same check on fixtures
+   where pivots actually get delayed (dtoc1nd delays none).
+
+2. **The timings are junk.** =uptime= reports load average 14.54 with two
+   rustc processes at 620% and 172% CPU and a =pounce= release binary at
+   58% — other sessions are compiling in this working tree. bs=64 measures
+   16597 µs here against the ~6564 µs warm sequential minimum measured for
+   this same matrix earlier today, i.e. 2.5x inflated, and the per-pair
+   wins scatter across five of the six arms (1,0,1,3,2,1). Nothing about
+   the arm *ranking* survives that. Re-running with 40 pairs; the ordering
+   is not to be quoted until the machine is quiet.
+
+* 22:55 :pr-review:pr182:merge:
+Applied the PR #182 review nits (env parse policy, issue #176) and
+merged. The broadened =tests/env_knob_scan.rs= — matching =env::var(=
+with any argument and exempting only =src/env.rs= — turned up 21 live
+offenders across =src/bin/= and =crates/feral-diagnostics=. Converted
+all 21 rather than re-narrowing the guard, so the scan now has no
+exemptions. Merged as 61d2996.
+
+Consequence noticed while merging: PR #181 introduced
+=std::env::var("FERAL_CALIB_REPS").ok().and_then(|s| s.parse().ok())=
+in =src/numeric/solve.rs=, which is exactly the shape the new scan
+rejects. Not visible on either branch in isolation — only in the merge.
+Merge order therefore mattered: #182 first, then merge main into #181
+and convert the knob there.
+
+* 23:05 :pr-review:pr181:issue-177:
+The blocking #181 finding reproduced exactly as reported. Applying the
+leak — =cb_gate_shape(..) && cb_sync_amortized(total, n_nodes)= as the
+last line of =cb_core_profitable= — passed the whole suite before the
+fix. After adding =narx_proxy(24, 2000, 1)= to
+=cb_core_profitable_matches_the_plan_gate=:
+
+    assertion `left == right` failed: n=96001: flat predicate says
+    false, CbTaskPlan says true
+
+Added =saw_split= so the test fails if a future edit drops the only
+fixture where =shape_ok= and =worthwhile= disagree — otherwise the same
+hole reopens silently.
+
+Measured the calibration table's reachability rather than taking the
+reviewer's count on trust. Two of eight points are unreachable, and one
+of them is not the pair the review named:
+
+    fixture       nodes      total   per_front  shape_ok  worthwhile
+    poisson_96     1736     351544         202     false       false
+    poisson_160    4633    1090303         235      true        true
+    narx_w1       47228    1208092          25      true       false
+    narx_w2       33138     958763          28     false       false
+    narx_w3        6024    1840981         305      true        true
+    narx_w4       21595    1155171          53      true       false
+    narx_w6       15384    1150719          74      true        true
+    narx_w8       11880    1229411         103      true        true
+
+Both unreachable points (narx_w2, poisson_96) fail on MIN_TOTAL_COST =
+1e6, not on the per-front floor. The six reachable points are still
+monotone and still bracket the break-even between 53 and 74, so
+MIN_COST_PER_FRONT = 64 stands unchanged. Doc and research note both
+annotated. Merged as 7c6a422.
+
+* 23:20 :pounce-710:refinement:test-gap:
+pounce#710's acceptance item 3 — "verify the cap actually takes effect
+on the =nrhs = 2= path" — was a real gap, not a formality. Issue #178's
+tests cover the free functions =solve_sparse_many_refined_opts= at
+nrhs = 2/3/4/20, and cover =Solver= only at =RefineOptions::default()=.
+Nothing covered the combination pounce consumes: the stateful =Solver=,
+a non-default cap, and =nrhs = 2= (below BLAS3_REFINE_THRESHOLD = 16,
+so the per-column arm rather than the batched one).
+
+Wrote =tests/pounce710_refine_cap_nrhs2.rs= (6 tests, both arms).
+Non-vacuity checked by mutation: changing the narrow arm to
+=self.refine_into(.., RefineOptions::default())= — i.e. silently
+ignoring the caller's cap on exactly the path pounce uses — fails 4 of
+the 6. The two that still pass are the ones that should
+(=default_options_change_nothing_on_this_path= and the =_into= parity
+check), which is the expected signature of that defect.
+
+Reading the code, the cap does reach the narrow arm:
+=solve_many_refined_into= passes =opts= to =refine_into= per column
+(=src/numeric/solver.rs:1861=). So item 3 is confirmed working, and now
+pinned.
+
+* 23:30 :pounce-710:release:blocker:
+Checked crates.io with a User-Agent (serde sanity check first: 1.0.229
+returned). feral's published max is =0.16.0=, dated 2026-08-14 — before
+#179 merged. So =RefineOptions= is not in any published release, and
+pounce's =scripts/check-release-consistency.sh= rejects a git dep.
+pounce#710's second blocker is therefore still open and is a feral-side
+release action, not a code change. Unreleased has five entries
+(#134B, #175, #176, #177, #178); 0.17.0 is the right bump.
+
+* 23:20 :issue153:blocksize:falsified:
+Re-ran both #153 probes on a quieter machine (load 7.1-7.6 vs the 14.5
+of the first attempt) and the picture resolved.
+
+The =probe_front_bucket_phases= result is stable across runs:
+dtoc1nd_0010's cost is 148 fronts of mean shape ncol=62 nrow=88, 89% of
+loop time against 99% of flops, panel 53.5% / schur 19.5%. Every other
+#153 fixture is panel 6-15% / schur 17-30%. Cause is shape:
+=bs = block_size.min(ncol)= with block_size 64 makes a 62-column front
+*one* left-looking BLAS-2 panel.
+
+**Packed-SIMD gate hypothesis: falsified.** The gate is
+=n_elim*(nrow-col_start)*ncol= ≈ 3.4e5 against a 1024 threshold — cleared
+by 330x, so the SIMD path was never in question. Confirmed with
+=FERAL_PACKED_SIMD_MIN_WORK= (paying bucket avg_ns, median of 7):
+
+: min_work        avg_ns   panel%  schur%
+: 0                32910     54.9    17.9
+: 1024 (default)   32131     55.6    18.1
+: 1e12             37173     47.9    26.5
+
+min_work=0 changes nothing (nothing was being rejected); 1e12 costs
+15.7%. The kernel is engaged and paying.
+
+**block_size: mechanism confirmed, payoff 1.3%.** Added =FERAL_BUCKET_BS=
+so the phase shares can be read as a function of the lever. Panel falls
+54%->15% and schur rises 18%->57% as bs goes 64->8 — exactly the
+predicted conversion. But the paired sweep (60 pairs, single process)
+puts bs=48 only 1.3% ahead: min_us 9604 vs 9733, 43/60 wins. Real (43 vs
+an expected 15 under the null) and tiny. Converting three quarters of the
+panel share buys 1.3%, so the 53.5% is not recoverable time.
+
+Does not generalize: bs=48 and bs=64 are identical for ncol<=48, which is
+every other matrix sampled — ncol p90 is 1-19 across twelve corpus
+matrices, only dtoc1nd is at 63. nql180 0.990 (5/12 wins, tied), 
+qcqp1500-1c 0.994 (3/12). Not shipped.
+
+Two independent runs of the phase probe disagreed on which bs minimized
+avg_ns (64 in one, 48 in the other) — across-process medians are not
+trustworthy at a 1% effect size. The paired sweep is the measurement of
+record, per dev/decisions.md 2026-08-09. Recorded that explicitly in the
+research note so a future reader does not quote the phase-probe timings.
+
+Bit-neutrality now generalizes past dtoc1nd: identical digest across
+bs in {8,16,24,32,48,62,64} on nql180_0000 (4f588093d6bac8c7) and
+qcqp1500-1c_0000 (cfec17df1a4f8d38) too. All three report d0, so the
+claim is still untested where may_delay actually fires.
+
+* 23:22 :process:issues:
+#175 and #176 were still open after their PRs merged: PR #181's title
+said "(issue #175)" and #182's "(#176)", which link but are not closing
+keywords. Closed both with comments recording the fix and the merge
+commit. Worth remembering — the project's PR titles use the "(#N)"
+convention, which never auto-closes.
+
+* 23:50 :pr-review:pre-release:blocker:issue177:
+Five review agents over the six PRs merged since v0.16.0 (#174, #179,
+#180, #181, #182, #183 — the brief said five; the cross-cutting agent
+found #174 also has an [Unreleased] section). Two of them independently
+reported the same blocker, which I then confirmed against git rather
+than on their word.
+
+=solve_sparse_refined_parallel= silently changed its arithmetic. At
+v0.16.0 (=git show v0.16.0:src/numeric/solve.rs=):
+
+: let mut cb_ws: Option<CbSolveWorkspace> = if parallel_cb && n > 0 {
+:     let cb = CbSolveWorkspace::for_factors(factors);
+:     cb.worthwhile().then_some(cb)
+: } else { None };
+
+i.e. shared-vector core whenever the gate rejected the factor. #177's
+rewrite mapped it to =SolveCore::ContribBlock { parallel: true }=, and
+=solve_sparse_refined_core= turns that into =use_cb = true=
+unconditionally. So every rejected factor changed bits *and* got slower
+— #180's own rejected-alternative table measures that design at 1.86x on
+poisson_40 (659 -> 1228 µs). Meanwhile CHANGELOG.md:135 asserted
+"=solve_sparse_refined= and =solve_sparse_refined_parallel= are
+unchanged".
+
+Fix is =SolveCore::Auto { parallel: true }=, not a restoration of the old
+gate: =worthwhile()= reads =rayon::current_num_threads()= and
+=FERAL_CB_THRESH=, which is exactly the host-dependence #177 exists to
+remove. =Auto= keeps the fallback and derives it from
+=cb_core_profitable= (shape only). Side effect: =_parallel= is now an
+exact alias of =_auto(.., true)=, which is what it actually is; said so
+in its doc comment, which #177 had left empty by moving it onto
+=solve_sparse_refined_cb= (where it stacked with the new one and rustdoc
+rendered both, the top one asserting two things the bottom one denies).
+
+Pinned by =tests/issue177_parallel_entry_point_core.rs= (4 tests).
+Oracle is v0.16.0's shipped behaviour via =solve_sparse_refined=, which
+is unchanged and golden-pinned. Non-vacuity is asserted inside the test
+rather than assumed: on chain_400 the two cores must differ bit-for-bit
+or the test says so and fails.
+
+: test parallel_entry_point_keeps_the_shared_vector_core_on_a_rejected_factor ok
+: test parallel_entry_point_still_reaches_the_cb_core_on_a_profitable_factor  ok
+: test parallel_entry_point_equals_auto_with_parallelism_on                   ok
+: test opts_and_into_forms_make_the_same_core_choice                          ok
+
+Full suite after all fixes: 924 passed, 0 failed, 23 ignored
+(=cargo test --release=). clippy --all-targets -D warnings clean.
+
+* 23:52 :pr-review:env:scan-gap:
+The #182 CHANGELOG claimed =tests/env_knob_scan.rs= leaves "no exemption
+but =feral::env= itself". Two live offenders passed it:
+
+- =bench_intrafront.rs:126= =SIZES= — =env::var= into a local, then
+  =.parse::<usize>()= in a *later* statement (the =for= loop).
+- =probe_static_pivot_inertia.rs:100= =STATIC_PIVOTS= — same shape, and
+  worse: =.parse().unwrap_or(0.0)= turns an unreadable token into 0.0,
+  which the next line maps to =None= = static pivoting *off*. A typo
+  silently became a different experiment arm.
+
+The scan is statement-scoped, so it structurally cannot see the
+bind-then-parse-later shape. Converted both (added =env::f64_list_var=,
+the float twin of =usize_list_var=, for the second) and scoped the
+CHANGELOG claim to what the scan actually checks.
+
+Separately fixed a fragility the #182 agent found and I initially
+doubted: the window is =min(next ';', 400)=, and
+=Solver::pool_num_threads= (src/numeric/solver.rs:506) is a tail
+expression with no =;= for 1708 bytes, while the =.parse= in the
+*separate* =pool_num_threads_from= helper below sits at +485. The scan
+passed only because 400 < 485. Measured, not estimated:
+
+: line 506: first ';' at +1708, '.parse' at +485, hard=min(1708,400)=400
+
+Trimming ~86 characters of doc comment would have failed CI on a file
+nobody touched. Added a blank-line terminator to the window — statements
+do not span blank lines under rustfmt, so it can only shrink windows,
+never add offenders.
+
+* 23:54 :pr-review:docs:changelog:
+Remaining pre-release corrections, all doc/CHANGELOG:
+
+- =DEFAULT_REFINE_MAX_STEPS= doc claimed 10 is "MUMPS's =ICNTL(10)=
+  default". It is not: =ref/mumps/src/dini_defaults.F:363= says
+  =ICNTL(10)= defaults to 0 (no refinement), and
+  =external_benchmarks/comparison/REPORT.md:19= already said so. Two
+  sites corrected to attribute 10 to feral's own corpus.
+- =README.md:317= still described =FERAL_CB_THRESH= as selecting the
+  solve *core*; since #177 it is schedule-only.
+- =README.md= refinement section never mentioned =RefineOptions=, the
+  cap, or the =_into= family — the release's headline feature.
+- CHANGELOG: "k = 0 equals =solve_sparse= bit-for-bit" is true only on
+  the shared-vector entry points; on a CB-routed factor it is that
+  core's unrefined solve. Scoped.
+- CHANGELOG: added the missing new public items (=_auto_opts=,
+  =_auto_into=, =_cb_opts=, the seven =feral::env= functions) and an
+  explicit "this release can change your numbers" note, including for
+  Python callers, who get #177's bit change with none of the Rust-side
+  explanation.
+- =tests/cb_solve_parity.rs:217= claimed poisson_96 "clears the
+  =worthwhile= gate, so this exercises the actual tree-parallel task
+  path". It does not: total 351,544 vs MIN_TOTAL_COST 1,000,000, so both
+  arms run =cb_run_serial=. Pre-existing. The claim it was standing in
+  for is genuinely covered by =refined_solve_core_stability.rs= on
+  poisson_160 (total 1,090,303) at 1/2/3/4/8 workers; corrected the
+  comment to say which file pins what.
+- =scripts/release-checklist.sh= step 8 verified the publish with a
+  User-Agent-less =curl= to crates.io, which fails silently and reads as
+  "never published".
+
+* 23:56 :process:agents:worktree:
+A review agent mutated =src/numeric/solve.rs= in the live working tree
+(inserted =panic!("PARALLEL PATH REACHED")= into =cb_run_parallel= to
+test parity-suite non-vacuity) while I was about to edit the same file.
+Caught it on =git status=, restored with =git checkout --=, and told it
+to stop. Its finding was correct and useful — the parity suite never
+reaches =cb_run_parallel= — but review agents must run with
+=isolation: "worktree"= when they intend mutation testing, or be told up
+front that the tree is shared and read-only to them.

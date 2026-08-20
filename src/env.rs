@@ -273,6 +273,36 @@ pub fn f64_var_where(name: &str, requirement: &str, accept: impl Fn(f64) -> bool
     None
 }
 
+/// Comma-separated sweep list of floats, e.g.
+/// `STATIC_PIVOTS=0,1e-12,1e-10`. The float twin of [`usize_list_var`],
+/// and it exists for the same reason: a locally-parsed list silently
+/// *drops* the tokens it cannot read, so a sweep reports "no difference"
+/// from an experiment that never ran the arms the operator asked for.
+/// Each unusable token warns and is skipped; an all-unusable list warns
+/// and yields `None` so the caller falls back to its own default list.
+pub fn f64_list_var(name: &str) -> Option<Vec<f64>> {
+    let raw = std::env::var(name).ok()?;
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(v) = report(name, token, parse_float(token)) {
+            out.push(v);
+        }
+    }
+    if out.is_empty() {
+        warn_once(
+            name,
+            &raw,
+            "has no usable values; falling back to the built-in default list",
+        );
+        return None;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

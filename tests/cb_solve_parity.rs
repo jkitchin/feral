@@ -214,9 +214,15 @@ fn cb_parity_disjoint_tridiag() {
 
 #[test]
 fn cb_parity_poisson_2d_96x96_concurrent() {
-    // n = 9216: large + bushy enough to clear the `worthwhile` gate, so
-    // this exercises the actual tree-parallel task path (not the serial
-    // fallback) — the byte-identity check that matters most.
+    // n = 9216, the largest fixture here. Note what this does *not*
+    // reach: its total solve cost is 351,544 against
+    // `MIN_TOTAL_COST = 1_000_000`, so `worthwhile` is false and both
+    // sides of the parity check run `cb_run_serial`. The claim that
+    // `cb_run_parallel` is byte-identical to it is covered by
+    // `tests/refined_solve_core_stability.rs`, whose poisson_160 fixture
+    // (total 1,090,303) does clear the gate and is checked at 1/2/3/4/8
+    // workers. What this file pins is CB-core vs shared-vector-core
+    // agreement, which does not depend on the schedule.
     check(&poisson_2d_spd(96), "poisson_2d_96x96");
 }
 

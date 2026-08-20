@@ -848,7 +848,7 @@ enum CbThreshold {
     /// host, so it may drive **scheduling only** (issue #177).
     FromWorkers,
     /// A fixed [`CB_REFERENCE_FANOUT`]-way cut, identical on every host.
-    /// The basis for [`CbTaskPlan::core_profitable`].
+    /// The basis for [`cb_core_profitable`].
     Reference,
     /// Explicit, for the tests that sweep the threshold.
     #[cfg(test)]
@@ -1946,9 +1946,9 @@ fn gemm_scalar_block(
 
 /// Default cap on iterative-refinement **correction** steps: 10.
 ///
-/// MUMPS's `ICNTL(10)` default. Below this, some near-rank-deficient KKT
-/// matrices (CERI651C/ELS, HAHN1, MEYER3NE) bounce in and out of the
-/// machine-precision basin before settling — see
+/// Chosen from FERAL's own corpus, not inherited: below 10, some
+/// near-rank-deficient KKT matrices (CERI651C/ELS, HAHN1, MEYER3NE)
+/// bounce in and out of the machine-precision basin before settling — see
 /// `dev/journal/2026-04-18-06.org`. Issue #178 makes the cap settable
 /// per call but explicitly does **not** change this default.
 pub const DEFAULT_REFINE_MAX_STEPS: usize = 10;
@@ -2035,8 +2035,10 @@ impl RefineOptions {
 /// the returned `x` is no worse than the unrefined `solve_sparse()` output.
 ///
 /// Convergence test: stop when `||r||₂ / ||b||₂ < ε·√n` (we've reached
-/// machine precision) or after 10 steps. 10 is MUMPS's ICNTL(10)
-/// default; below that some near-rank-deficient KKT matrices
+/// machine precision) or after 10 steps. 10 comes from FERAL's corpus,
+/// not from MUMPS (whose `ICNTL(10)` default is `0` — no refinement at
+/// all; the comparison harness sets it to `2`): below 10 some
+/// near-rank-deficient KKT matrices
 /// (CERI651C/ELS, HAHN1, MEYER3NE) bounce in and out of the machine-
 /// precision basin before settling, and the best-iterate tracker below
 /// guarantees no regression from the extra steps.
@@ -2103,14 +2105,6 @@ pub fn solve_sparse_refined_into(
     Ok(())
 }
 
-/// Iterative refinement using the tree-parallel contribution-block solve
-/// (issue #131 Gap A) for the initial and correction solves, pooling one
-/// `CbSolveWorkspace` across them. Falls back per-solve to the serial
-/// path when the factor's assembly tree is not `worthwhile` (path-like /
-/// small trees), so it never regresses those; on bushy trees it runs the
-/// substitutions across the rayon pool. The refined result is a valid
-/// solution equal to `solve_sparse_refined`'s up to floating-point
-/// reassociation. Used by `Solver::solve_refined` when parallelism is on.
 /// Iterative refinement through the contribution-block solve core (issue
 /// #131 Gap A) for the initial and correction solves, pooling one
 /// `CbSolveWorkspace` across them.
@@ -2225,6 +2219,35 @@ pub fn solve_sparse_refined_auto_into(
     Ok(())
 }
 
+/// Iterative refinement with tree-parallel execution requested, and the
+/// core chosen from the factor's structure — exactly
+/// [`solve_sparse_refined_auto`]`(.., parallel: true)`, which this
+/// forwards to.
+///
+/// # Relationship to the other entry points
+///
+/// This is the pre-#177 name. It predates the separation of *which core*
+/// (a numerical decision) from *how it executes* (a scheduling one), so
+/// its name says "parallel" while its behavior is "let the factor pick
+/// the core, and run it over the pool if that lands on the CB core".
+/// Prefer [`solve_sparse_refined_auto`] in new code, which says that
+/// outright, or [`solve_sparse_refined_cb`] when you want the
+/// contribution-block core regardless of what the factor's shape
+/// suggests.
+///
+/// # Why it is not the CB core unconditionally
+///
+/// Through v0.16.0 this function built a `CbSolveWorkspace` and used it
+/// only when `worthwhile()` held, falling back to the shared-vector core
+/// otherwise. Issue #177 removed that gate because it read
+/// `rayon::current_num_threads()` and `FERAL_CB_THRESH`, so the same
+/// factor solved with different arithmetic on different hosts.
+/// [`SolveCore::Auto`] is the host-independent replacement: it keeps the
+/// fallback (from the factor's shape alone) rather than dropping it.
+/// Routing this function to the CB core unconditionally instead would
+/// have cost 1.86x on the small path-like factors the gate exists to
+/// protect (poisson_40, refined solve: 659 µs → 1228 µs) — the
+/// alternative issue #177 measured and rejected.
 pub fn solve_sparse_refined_parallel(
     matrix: &CscMatrix,
     factors: &SparseFactors,
@@ -2248,7 +2271,7 @@ pub fn solve_sparse_refined_parallel_opts(
         rhs,
         &mut x,
         false,
-        SolveCore::ContribBlock { parallel: true },
+        SolveCore::Auto { parallel: true },
         opts,
     )?;
     Ok(x)
@@ -2268,7 +2291,7 @@ pub fn solve_sparse_refined_parallel_into(
         rhs,
         x_out,
         false,
-        SolveCore::ContribBlock { parallel: true },
+        SolveCore::Auto { parallel: true },
         opts,
     )?;
     Ok(())
@@ -2279,7 +2302,7 @@ pub fn solve_sparse_refined_parallel_into(
 ///
 /// Step 0 is the unrefined initial solve; subsequent steps are refinement
 /// iterations. The number of steps is bounded by the refinement cap
-/// (currently 10 + 1 initial = 11) and may exit early on convergence,
+/// (`RefineOptions::max_steps` + 1 initial) and may exit early on convergence,
 /// divergence, or plateau.
 #[derive(Debug, Clone, Copy)]
 pub struct RefinementStep {
@@ -2460,7 +2483,7 @@ fn solve_sparse_refined_core(
     };
 
     // Issue #131 Gap A: when the caller selects the contribution-block
-    // core, pool one CB workspace across the initial + up-to-10 correction
+    // core, pool one CB workspace across the initial + capped correction
     // solves (each reuses the plan + scratch). Otherwise use the
     // shared-vector `SolveWorkspace` path, bit-for-bit.
     //

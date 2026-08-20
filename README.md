@@ -157,6 +157,26 @@ a wrong `A⁻¹`, the refinement guarantees the returned `x` is no worse
 than the unrefined solve, even when individual refinement steps would
 have amplified the error.
 
+The step budget is a per-call parameter. `RefineOptions::with_max_steps(k)`
+caps the *correction* steps at `k` (the initial solve always runs, so a call
+does at most `k + 1` substitution passes); `RefineOptions::default()` is the
+historical budget, `DEFAULT_REFINE_MAX_STEPS = 10`. It is a cap, not a target:
+the `ε·√n` residual test, the divergence guard, and the plateau exit all keep
+priority, and best-iterate holds under every `k`, so no cap returns an answer
+worse than the unrefined solve. `k = 0` *is* the unrefined solve, and costs the
+same — the residual matvec is skipped rather than computed and discarded. The
+caller that wants this is one running its own refinement loop over the same
+system, an interior-point method being the standard case: without a cap the two
+loops nest and one solve can cost `10 × 11 = 110` passes.
+
+Every entry point has an `_opts` form taking `RefineOptions` and an `_into`
+form writing into a caller-owned buffer instead of allocating —
+`Solver::solve_into`, `solve_refined_into`, `solve_many_into`,
+`solve_many_refined_into`, and the free functions `solve_sparse_into`,
+`solve_sparse_refined_into`, `solve_sparse_many_refined_into`. Each is
+bit-identical to its allocating twin; a wrong-length buffer returns
+`DimensionMismatch` rather than panicking.
+
 ## Python bindings
 
 The `feral-solver` package on PyPI provides Python bindings built with
@@ -314,7 +334,7 @@ on `feral_new()`:
 |-----------------------------|---------|-----------------------------------------------------------------|
 | `FERAL_PAR_TASK_MIN_FLOPS`  | `1e6`   | subtree flops at or above which a supernode becomes its own task |
 | `FERAL_PAR_MIN_SEEDS`       | `2`     | task-graph seeds below which the factorization runs sequentially |
-| `FERAL_CB_THRESH`           | derived | coarsening cutoff for the contribution-block solve core          |
+| `FERAL_CB_THRESH`           | derived | task-graph coarsening cutoff for the contribution-block solve *schedule* — since #177 it cannot change a result bit |
 | `FERAL_INTRAFRONT_MIN_AREA` | `32768` | front area below which intra-front parallelism is off            |
 | `FERAL_PACKED_SIMD_MIN_WORK`| `1024`  | Schur work below which the packed SIMD kernel is skipped         |
 | `FERAL_DENSE_MAX`           | `1000`  | `bench` only: dense-BK size gate                                 |
