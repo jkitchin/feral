@@ -3,6 +3,7 @@
 ![FERAL banner](https://raw.githubusercontent.com/jkitchin/feral/main/assets/feral-banner.png)
 
 [![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jkitchin/feral/branch/main/graph/badge.svg)](https://codecov.io/gh/jkitchin/feral)
 [![crates.io](https://img.shields.io/crates/v/feral.svg)](https://crates.io/crates/feral)
 [![PyPI](https://img.shields.io/pypi/v/feral-solver.svg)](https://pypi.org/project/feral-solver/)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20162687-blue.svg)](https://doi.org/10.5281/zenodo.20162687)
