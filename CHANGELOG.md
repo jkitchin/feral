@@ -2,7 +2,7 @@
 
 All notable changes to FERAL will be documented in this file.
 
-## [Unreleased]
+## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)
 
