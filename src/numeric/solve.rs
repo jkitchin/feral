@@ -2103,14 +2103,6 @@ pub fn solve_sparse_refined_into(
     Ok(())
 }
 
-/// Iterative refinement using the tree-parallel contribution-block solve
-/// (issue #131 Gap A) for the initial and correction solves, pooling one
-/// `CbSolveWorkspace` across them. Falls back per-solve to the serial
-/// path when the factor's assembly tree is not `worthwhile` (path-like /
-/// small trees), so it never regresses those; on bushy trees it runs the
-/// substitutions across the rayon pool. The refined result is a valid
-/// solution equal to `solve_sparse_refined`'s up to floating-point
-/// reassociation. Used by `Solver::solve_refined` when parallelism is on.
 /// Iterative refinement through the contribution-block solve core (issue
 /// #131 Gap A) for the initial and correction solves, pooling one
 /// `CbSolveWorkspace` across them.
@@ -2225,6 +2217,35 @@ pub fn solve_sparse_refined_auto_into(
     Ok(())
 }
 
+/// Iterative refinement with tree-parallel execution requested, and the
+/// core chosen from the factor's structure — exactly
+/// [`solve_sparse_refined_auto`]`(.., parallel: true)`, which this
+/// forwards to.
+///
+/// # Relationship to the other entry points
+///
+/// This is the pre-#177 name. It predates the separation of *which core*
+/// (a numerical decision) from *how it executes* (a scheduling one), so
+/// its name says "parallel" while its behavior is "let the factor pick
+/// the core, and run it over the pool if that lands on the CB core".
+/// Prefer [`solve_sparse_refined_auto`] in new code, which says that
+/// outright, or [`solve_sparse_refined_cb`] when you want the
+/// contribution-block core regardless of what the factor's shape
+/// suggests.
+///
+/// # Why it is not the CB core unconditionally
+///
+/// Through v0.16.0 this function built a `CbSolveWorkspace` and used it
+/// only when `worthwhile()` held, falling back to the shared-vector core
+/// otherwise. Issue #177 removed that gate because it read
+/// `rayon::current_num_threads()` and `FERAL_CB_THRESH`, so the same
+/// factor solved with different arithmetic on different hosts.
+/// [`SolveCore::Auto`] is the host-independent replacement: it keeps the
+/// fallback (from the factor's shape alone) rather than dropping it.
+/// Routing this function to the CB core unconditionally instead would
+/// have cost 1.86x on the small path-like factors the gate exists to
+/// protect (poisson_40, refined solve: 659 µs → 1228 µs) — the
+/// alternative issue #177 measured and rejected.
 pub fn solve_sparse_refined_parallel(
     matrix: &CscMatrix,
     factors: &SparseFactors,
@@ -2248,7 +2269,7 @@ pub fn solve_sparse_refined_parallel_opts(
         rhs,
         &mut x,
         false,
-        SolveCore::ContribBlock { parallel: true },
+        SolveCore::Auto { parallel: true },
         opts,
     )?;
     Ok(x)
@@ -2268,7 +2289,7 @@ pub fn solve_sparse_refined_parallel_into(
         rhs,
         x_out,
         false,
-        SolveCore::ContribBlock { parallel: true },
+        SolveCore::Auto { parallel: true },
         opts,
     )?;
     Ok(())
