@@ -521,3 +521,26 @@ Residual t(33)/t(32) ~ 1.21 after the fix is exactly 40/33 — the cost of the
 aligned stride but iterate only the live columns with a masked final tile
 (gemm_tile already takes `live`). Recovers ~18% more at nrhs=33; needs a
 stride-vs-live parameter through five kernels, so it is a separate change.
+
+* 16:40 :bench:checkpoint:caveat:
+Session-end bench after a0b4d64. All four Phase 2.8.1 buckets PASS, but the
+factor p90s are the worst of the four runs recorded across 08-20-01 and this
+session: sparse small-frontal and medium both 1.65 (baseline 1.58, prior runs
+1.54/1.61), dense small-frontal 1.66 (1.59/1.64), dense medium 2.04 (2.00,
+prior 1.96/1.98). solve/MUMPS geomean and p50 held at 0.08 exactly.
+
+a0b4d64 cannot mechanically explain this: the bench times factorization and a
+*single-RHS* solve, and the change is confined to solve_sparse_core_many_into
+plus the panel GEMM reached only from fwd_blas3/back_blas3. solve_sparse_core_into
+and the whole factorization are byte-identical.
+
+Most likely machine state — the box had been under sustained compile and probe
+load for hours. But that is a hypothesis, NOT a result: no control run on
+stashed code was done. A similarly plausible attribution was already refuted
+once this session (the tail-loop hypothesis), so this one is recorded as
+unverified and the next session must re-run the bench cold before reading
+anything into it.
+
+* 16:50 :checkpoint:
+Checkpoint written to dev/sessions/2026-08-20-02.md, leading with the
+unfavorable bench comparison per CLAUDE.md. context.md refreshed (329 lines).

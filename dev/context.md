@@ -1,84 +1,84 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-20T13:59:26Z
+Generated: 2026-08-20T16:15:53Z
 
 ## Latest Session
-File: dev/sessions/2026-08-20-01.md
+File: dev/sessions/2026-08-20-02.md
 ```
-# Session 2026-08-20-01
+# Session 2026-08-20-02
 
 ## Unfavorable comparison, reported first (per CLAUDE.md)
 
-**A bench run in this session FAILED the Phase 2.8.1 sparse exit gate**:
-sparse small-frontal factor p90 **2.03 vs target ≤ 2.0**, against a
-baseline of 1.58 from session 2026-08-19-05. It was caused by a change
-made in this session and is now fixed; two confirming runs report 1.54
-and 1.61, both PASS. The full arc is in **Regression** below, including
-the hypothesis I published in the journal that the control run refuted.
+The session-end bench is at or slightly above the top of the previously
+observed band on the factor partitions:
 
-**Two conclusions I had posted publicly in the previous session were
-wrong and have been retracted**, both from the same methodological
-error. See **Corrections** below.
+| bucket | baseline 08-19-05 | 08-20-01 runs | this run |
+|---|---:|---:|---:|
+| sparse small-frontal p90 | 1.58 | 1.54 / 1.61 | **1.65** |
+| sparse medium p90 | 1.58 | 1.54 / 1.61 | **1.65** |
+| dense small-frontal p90 | 1.58 | 1.59 / 1.64 | **1.66** |
+| dense medium p90 | 2.00 | 1.96 / 1.98 | **2.04** |
+
+All four still PASS their targets, and `solve/MUMPS` geomean and p50 held at
+0.08 exactly. But this is the worst of the four runs recorded across the two
+sessions, and it is +4.4% on the sparse buckets against the 08-19-05 baseline.
+
+**This session's change cannot mechanically account for it.** The bench times
+factorization and a *single-RHS* solve; the change is confined to
+`solve_sparse_core_many_into` and the panel GEMM reached only from
+`fwd_blas3`/`back_blas3`, which the multi-RHS path alone calls. The
+single-RHS core (`solve_sparse_core_into`) and the whole factorization are
+untouched.
+
+The likely cause is machine state — the box had been under sustained compile
+and benchmark load for hours before this run. That is a hypothesis, not a
+result: I did not run a control on stashed code to test it, as was done on
+08-20-01 to refute a similar attribution. **Next session should re-run the
+bench cold before reading anything into these numbers.**
 
 ## Goal
 
-Continue the prioritized list from issue #189 / #131:
+Answer issue #189 item 4: is `BLAS3_NRHS_THRESHOLD = 32` costing pounce
+anything? Under the standing bar for this work — rigorous, thoroughly
+correct, and a real performance gain, or it does not ship.
 
-1. (pounce-side, filed at pounce#698 — no feral work)
-2. **#189 items 1–3, the large-n solve gate** ← this session
-3. #189 item 4, `BLAS3_NRHS_THRESHOLD` — blocked on (1)
-4. #131 — rescope, do not implement `solve_auto`
+## Accomplished
 
-Before starting (2), settle a contradiction: two probes from the previous
-session disagreed about whether the solve measurement was reproducible at
-all. They were separate probes on separate runs, so nothing could be
-concluded from the pair.
+### The threshold is fine. There was a defect underneath it.
 
-## Corrections — blocked measurement produced two wrong published claims
+`BLAS3_NRHS_THRESHOLD` is unchanged at 32. What the investigation found
+instead: the row-major multi-RHS work buffers used a leading dimension of
+exactly `nrhs`, so any `nrhs` that is not a multiple of 8 makes every row of
+every supernode panel straddle a cache line, compounding across the gather,
+the kernels and the scatter.
 
-The previous session's probes timed configuration A to completion, then
-configuration B. That lets machine drift between the two blocks appear as
-an effect of the configuration. Re-measuring with A and B **interleaved
-inside each repetition** removed it. On the strength of the blocked
-numbers I had posted:
-
-- **"The measurement is not reproducible"**, with a spread table showing
-  1.44×–2.20× movement on the same matrix. **Retracted.** The
-  irreproducibility was my method, not the solver.
-- **"`cb_core_profitable` looks mis-calibrated"**, specifically that it
-  approves `ContribBlock` on `r05_kkt` where the approved configuration
-  runs at 0.67×. **Retracted.** Interleaved, `r05_kkt` runs at **1.65×
-  faster** — a 2.4× error on the same machine with the same binary. The
-  gate is correct on **7 of 7** matrices.
-
-Retractions posted:
-- feral#131 — https://github.com/jkitchin/feral/issues/131#issuecomment-5356330763
-- feral#189 — https://github.com/jkitchin/feral/issues/189#issuecomment-5356336437
-
+Evidence, all within a single process so no cross-process drift can reach it.
+`t(31)/t(32)` — `nrhs = 31` is 3% *less* work, so a healthy kernel gives
+~0.97:
 ```
 
 ## Git Status
 ```
+a0b4d64 perf(solve): align the multi-RHS row stride to a cache line
+c34475e docs: session checkpoint 2026-08-20-01 (measurement corrections, #189 Step 1)
 c09da70 bench: time the solve core hosts actually run (#189 item 1)
 2ba437d probe: separate core, schedule, and depth in the solve measurement (#131, #189)
 0ac4fb1 probe: measure the solve-phase levers claimed in #131 and #189
-9b9e882 Merge pull request #188 from jkitchin/ci/codecov-coverage
-1292984 ci: measure coverage with cargo-llvm-cov and report it to Codecov
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
@@ -86,114 +86,88 @@ test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.71s
+test result: ok. 445 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.44s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-20-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-20-02.md)
 
-
-Three full corpus runs plus the 08-19-05 baseline:
-
-| bucket | baseline 08-19-05 | control (unmodified) | run 2 | run 3 |
-|---|---:|---:|---:|---:|
-| sparse small-frontal p90 (≤2.0) | 1.58 PASS | 1.58 PASS | 1.54 PASS | 1.61 PASS |
-| sparse medium p90 (≤3.0) | 1.58 PASS | 1.58 PASS | 1.54 PASS | 1.61 PASS |
-| dense small-frontal p90 (≤2.0) | 1.58 PASS | 1.58 PASS | 1.59 PASS | 1.64 PASS |
-| dense medium p90 (≤3.0) | 2.00 PASS | 2.00 PASS | 1.96 PASS | 1.98 PASS |
-
-The two post-change runs **bracket** the baseline (1.54, 1.61 vs 1.58).
-The honest reading is that the change is indistinguishable from baseline
-on the factor partition — which is correct, since it touches only the
-solve. **The 1.54 is not claimed as an improvement.** Run-to-run spread
-on this machine is ~±2.5%; that is now recorded in the plan as the floor
-below which a bench claim is noise.
-
-Run 3, full sparse aggregate:
-
-=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
 
 ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.44       0.30       1.61       3.27       9.71
-solve/MUMPS        153560       0.08       0.08       0.16       0.88       3.12
-factor/SSIDS       154500       0.04       0.03       0.32       0.96       2.26
-solve/SSIDS        154500       0.96       1.00       2.83      10.25      43.00
+factor/MUMPS       153560       0.46       0.33       1.65       4.13      71.94
+solve/MUMPS        153560       0.08       0.08       0.16       0.88      25.59
+factor/SSIDS       154500       0.04       0.03       0.34       1.11      23.34
+solve/SSIDS        154500       0.96       1.00       2.83      10.25     583.65
 nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
 nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.64     <= 2.0     PASS
-medium (<500)            152145     1.98     <= 3.0     PASS
+small-frontal (<200)     147982     1.66     <= 2.0     PASS
+medium (<500)            152145     2.04     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.61     <= 2.0     PASS
-medium (<500)            153560     1.61     <= 3.0     PASS
-
-Note on the `factor/MUMPS` **max** column: it reads 9.71 here, 68.79 on
-the FAIL run, and the worst-offender list changes identity between runs
-(CRESC100/MUONSINE ↔ ACOPR14/KIRBY2). That tail is resample-loop noise on
-sub-millisecond matrices. **The max is not a stable statistic in this
-harness and should not be quoted as a result.**
+small-frontal (<200)     153455     1.65     <= 2.0     PASS
+medium (<500)            153560     1.65     <= 3.0     PASS
 
 ```
 
 ## Recent Decisions
-The mechanism is that `resample_or_fallback` (`src/bin/bench.rs:1060`)
-runs factor **and** solve interleaved inside one closure,
-`RESAMPLE_COLD_REPS = 5` times, and reduces `factor_us` by **min** across
-those replicates. Whatever the solve does to cache and allocator state is
-the state the next replicate's factor is measured in. And
-`should_resample` (`:1042`) fires on `mumps_timing.factor_us < 200` — the
-same small matrices the `small-frontal (<200)` bucket gates.
+**Decision:** the panel path allocates and indexes at
+`padded_ldw(nrhs) = nrhs.div_ceil(NR) * NR`, i.e. a multiple of 64 bytes.
+The rank-1 path keeps the raw `nrhs` stride — it is row-major but not
+tiled, and it carries the bit-identity band contract that
+`tests/multi_rhs.rs:227,256` assert and pounce's `schur.rs:303` consumes.
 
-The change had allocated its solve buffer inside the closure: an n-double
-alloc-and-zero per replicate at n < 1000. Hoisting it to one allocation
-per matrix, reused across replicates, restored the partition to 1.54 PASS
-(dense 1.59 / 1.96 PASS) and dropped the worst sparse factor ratio from
-68.79 to 9.29.
+The padding is paid for in flops: the kernels solve `padded_ldw(nrhs)`
+columns, of which up to 7 are zero padding. That is 21% extra arithmetic at
+`nrhs = 33`, 7% at 100, under 1% at 1000 — and it is still a net 1.36×
+geomean win in the shipped regime (`nrhs >= 32`, not a multiple of 8),
+because the alignment is worth more than the wasted lanes. After the fix
+`t(33)/t(32) ≈ 1.21`, which is exactly `40/33`: the residual is entirely
+the padding columns, with no misalignment left.
 
-**The coupling itself is left in place, deliberately.** It is
-pre-existing: any solve-side change can perturb the small-matrix factor
-reading through it. Fixing it means giving factor and solve separate
-timing passes, which changes every small-matrix number in the corpus and
-needs its own commit with its own before/after — not a drive-by inside a
-different change. Recorded as a Step 1 item in
-`dev/plans/large-n-solve-gate.md`.
+**Alternative not taken:** pad the *allocation* for alignment but iterate
+only the `nrhs` live columns, masking the final tile. `gemm_tile` already
+takes a `live` argument, so the kernel side is ready. It recovers roughly
+the remaining 18% at `nrhs = 33`. It is not part of this decision because
+it requires distinguishing stride from live width through five kernels, and
+that belongs in its own commit with its own before/after.
 
-*Spread, added after a third confirming run:* the sparse small-frontal
-p90 reads 1.54 and 1.61 on the two post-fix runs against a 1.58 baseline
-— the change is indistinguishable from baseline on the factor partition,
-which is the correct outcome for a solve-only change. The 1.54 above is a
-single draw, not an improvement. Run-to-run spread on this machine is
-~±2.5%; the `factor/MUMPS` **max** column is not stable at all (9.71 here,
-68.79 on the failing run, with the offender list changing identity) and
-should not be quoted as a result.
+**Bit-neutral**, verified three independent ways: an 800-shape `to_bits()`
+test against a scalar left-fold reference (`gemm_tail_tests`); the probe's
+`max |rank1 - blas3|` column unchanged at all 105 measured (matrix, `nrhs`)
+points; and all 13 `tests/multi_rhs.rs` green including both
+`assert_eq!(max_diff, 0.0)` band contracts. No tolerance was touched.
+
+`BLAS3_NRHS_THRESHOLD` stays at 32 — the crossover constant was the
+suspect, but the defect was underneath it, and the threshold is load-bearing
+for the bit-identity contract.
 
 ## Recent Tried-and-Rejected
-total factor time** on a matrix whose paying bucket is 91% of that time. Moving
-three quarters of the panel share into BLAS-3 buys 1.3%: the two kernels cost
-nearly the same per flop at this front shape, so the 53.5% panel share is not
-recoverable time.
+**Why.** A full sweep is ~25 minutes, so two "adjacent" runs are 25 minutes
+apart. That is blocked measurement with an interleaved label on it — the same
+error behind the two claim retractions earlier the same day, one level up the
+stack. Cross-process A/B of a few-millisecond kernel does not work on this
+machine at this cadence.
 
-It also does not generalize. `bs = 48` and `bs = 64` are identical for any front
-with `ncol ≤ 48`, and that is every other matrix sampled — `ncol` p90 is 1-19
-across clnlbeam, dtoc2, marine_1600, rocket, steering, gasoil_3200, pinene_3200,
-robot_1600, svanberg, nql180, qcqp1500-1c, cont5_2_4_l; only dtoc1nd is at 63. On
-the two with any wide fronts at all the paired sweep finds nothing: nql180 0.990
-(5/12 wins, tied with the default), qcqp1500-1c 0.994 (3/12). A 1.3% win on one
-corpus matrix and a no-op elsewhere is below the bar for changing a global default.
+The remaining runs were killed (`pkill -f probe_blas3_crossover`, 0 left) and
+no number from the paired dataset was reported as a result.
 
-**Kept from this attempt:** `block_size` is bit-neutral on all three matrices
-swept — identical inertia, zero delayed pivots, identical residual, and an
-identical hash over every `L`/`D` bit in storage order across
-`bs ∈ {8,16,24,32,48,62,64}` (`dtoc1nd_0010` 9cb93f568423e6c0, `nql180_0000`
-4f588093d6bac8c7, `qcqp1500-1c_0000` cfec17df1a4f8d38). So future retuning of it
-is a performance-only change. Not yet established on a matrix that actually
-delays a pivot — all three report `d0`.
+**Replaced by** an in-process design: the `kernel-probe` feature (off by
+default, compiled out entirely) exposes
+`set_blas3_nrhs_threshold`, so one process can time rank-1 and BLAS-3 at the
+*same* `nrhs`, alternating within each repetition — microseconds apart instead
+of 25 minutes. See `dev/research/blas3-threshold-refit.md`.
+
+**Kept from this attempt:** the single-build, single-process runs are valid,
+because looped-vs-batched was measured within one process. Two findings survive
+and are recorded in the research note: the 31→32 dispatch discontinuity (3% more
+work, batched time *drops* 1.36–1.77×), and that at `nrhs ∈ {2, 4}` batching is
+**21–27% slower** than looping single-RHS solves.
 
 ## Source Files
 ```
@@ -348,5 +322,8 @@ tests/sparse_refined.rs
 tests/sqd_fast_path.rs
 tests/static_assembly_maps.rs
 tests/stress_tests.rs
-
-(truncated from      355 lines to 350 line budget)
+tests/symbolic_profiler.rs
+tests/task_plan_parity.rs
+tests/threshold_consistency.rs
+tests/tiny_fast_path.rs
+```

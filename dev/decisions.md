@@ -7177,3 +7177,44 @@ single draw, not an improvement. Run-to-run spread on this machine is
 ~±2.5%; the `factor/MUMPS` **max** column is not stable at all (9.71 here,
 68.79 on the failing run, with the offender list changing identity) and
 should not be quoted as a result.
+
+## 2026-08-20 — The multi-RHS panel path pads its row stride to a cache line
+
+The row-major multi-RHS work buffers (`y`, `w`, `acc` in
+`SolveManyWorkspace`) used a leading dimension of exactly `nrhs`. On the
+BLAS-3 panel path that makes every row of every supernode panel straddle a
+cache line whenever `nrhs % 8 != 0`, and the cost compounds across the
+gather, both kernels, and the scatter. Measured within a single process, so
+immune to cross-process drift: `t(31)/t(32)` read 1.41–1.80 across seven
+large KKTs when it should read ~0.97 (`nrhs = 31` is 3% *less* work).
+
+**Decision:** the panel path allocates and indexes at
+`padded_ldw(nrhs) = nrhs.div_ceil(NR) * NR`, i.e. a multiple of 64 bytes.
+The rank-1 path keeps the raw `nrhs` stride — it is row-major but not
+tiled, and it carries the bit-identity band contract that
+`tests/multi_rhs.rs:227,256` assert and pounce's `schur.rs:303` consumes.
+
+The padding is paid for in flops: the kernels solve `padded_ldw(nrhs)`
+columns, of which up to 7 are zero padding. That is 21% extra arithmetic at
+`nrhs = 33`, 7% at 100, under 1% at 1000 — and it is still a net 1.36×
+geomean win in the shipped regime (`nrhs >= 32`, not a multiple of 8),
+because the alignment is worth more than the wasted lanes. After the fix
+`t(33)/t(32) ≈ 1.21`, which is exactly `40/33`: the residual is entirely
+the padding columns, with no misalignment left.
+
+**Alternative not taken:** pad the *allocation* for alignment but iterate
+only the `nrhs` live columns, masking the final tile. `gemm_tile` already
+takes a `live` argument, so the kernel side is ready. It recovers roughly
+the remaining 18% at `nrhs = 33`. It is not part of this decision because
+it requires distinguishing stride from live width through five kernels, and
+that belongs in its own commit with its own before/after.
+
+**Bit-neutral**, verified three independent ways: an 800-shape `to_bits()`
+test against a scalar left-fold reference (`gemm_tail_tests`); the probe's
+`max |rank1 - blas3|` column unchanged at all 105 measured (matrix, `nrhs`)
+points; and all 13 `tests/multi_rhs.rs` green including both
+`assert_eq!(max_diff, 0.0)` band contracts. No tolerance was touched.
+
+`BLAS3_NRHS_THRESHOLD` stays at 32 — the crossover constant was the
+suspect, but the defect was underneath it, and the threshold is load-bearing
+for the bit-identity contract.
