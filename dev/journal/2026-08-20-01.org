@@ -1,0 +1,127 @@
+#+TITLE: FERAL session journal 2026-08-20-01
+#+STARTUP: overview
+
+* 08:05 :coverage:codecov:ci:
+Codecov wired up and merged (PR #188, 9b9e882). Live upload confirmed:
+90.41% (30,989/34,275 lines, 80 files). Two findings worth keeping.
+
+The coverage job runs =--workspace --exclude feral-diagnostics=, which
+runs MORE tests than ci.yml: bare =cargo test= at the workspace root
+resolves to the =feral= package alone, so the six ordering crates
+(feral-ordering-core 69, feral-metis 59, feral-kahip 63, feral-scotch 45,
+feral-amd 12, feral-amf 10 = 258 tests) had never run in CI. All passed.
+
+=dirichlet120_parallel_factor_does_not_deadlock= is =--skip=ped in the
+coverage job only: under llvm-cov instrumentation it takes 123.25s
+against its hard 120s budget (=test result: FAILED. 0 passed; 1 failed;
+finished in 123.25s=), while passing under both =cargo test= and
+=cargo test --release=. Instrumentation overhead, not an issue-#102
+regression. The test is NOT weakened -- ci.yml's =check= job still
+asserts 120s on every push. Audited: it is the only test in the tree
+with a wall-clock assertion.
+
+* 08:20 :perf:solve:probe:issue131:issue189:
+Wrote =crates/feral-diagnostics/src/bin/probe_largen_solve_levers.rs= to
+measure -- rather than assert from source reading -- the two solve-phase
+levers I had just filed on #131 and #189.
+
+Motivation: my #131 comment argued from source that the CB parallel core
+was unreachable performance. That is a claim about numbers, and I had
+taken no numbers.
+
+Probe design: factor once, then produce the same NRHS=13 solutions four
+ways (A serial =solve_sparse= x13, B =solve_sparse_cb(false)= x13,
+C =solve_sparse_cb(true)= x13, D =solve_sparse_many(13)= x1), best-of-5
+wall clock, each path reported with its own relative residual since the
+CB and shared-vector cores are different reassociations (#177). Then a
+sweep of nrhs through =BLAS3_NRHS_THRESHOLD= comparing looped-single
+against =solve_sparse_many= per-RHS.
+
+Added two things after the first results came in:
+- A bit-level detector for =SolveCore::Auto='s choice. =cb_core_profitable=
+  is private, but the two cores differ numerically, so running
+  =solve_sparse_refined_auto_into= with =max_steps=0= and bit-comparing
+  against each explicit core identifies the pick exactly.
+- E: end-to-end =Solver::solve_refined= with =with_parallel(true/false)=.
+  =tests/parallel_parity.rs:4-8= contracts the parallel factor to be
+  bit-equal to the sequential one, so both sides hold the same factor and
+  =Auto= makes the same choice -- this is a pure schedule comparison of
+  the shipped path.
+
+* 08:35 :perf:solve:issue131:refuted:
+Ran three passes. First pass (4 matrices) and the n=180,900 pass each had
+the machine to themselves; a third overlapped another probe and is noted
+as contended. Final clean sequential pass over 8 matrices.
+
+Clean pass, 14 rayon threads, best-of-5. E = refined e2e parallel/serial,
+C = CB-parallel vs 13x serial, D = solve_many(13) vs 13x serial:
+
+| matrix           |       n | Auto picks   |    E |    C |    D |
+|------------------+---------+--------------+------+------+------|
+| bcsstk38         |    8032 | SharedVector | 0.98 | 1.07 | 1.88 |
+| r05_kkt          |   14842 | ContribBlock | 0.74 | 0.67 | 2.35 |
+| bratu3d          |   27792 | ContribBlock | 1.16 | 0.56 | 2.10 |
+| qap15_kkt        |   50880 | ContribBlock | 1.18 | 1.01 | 2.43 |
+| dirichlet120_kkt |   54363 | ContribBlock | 1.04 | 0.81 | 2.51 |
+| cont-201         |   80595 | ContribBlock | 0.41 | 1.69 | 2.99 |
+| cont5_late_kkt   |  180900 | ContribBlock | 1.39 | 1.82 | 2.65 |
+| c-big            |  345241 | ContribBlock | 0.90 | 1.03 | 1.70 |
+| geomean          |         |              | 0.92 | 1.00 | 2.29 |
+
+Conclusion 1: the #131 parallel-solve lever does not exist as filed.
+Geomean 1.00 for the core, 0.92 for the shipped path that actually uses
+it. I twice reached a wrong intermediate conclusion before this --
+first "refuted, negative everywhere" from a 4-matrix pass, then
+"n-dependent with a crossover near 1e5" after cont5_late_kkt returned
+1.97. Both died on more data: bratu3d (n=27,792) gave 1.23 in one run and
+0.56 in another, and c-big (n=345,241) only 1.03-1.12. It is not size and
+it is not shape.
+
+Conclusion 2 (the actual finding): the measurement is not reproducible.
+Same matrix, across runs -- bratu3d 0.56<->1.23 (2.20x), cont-201
+0.85<->1.69 (1.99x), dirichlet120 0.81<->1.39 (1.72x). Best-of-5 did not
+tame it. Only cont5_late_kkt reproduces (1.82/1.97/1.98) and only r05_kkt
+reproducibly loses (0.46/0.63/0.67). We currently cannot distinguish a 2x
+solve regression from scheduler noise, which promotes #189 above #131.
+
+Conclusion 3: =cb_core_profitable= approves ContribBlock on 7 of 8
+matrices, including r05_kkt where the approved configuration runs at
+0.67. =solve_sparse_cb(.., true)= does honor =plan.worthwhile=
+(=src/numeric/solve.rs:1275=), so these were gate-approved losses. The
+gate's own doc comment (=solve.rs:1007=) records that it was calibrated
+on 4 workers; this box has 14.
+
+* 08:40 :perf:solve:blas3:confirmed:
+Isolated the BLAS3 kernel effect from the nrhs effect by patching
+=BLAS3_NRHS_THRESHOLD= 32 -> 2 (=src/numeric/solve.rs:17=), rebuilding,
+re-running, then reverting. Per-RHS microseconds on the =many= path,
+thr=32 -> thr=2:
+
+| nrhs | cont-201 | dirichlet120 | qap15 |  r05 |
+|------+----------+--------------+-------+------|
+|    8 |     1.70 |         2.10 |  1.57 | 1.96 |
+|   16 |     1.25 |         2.28 |  1.28 | 1.31 |
+|   24 |     1.24 |         1.26 |  1.27 | 1.30 |
+|   32 |     1.01 |         0.94 |  1.09 | 1.01 |
+
+The nrhs=32 row is an internal control -- both configurations take the
+BLAS-3 path there, and they agree to within noise. So the 1.2-2.3x in the
+8..31 band is the kernel, not the batching.
+
+Two caveats. Run-to-run spread on these is 20-30%. And nrhs=13 is
+consistently worse per-RHS than nrhs=16 in every single case, which looks
+like a ragged register-block remainder at odd panel widths and is worth
+its own look.
+
+Sequencing point that is easy to miss: this lever is unreachable until a
+host batches. =BLAS3_NRHS_THRESHOLD= only exists on the multi-RHS path,
+so while pounce loops single-RHS
+(=low_rank_aug_system_solver.rs:497=), nrhs=1 and the constant never
+comes into play. #189 item 4 buys nothing until pounce#698's batching
+lands.
+
+* 08:45 :perf:solve:batching:confirmed:
+=solve_sparse_many(13)= against 13 looped single solves: geomean 2.29x,
+median 2.39x, never below 1.70x, and stable across runs. This is the only
+robust lever measured today, and the work is pounce-side (already
+reported at pounce#698). feral already has the API.
