@@ -123,12 +123,13 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        let sizes = std::env::var("SIZES").unwrap_or_else(|_| "1200,1600,2000".to_string());
-        for tok in sizes.split(',') {
-            if let Ok(n) = tok.trim().parse::<usize>() {
-                let a = dense_spd(n);
-                bench_one(&format!("dense_spd_{n}"), &a);
-            }
+        // Issue #176: a locally-parsed list drops the tokens it cannot
+        // read, so `SIZES=1200,1.6e3` would quietly bench one size and
+        // look like a two-point sweep.
+        let sizes = feral::env::usize_list_var("SIZES").unwrap_or_else(|| vec![1200, 1600, 2000]);
+        for n in sizes {
+            let a = dense_spd(n);
+            bench_one(&format!("dense_spd_{n}"), &a);
         }
     } else {
         for path in &args {

@@ -97,18 +97,14 @@ fn main() {
     let stop_arg: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(18);
     let only: Option<usize> = feral::env::usize_var("ONLY");
 
-    let pivots_env =
-        std::env::var("STATIC_PIVOTS").unwrap_or_else(|_| "0,1e-12,1e-10,1e-8,1e-6".to_string());
-    let thresholds: Vec<Option<f64>> = pivots_env
-        .split(',')
-        .map(|s| {
-            let v: f64 = s.trim().parse().unwrap_or(0.0);
-            if v <= 0.0 {
-                None
-            } else {
-                Some(v)
-            }
-        })
+    // Issue #176: a token this could not parse used to become `0.0`,
+    // i.e. silently a *different experiment arm* (`None` = static
+    // pivoting off) rather than an error. `f64_list_var` warns and drops
+    // it instead, so the arm count in the output matches what ran.
+    let thresholds: Vec<Option<f64>> = feral::env::f64_list_var("STATIC_PIVOTS")
+        .unwrap_or_else(|| vec![0.0, 1e-12, 1e-10, 1e-8, 1e-6])
+        .into_iter()
+        .map(|v| if v <= 0.0 { None } else { Some(v) })
         .collect();
 
     let iter_range: Vec<usize> = if let Some(o) = only {
