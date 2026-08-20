@@ -125,3 +125,105 @@ lands.
 median 2.39x, never below 1.70x, and stable across runs. This is the only
 robust lever measured today, and the work is pounce-side (already
 reported at pounce#698). feral already has the API.
+
+* 09:10 :perf:solve:measurement:artifact:
+Two probes disagreed about feral#131's parallel solve core and I nearly
+posted the second as a correction to the first. They were not measuring
+the same comparison.
+
+- =probe_largen_solve_levers= path E: =Solver::with_parallel(true)= vs
+  =Solver::with_parallel(false)=, =RefineOptions::with_max_steps(1)=,
+  best-of-5. Both sides run =SolveCore::Auto=, so this is a pure
+  *schedule* comparison. Reported geomean 0.92 (parallel slower).
+- =probe_bench_solve_noise=: =Solver::with_parallel(true)= vs the free
+  =solve_sparse_refined=, =RefineOptions::default()=, median-of-15.
+  Reported geomean 1.21 (parallel faster), incl. cont5_late_kkt 1.80x.
+
+The free function hardcodes =SolveCore::SharedVector=
+(=src/numeric/solve.rs:2077=) while =Solver= runs =Auto=, which picks
+=ContribBlock= on six of these seven matrices. So the second ratio folds
+the *core* change in with the schedule change -- and at a different
+refinement depth: =DEFAULT_REFINE_MAX_STEPS = 10= (=solve.rs:1954=), not 1.
+
+Confirmed =Solver::refine_into= (=src/numeric/solver.rs:1690-1722=) passes
+=SolveCore::Auto= on both branches, differing only in whether the pool is
+installed. So par/ser through =Solver= *is* schedule-only and bit-neutral
+per #177; the mistake was using =solve_sparse_refined= as the serial arm.
+
+Wrote =probe_solve_reconcile= to measure all three configurations
+interleaved within each repetition, at both depths, and attribute
+core / schedule / depth separately. Interleaving rather than blocking so
+machine drift hits all three equally -- the earlier cross-run spreads (up
+to 2.20x on the same matrix) are exactly what blocked measurement buys
+you.
+
+Implication: no correction goes on #131 or #189 until this lands. The
+0.92 figure I already posted to #131 is a schedule-only number at depth
+1; whether it is the number a host cares about depends on which depth and
+which core the host actually runs.
+
+* 09:35 :perf:solve:reconciled:issue131:issue189:
+=probe_solve_reconcile=, 11 reps, three configs interleaved per repetition,
+both refinement depths, one process:
+
+|                  |     n | core sv/au | sched au/ap | shipped sv/ap | corr |
+|------------------+-------+------------+-------------+---------------+------|
+| bcsstk38         |  8032 |       1.02 |        0.90 |          0.91 |    0 |
+| r05_kkt          | 14842 |       1.65 |        1.15 |          1.90 |    1 |
+| bratu3d          | 27792 |       1.31 |        0.99 |          1.29 |    0 |
+| qap15_kkt        | 50880 |       1.37 |        1.05 |          1.45 |    2 |
+| dirichlet120_kkt | 54363 |       1.12 |        1.00 |          1.12 |    0 |
+| cont-201         | 80595 |       1.45 |        0.98 |          1.42 |    0 |
+| cont5_late_kkt   | 180900|       1.88 |        1.01 |          1.90 |    1 |
+| geomean steps=1  |       |       1.37 |        1.01 |          1.38 |      |
+| geomean default  |       |       1.30 |        0.98 |          1.27 |      |
+
+Three conclusions, two of which overturn what I posted an hour ago.
+
+1. *The parallel solve schedule buys nothing -- confirmed, and cleanly.*
+   geomean 1.01 (steps=1) / 0.98 (default), per-matrix 0.85..1.15. The
+   #131 conclusion survives. What does not survive is the 0.92 figure and
+   the spread table behind it.
+
+2. *"The measurement is not reproducible" was false -- my method was.*
+   The 1.44x..2.20x same-matrix spreads I posted to both issues came from
+   comparing configurations measured in separate blocks and separate runs.
+   Interleaved within a repetition, the same comparisons are stable to
+   ~1.0-1.15x. Blocked measurement produced a 2.4x error on r05_kkt: I
+   reported CB-parallel at 0.67 vs shared-vector; interleaved it is 1.65x
+   *faster*. Nothing about the machine changed.
+
+3. *New, and the real finding: =SolveCore::Auto= is worth 1.30-1.37x
+   geomean and the bench cannot see any of it.* =solve_sparse_refined=
+   hardcodes =SolveCore::SharedVector= (=solve.rs:2077=); =Solver= runs
+   =Auto=. So the solve column feral publishes is a configuration no host
+   runs, and it under-reports the shipped path by geomean 1.27-1.38x, up
+   to 1.90x on cont5_late_kkt. That is #189 item 1, and it is a much
+   bigger deal than "the harness cannot observe the CB core."
+
+Corollary that also overturns a posted claim: =cb_core_profitable= is
+*well calibrated*, not mis-calibrated. It picks ContribBlock on exactly
+the six matrices where core > 1 (1.12..1.88) and SharedVector on
+bcsstk38, the one where the core is a wash (1.02). 7/7. My "approves the
+losing case r05_kkt at 0.67" was the blocked-measurement artifact above.
+Withdraw the "re-fit the gate against worker count" rescope item.
+
+Refinement depth is a non-issue: corrections actually run at default
+depth are 0 or 1 on six of seven matrices (qap15_kkt runs 2), so
+=max_steps=1= and =max_steps=10= are nearly the same call. The depth
+hypothesis for the two probes' disagreement is dead; the core confound
+explains all of it.
+
+* 09:45 :perf:solve:batching:reverified:
+Re-measured the batching lever interleaved (=probe_batch_interleaved=,
+11 reps, nrhs=13, =solve_into= x13 vs =solve_many_into=), because after
+the above every blocked number is suspect:
+
+  bcsstk38 2.20  r05_kkt 2.80  bratu3d 2.44  qap15_kkt 2.31
+  dirichlet120_kkt 2.37  cont-201 2.62  cont5_late_kkt 2.58
+  geomean 2.47x  min 2.20x
+
+Blocked measurement had said geomean 2.29x, min 1.70x. Batching survives
+and is slightly better than reported. This is the one lever whose blocked
+and interleaved numbers agree -- consistent with it having been stable
+across runs all along, unlike the schedule ratio.
