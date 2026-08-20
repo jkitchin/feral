@@ -2,6 +2,28 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Changed - the benchmark harness now times the solve core a host actually gets (issue #189)
+
+- **What changed.** `cargo run --bin bench` measured its sparse solve column
+  with `solve_sparse_refined`, which pins `SolveCore::SharedVector`. Every
+  host reaching FERAL through `Solver` gets `SolveCore::Auto`, which picks
+  between the shared-vector and contribution-block cores per factor. The
+  harness now calls `solve_sparse_refined_auto_into`, so the published number
+  describes the code path hosts run.
+- **Why it matters if you read the numbers.** On seven large KKT matrices,
+  `Auto` is 1.30x faster than `SharedVector` (geomean, n = 8k-181k), and the
+  old harness could not see any of it. On the ~154k-matrix regression corpus
+  the aggregate `solve/MUMPS` geomean and p50 are unchanged at 0.08, because
+  that corpus is almost entirely small matrices where `Auto` selects
+  `SharedVector` anyway.
+- **The harness stays serial** (`parallel = false`), so the solve column
+  remains a single-threaded measurement comparable with previous releases;
+  the schedule choice is bit-neutral and measures 0.98-1.01x, so nothing is
+  lost by holding it fixed.
+- **No library behaviour changes.** This is the benchmark binary only.
+
 ## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)

@@ -1,7 +1,9 @@
 # Plan — a solve-phase performance gate that measures the path hosts use
 
 Issue: #189 (items 1–3). Blocks: #131.
-Status: planning. Step 1 scoped from measurement; no bench code written yet.
+Status: Step 1 partially landed — the bench now times the `Auto` core
+(`src/bin/bench.rs`). Remaining Step 1 work: decouple factor from solve
+inside the resample loop, and report spread.
 
 ## Why this is first
 
@@ -121,9 +123,26 @@ every host gets.
   Replicate based on "this row feeds a gate" instead.
 - Report **spread** alongside the statistic. Interleaved medians on the
   large matrices hold to ~1.05×, so this is a cheap assertion to make and
-  a cheap one to check, not a hedge.
+  a cheap one to check, not a hedge. Measured on this machine over three
+  full corpus runs (two post-change, one control): the sparse
+  small-frontal factor p90 moves 1.54 / 1.58 / 1.61, about ±2.5%; the
+  aggregate `solve/MUMPS` p90 moves 0.15 / 0.16 / 0.17. Any claimed bench
+  improvement smaller than that is noise.
+- **Decouple factor from solve inside the resample loop.** Landing the
+  `Auto` switch turned up a pre-existing defect: `resample_or_fallback`
+  (`:1060`) runs factor *and* solve interleaved in one closure five times
+  and reduces `factor_us` by **min**, so the solve's cache and allocator
+  footprint is the state the next replicate's factor is timed in. A
+  solve-side change moved the sparse small-frontal factor p90 from 1.58
+  to 2.03 (FAIL) on exactly the matrices `should_resample` selects — the
+  predicate and the bucket both key on the same small matrices. The
+  immediate trigger was an allocation inside the timed region and is
+  fixed; the coupling is not. Give the two phases separate timing passes.
+  This changes every small-matrix number in the corpus, so it needs its
+  own commit and its own before/after.
 - Exit criterion: a repeated bench run over `tests/data/large/` reports a
-  solve-ratio spread we can state, and the solve column reflects `Auto`.
+  solve-ratio spread we can state, the solve column reflects `Auto`, and
+  a solve-side no-op change provably does not move `factor_us`.
 
 ### Step 2 — measure the paths hosts actually take
 

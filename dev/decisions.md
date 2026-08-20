@@ -7096,3 +7096,84 @@ uncovered while being covered locally. The coverage job prints the skip
 list to the run summary — the same step ci.yml has — so a low number in
 those modules can be checked against it before being treated as a real
 gap.
+
+## 2026-08-20 — The bench times the `Auto` core, serially (issue #189 item 1)
+
+`src/bin/bench.rs` timed the sparse KKT solve through the free
+`solve_sparse_refined`, which hardcodes `SolveCore::SharedVector`
+(`src/numeric/solve.rs:2077`). Every `Solver` entry point dispatches
+through `SolveCore::Auto` (`src/numeric/solver.rs:1690-1722`), and `Auto`
+selects `ContribBlock` on most of the KKT corpus above n ≈ 10⁴. The
+published solve column therefore described a configuration no host runs.
+
+Measured with `crates/feral-diagnostics/src/bin/probe_solve_reconcile.rs`
+(11 reps, three configurations interleaved within each repetition,
+medians, one process), over seven matrices spanning n = 8,032 … 180,900:
+
+| ratio | `steps=1` | default depth |
+|---|---:|---:|
+| core, `SharedVector → Auto`, serial | **1.37×** | **1.30×** |
+| schedule, `Auto` serial → parallel | 1.01× | 0.98× |
+| bench → shipped | 1.38× | 1.27× |
+
+Up to 1.90× on `r05_kkt` and `cont5_late_kkt`.
+
+**Decision: time `solve_sparse_refined_auto_into(.., parallel = false, ..)`.**
+
+Two parts, both deliberate.
+
+*`Auto` rather than `SharedVector`* — the benchmark should measure the
+arithmetic hosts get. A gate built on the shared-vector core cannot see a
+regression in the `ContribBlock` traversal, which is the traversal the
+corpus's large matrices actually take.
+
+*Serial rather than pooled* — per #177 the pool changes only the
+schedule, never the arithmetic, and the same probe measures that schedule
+at geomean 1.01/0.98, i.e. nothing. Installing a pool would import
+thread-count variance into a CI-visible number in exchange for no
+measurable signal. `parallel = false` measures the host's core without
+the host's scheduler.
+
+The aggregate barely moves — `solve/MUMPS` geomean and p50 both stay at
+0.08 — because the corpus is ~154k matrices dominated by small ones where
+`Auto` picks `SharedVector` anyway. That is the expected outcome and was
+recorded in the journal before the run landed. The change makes the
+column describe the right core; it is not a speedup.
+
+### The regression this exposed, and why it is a harness defect
+
+The first run of the change failed the sparse small-frontal exit
+partition — p90 2.03 against a ≤ 2.0 target, from 1.58. A control run on
+stashed, unmodified code in the same session reproduced 1.58 PASS, so the
+cause was the change, not machine state.
+
+The mechanism is that `resample_or_fallback` (`src/bin/bench.rs:1060`)
+runs factor **and** solve interleaved inside one closure,
+`RESAMPLE_COLD_REPS = 5` times, and reduces `factor_us` by **min** across
+those replicates. Whatever the solve does to cache and allocator state is
+the state the next replicate's factor is measured in. And
+`should_resample` (`:1042`) fires on `mumps_timing.factor_us < 200` — the
+same small matrices the `small-frontal (<200)` bucket gates.
+
+The change had allocated its solve buffer inside the closure: an n-double
+alloc-and-zero per replicate at n < 1000. Hoisting it to one allocation
+per matrix, reused across replicates, restored the partition to 1.54 PASS
+(dense 1.59 / 1.96 PASS) and dropped the worst sparse factor ratio from
+68.79 to 9.29.
+
+**The coupling itself is left in place, deliberately.** It is
+pre-existing: any solve-side change can perturb the small-matrix factor
+reading through it. Fixing it means giving factor and solve separate
+timing passes, which changes every small-matrix number in the corpus and
+needs its own commit with its own before/after — not a drive-by inside a
+different change. Recorded as a Step 1 item in
+`dev/plans/large-n-solve-gate.md`.
+
+*Spread, added after a third confirming run:* the sparse small-frontal
+p90 reads 1.54 and 1.61 on the two post-fix runs against a 1.58 baseline
+— the change is indistinguishable from baseline on the factor partition,
+which is the correct outcome for a solve-only change. The 1.54 above is a
+single draw, not an improvement. Run-to-run spread on this machine is
+~±2.5%; the `factor/MUMPS` **max** column is not stable at all (9.71 here,
+68.79 on the failing run, with the offender list changing identity) and
+should not be quoted as a result.

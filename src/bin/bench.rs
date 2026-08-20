@@ -18,8 +18,8 @@ use feral::symbolic::{
 };
 use feral::{
     factor, factor_single_front, read_mtx, read_sidecar, solve, solve_refined,
-    solve_sparse_refined, BunchKaufmanParams, FeralError, Inertia, KktSidecar, SymmetricMatrix,
-    ZeroPivotAction,
+    solve_sparse_refined_auto_into, BunchKaufmanParams, FeralError, Inertia, KktSidecar,
+    RefineOptions, SymmetricMatrix, ZeroPivotAction,
 };
 
 /// A KKT matrix that failed inertia or residual on a given solver path.
@@ -1959,21 +1959,50 @@ fn main() {
             Some(r) => r,
             None => continue,
         };
+        // Issue #189 item 1: time the core hosts actually run. The free
+        // `solve_sparse_refined` hardcodes `SolveCore::SharedVector`
+        // (`src/numeric/solve.rs:2077`), while every `Solver` entry point
+        // dispatches through `SolveCore::Auto` — which picks `ContribBlock`
+        // on most of the KKT corpus. Timing the shared-vector core therefore
+        // measured a configuration no host runs, and under-reported the
+        // shipped solve by geomean 1.27-1.38x over n = 8e3..1.8e5, up to
+        // 1.90x on `r05_kkt` and `cont5_late_kkt`
+        // (`crates/feral-diagnostics/src/bin/probe_solve_reconcile.rs`).
+        //
+        // `parallel = false` on purpose. Per #177 the pool changes only the
+        // schedule, never the arithmetic, and the same probe measures that
+        // schedule at geomean 1.01 / 0.98 — i.e. nothing. Running serially
+        // keeps this reading free of thread-count variance while still
+        // measuring the host's core.
+        let mut x = vec![0.0; n];
         let ts = Instant::now();
-        let x = match solve_sparse_refined(&csc, &sp_factors, &rhs) {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("  {}: sparse solve failed: {}", entry.name, e);
-                sp_solve_fail += 1;
-                continue;
-            }
-        };
+        if let Err(e) = solve_sparse_refined_auto_into(
+            &csc,
+            &sp_factors,
+            &rhs,
+            &mut x,
+            false,
+            RefineOptions::default(),
+        ) {
+            eprintln!("  {}: sparse solve failed: {}", entry.name, e);
+            sp_solve_fail += 1;
+            continue;
+        }
         let sp_solve_us = ts.elapsed().as_micros();
 
         // Multi-sample denoise for fast matrices — see dev/plans/bench-denoise.md.
         // Symbolic + numeric factor are re-run inside the same timed block as the
         // single-shot pass so the semantics of `factor_us` (sym + numeric) match
         // MUMPS/SSIDS.
+        //
+        // The solve buffer is allocated once and reused across replicates.
+        // Allocating inside the closure puts an n-double alloc-and-zero in
+        // the timed solve region *and* perturbs the allocator state that the
+        // next replicate's factor is measured in — and since `factor_us`
+        // reduces by min over 5 interleaved factor+solve reps, that leaks
+        // into the factor reading on exactly the matrices `should_resample`
+        // selects (MUMPS factor < 200 us, i.e. the small-frontal bucket).
+        let mut rs_x = vec![0.0; n];
         let (sp_factor_us_final, sp_solve_us_final) = if should_resample(entry) {
             resample_or_fallback((sp_factor_us, sp_solve_us), || {
                 let tf = Instant::now();
@@ -1985,7 +2014,14 @@ fn main() {
                     factorize_multifrontal(&csc, &rs_sym, &sparse_numeric_params)?;
                 let f = tf.elapsed().as_micros();
                 let ts = Instant::now();
-                solve_sparse_refined(&csc, &rs_factors, &rhs)?;
+                solve_sparse_refined_auto_into(
+                    &csc,
+                    &rs_factors,
+                    &rhs,
+                    &mut rs_x,
+                    false,
+                    RefineOptions::default(),
+                )?;
                 let s = ts.elapsed().as_micros();
                 Ok::<(u128, u128), FeralError>((f, s))
             })
