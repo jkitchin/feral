@@ -227,3 +227,177 @@ Blocked measurement had said geomean 2.29x, min 1.70x. Batching survives
 and is slightly better than reported. This is the one lever whose blocked
 and interleaved numbers agree -- consistent with it having been stable
 across runs all along, unlike the schedule ratio.
+
+* 10:05 :bench:issue189:step1:harness:
+Step 1 of =dev/plans/large-n-solve-gate.md=: switched the sparse KKT
+corpus solve timing (=src/bin/bench.rs:1963=, plus the resample closure
+at =:1988=) off the free =solve_sparse_refined= and onto
+=solve_sparse_refined_auto_into(.., parallel = false, ..)=.
+
+Rationale is the 09:35 measurement: the free function hardcodes
+=SolveCore::SharedVector= (=solve.rs:2077=) while every =Solver= entry
+dispatches through =Auto=, so the published solve column measured a core
+no host runs.
+
+Chose =parallel = false= deliberately rather than installing a pool. Per
+#177 the pool is schedule-only and bit-neutral, and the same probe
+measures that schedule at geomean 1.01/0.98 -- nothing. Serial keeps the
+reading free of thread-count variance while still measuring the host's
+*arithmetic*. Timing =ap= instead would import scheduler noise for no
+measurable gain.
+
+Expected effect on the aggregate is small and I want that on the record
+before the numbers land: the corpus is ~154k matrices dominated by tiny
+ones where =Auto= picks =SharedVector= anyway. The 1.30-1.37x was
+measured on n = 8e3..1.8e5, a thin slice of the corpus. If the geomean
+barely moves, that is the expected outcome -- the point of the change is
+that the column now describes the core hosts run, not that the number
+improves.
+
+Note the reported *residual* also changes on matrices where =Auto= picks
+=ContribBlock=: the two cores are different reassociations (#177), so
+=rel_res= moves by ~kappa*eps. Tolerance is =n * eps * 1e6=, generous
+enough that this should not flip any pass/fail, but it is a real change
+to a reported number and gets checked against the run.
+
+=cargo clippy --bin bench -- -D warnings= clean; release build clean.
+
+* 10:35 :bench:regression:unresolved:
+Bench run with the Step 1 change (=Auto= core on the sparse solve
+timing). *Sparse small-frontal exit partition FAILS: p90 2.03 vs target
+<= 2.0*, against 1.58 PASS in session 2026-08-19-05. Reporting before
+diagnosis per CLAUDE.md.
+
+|                          | 2026-08-19-05 | this run |
+|--------------------------+---------------+----------|
+| sparse factor/MUMPS gmean|          0.45 |     0.51 |
+| sparse factor/MUMPS p50  |          0.32 |     0.40 |
+| sparse factor/MUMPS p90  |          1.58 |     2.03 |
+| sparse factor/MUMPS max  |         10.58 |    68.79 |
+| sparse solve/MUMPS gmean |          0.08 |     0.08 |
+| sparse solve/MUMPS p50   |          0.08 |     0.08 |
+| sparse solve/MUMPS p90   |          0.15 |     0.17 |
+| sparse solve/MUMPS max   |          2.71 |    23.83 |
+| dense small-frontal p90  |          1.58 |     1.73 |
+| dense medium p90         |          2.00 |     2.13 |
+
+Two reasons to suspect machine state rather than the change:
+
+1. The failing number is the *factor* ratio. The change touches only the
+   solve timing call; it cannot affect factorization at all.
+2. The *dense* partition also degraded (1.58 -> 1.73, 2.00 -> 2.13), and
+   the dense loop shares no code with the edit --
+   =src/dense/solve.rs:69= is a separate implementation with no
+   =SolveCore=. It is an untouched control and it moved the same
+   direction.
+
+But the solve max (2.71 -> 23.83) is exactly where a wrong core choice
+would show, so "obviously the machine" is not good enough. Stashed the
+change and started a control run on unmodified code, same machine, same
+session. That is the A/B I should have had before drawing any conclusion
+-- the whole lesson of 09:35.
+
+* 11:05 :bench:regression:diagnosed:harness:
+Control run settles it and refutes my own hypothesis from 10:35.
+
+Stashed the Step 1 change, rebuilt, re-ran on the same machine in the
+same session. *Unmodified code: sparse small-frontal p90 1.58 PASS,
+dense 1.58 / 2.00 PASS* -- reproducing 2026-08-19-05 exactly. So the
+2.03 FAIL is caused by the change, not by machine state. The reasoning
+at 10:35 -- "the dense partition also degraded, and it shares no code" --
+was coincidence I read as evidence. It did not reproduce.
+
+Mechanism, and it is the same failure mode as everything else today:
+
+=resample_or_fallback= (=src/bin/bench.rs:1060=) runs *factor and solve
+interleaved* in one closure, =RESAMPLE_COLD_REPS = 5= times, and reduces
+=factor_us= by **min** across those reps. So whatever the solve does to
+cache and allocator state is what the next replicate's factor is measured
+in. Change the solve and the factor reading moves.
+
+And the population it moves on is not arbitrary: =should_resample=
+(=:1042=) fires when =mumps_timing.factor_us < 200=, i.e. small matrices
+-- which is exactly the =small-frontal (<200)= bucket that failed. The
+buckets and the resample predicate select the same matrices.
+
+My version made it worse than necessary by allocating =rs_x= *inside* the
+timed solve region on every replicate: an n-double alloc-and-zero per
+rep, plus allocator churn feeding the next rep's factor. Hoisted the
+buffer to one allocation per matrix, reused across replicates. Re-running.
+
+Two things to carry forward regardless of how the re-run lands:
+
+1. This is a pre-existing harness defect, not something the change
+   introduced. Any solve-side change perturbs the small-matrix factor
+   reading today. The denoise loop was built (2026-04-20-01) to make
+   small-matrix readings *stable*; interleaving the two phases inside it
+   makes them *coupled* instead.
+2. It belongs in the Step 1 scope in =dev/plans/large-n-solve-gate.md=,
+   which already flagged the min/median reduction as "needs restating for
+   a gate." Restating is not enough -- the phases need separate timing
+   passes so one cannot leak into the other.
+
+* 11:25 :bench:resolved:step1:
+Re-run with the solve buffer hoisted out of the timed region: *FAIL
+resolved.*
+
+| bucket                   | baseline 08-19-05 | control (unmod) | with change |
+|--------------------------+-------------------+-----------------+-------------|
+| sparse small-frontal p90 |         1.58 PASS |       1.58 PASS |   1.54 PASS |
+| sparse medium p90        |         1.58 PASS |       1.58 PASS |   1.54 PASS |
+| dense small-frontal p90  |         1.58 PASS |       1.58 PASS |   1.59 PASS |
+| dense medium p90         |         2.00 PASS |       2.00 PASS |   1.96 PASS |
+
+Worst sparse factor ratio 68.79 -> 9.29. The 1.58 -> 1.54 movement is
+within run-to-run noise and is *not* claimed as an improvement; the claim
+is only that the regression is gone.
+
+So the entire 2.03 FAIL was the per-replicate allocation inside the timed
+solve region, feeding the next replicate's factor through the min
+reduction. An 8 KB alloc-and-zero per rep at n < 1000 was worth 1.58 ->
+2.03 on a p90 over 153,455 matrices. That is a sharper demonstration of
+the coupling than I would have designed on purpose.
+
+The coupling itself is still there -- =resample_or_fallback= still
+interleaves factor and solve, so the next solve-side change can do this
+again. Recorded as a Step 1 item rather than fixed here: fixing it means
+restructuring the reduction, which changes every small-matrix number in
+the corpus and deserves its own commit and its own before/after.
+
+* 12:10 :bench:confirmed:spread:
+Third full bench run (complete output captured, not =| tail -25=), to get
+the ratio tables the checkpoint needs and to serve as a second
+confirmation of the fix.
+
+| bucket                   | baseline 08-19-05 | control (stashed) | run 2 | run 3 |
+|--------------------------+-------------------+-------------------+-------+-------|
+| sparse small-frontal p90 |              1.58 |              1.58 |  1.54 |  1.61 |
+| sparse medium p90        |              1.58 |              1.58 |  1.54 |  1.61 |
+| dense small-frontal p90  |              1.58 |              1.58 |  1.59 |  1.64 |
+| dense medium p90         |              2.00 |              2.00 |  1.96 |  1.98 |
+
+All PASS. The two post-fix runs bracket the baseline (1.54, 1.61 vs
+1.58), which is the spread number Step 1 asked for: run-to-run movement
+of the sparse small-frontal p90 on this machine is about +/-0.04, ~2.5%.
+Any future claim of a bench improvement smaller than that is noise. This
+also retires the "with change = 1.54" reading from the 11:25 entry as a
+point estimate -- the honest statement is that the change is
+indistinguishable from baseline on the factor partition, which is what it
+should be, since it touches only the solve.
+
+Sparse aggregate, run 3 (=solve/MUMPS=): geomean 0.08, p50 0.08, p90
+0.16, p99 0.88, max 3.12. Baseline was 0.08 / 0.08 / 0.15 / --- / 2.71.
+The geomean and p50 did not move, exactly as predicted in the 10:05 entry
+before the first run: the ~154k-matrix corpus is dominated by small
+matrices where =Auto= picks =SharedVector= anyway, so timing the =Auto=
+core cannot show up in the aggregate. The 1.30x that
+=probe_solve_reconcile= measures lives entirely at n >= 8k, and the
+corpus has almost none of that. Implication for Step 2: the large-n gate
+needs its own matrix set; it will never be visible in this harness's
+aggregate.
+
+The =factor/MUMPS= max fell 68.79 -> 9.71 and the worst-offender list
+changed identity (CRESC100/MUONSINE -> ACOPR14/KIRBY2). That tail is
+resample-loop noise on sub-millisecond matrices, not a real factor
+change; the max column is not a stable statistic here and should not be
+quoted as a result.
