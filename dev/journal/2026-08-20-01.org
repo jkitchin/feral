@@ -572,3 +572,42 @@ The 1.36x is a solve-kernel number, NOT a pounce end-to-end number.
 
 Amended dev/sessions/2026-08-20-02.md in place (marked as a correction) and
 appended a new decisions.md entry rather than editing the prior one.
+
+* 18:30 :bench:cold:resolved:
+Cold bench re-run (built cold, 180s settle, machine quiet). All four Phase
+2.8.1 buckets returned to the BOTTOM of the observed band: sparse
+small-frontal 1.54, sparse medium 1.54, dense small-frontal 1.59, dense
+medium 1.97 — against the hot run's 1.65/1.65/1.66/2.04 and the 08-19-05
+baseline of 1.58/1.58/1.58/2.00.
+
+Two independent machine-state signatures confirm it was not a0b4d64:
+factor/MUMPS max fell 71.94 -> 9.10, and the worst-offender list changed
+identity entirely (GAUSS2/CRESC100 ~87 cold vs HAIFAM/HAHN1 ~72 hot).
+factor/SSIDS p99 also fell 1.11 -> 0.95.
+
+The 2026-08-20-02 checkpoint caveat is resolved: a0b4d64 did not regress the
+factor path, as the mechanical argument predicted but could not prove.
+
+* 19:15 :perf:rejected:masked-tile:
+Implemented the masked-tile follow-up (stride ld vs live nrhs through
+fwd_blas3/back_blas3/dsolve_node/gemm_panel_minus). Correct — 445 tests pass,
+clippy RC=0, bit-identity sweep extended to 1600 shapes over both stride
+regimes, plus a new pad-columns-untouched assertion that I mutation-checked
+(re-injecting the full-ld loop fails it: "pad column 1 written at row 0 for
+nrhs=1 ld=8"). rank1-vs-blas3 max abs diff unchanged at all 42 points.
+
+AND IT IS SLOWER. Anchored geomean over seven KKTs: 0.823x at nrhs=33,
+0.799x at 36, 0.797x at 47. Slower in raw us on every matrix too (1.11-1.34x
+worse at nrhs=33). Null controls (nrhs 32/40/48, where masking is a provable
+no-op — identical machine code) moved only 1.019x, so ~1.9% drift against a
+~20% effect. Decisive.
+
+Pre-mask, cost was a pure function of padded_ldw: t(36)~t(40) on all seven
+(bcsstk38 7059 vs 7111 us), t(47)~t(48) on all seven, t(33)/t(32)=1.225 vs
+40/33=1.212 predicted. Post-mask it tracks NEITHER the pad model (1.250) nor
+the work model (1.031) — it is 1.490, worse than both.
+
+Conclusion: the padding is not waste, it is what keeps every loop a whole
+number of 8-wide vector operations. My "18% available headroom" note from
+16:05 was WRONG and is retracted. Reverted in full; nothing kept. Recorded
+in tried-and-rejected.md.

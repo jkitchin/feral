@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-20T17:16:31Z
+Generated: 2026-08-20T17:40:42Z
 
 ## Latest Session
 File: dev/sessions/2026-08-20-02.md
@@ -33,8 +33,16 @@ untouched.
 The likely cause is machine state — the box had been under sustained compile
 and benchmark load for hours before this run. That is a hypothesis, not a
 result: I did not run a control on stashed code to test it, as was done on
-08-20-01 to refute a similar attribution. **Next session should re-run the
-bench cold before reading anything into these numbers.**
+08-20-01 to refute a similar attribution.
+
+> **RESOLVED, same day.** The cold re-run (built cold, 180 s settle, machine
+> quiet) put all four buckets at the *bottom* of the band: sparse
+> small-frontal **1.54**, sparse medium **1.54**, dense small-frontal
+> **1.59**, dense medium **1.97**. Two independent machine-state signatures
+> confirm the hot run rather than the change: `factor/MUMPS` max fell
+> **71.94 -> 9.10** and the worst-offender list changed identity entirely
+> (GAUSS2/CRESC100 cold vs HAIFAM/HAHN1 hot); `factor/SSIDS` p99 fell
+> 1.11 -> 0.95. `a0b4d64` did not regress the factor path.
 
 ## Goal
 
@@ -47,23 +55,15 @@ correct, and a real performance gain, or it does not ship.
 ### The threshold is fine. There was a defect underneath it.
 
 `BLAS3_NRHS_THRESHOLD` is unchanged at 32. What the investigation found
-instead: the row-major multi-RHS work buffers used a leading dimension of
-exactly `nrhs`, so any `nrhs` that is not a multiple of 8 makes every row of
-every supernode panel straddle a cache line, compounding across the gather,
-the kernels and the scatter.
-
-Evidence, all within a single process so no cross-process drift can reach it.
-`t(31)/t(32)` — `nrhs = 31` is 3% *less* work, so a healthy kernel gives
-~0.97:
 ```
 
 ## Git Status
 ```
+2637964 docs: state which pounce call sites the padded stride actually reaches
 ffb5862 docs: session checkpoint 2026-08-20-02 (multi-RHS stride alignment)
 a0b4d64 perf(solve): align the multi-RHS row stride to a cache line
 c34475e docs: session checkpoint 2026-08-20-01 (measurement corrections, #189 Step 1)
 c09da70 bench: time the solve core hosts actually run (#189 item 1)
-2ba437d probe: separate core, schedule, and depth in the solve measurement (#131, #189)
 ```
 
 ## Test Status
@@ -74,11 +74,11 @@ test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
@@ -86,7 +86,7 @@ test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 445 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.67s
+test result: ok. 445 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.65s
 
 ```
 
@@ -148,26 +148,26 @@ multi-RHS solve at `nrhs >= 32` and not a multiple of 8. It is not a pounce
 end-to-end number and must not be quoted as one.
 
 ## Recent Tried-and-Rejected
-**Why.** A full sweep is ~25 minutes, so two "adjacent" runs are 25 minutes
-apart. That is blocked measurement with an interleaved label on it — the same
-error behind the two claim retractions earlier the same day, one level up the
-stack. Cross-process A/B of a few-millisecond kernel does not work on this
-machine at this cadence.
+**Why, as far as the measurement shows.** Pre-mask, cost was a pure function
+of `padded_ldw(nrhs)`, confirmed three ways: `t(36) ~ t(40)` on all seven
+matrices (7059 vs 7111 us on bcsstk38; 104460 vs 104470 on dirichlet120),
+`t(47) ~ t(48)` on all seven, and `t(33)/t(32) = 1.225` against `40/33 =
+1.212` predicted. Post-mask, cost tracks neither model — 1.490 at `nrhs = 33`
+is worse than the 1.250 pad model *and* far worse than the 1.031 work model.
 
-The remaining runs were killed (`pkill -f probe_blas3_crossover`, 0 left) and
-no number from the paired dataset was reported as a result.
+Mechanism is inference, not measurement: iterating a non-multiple-of-8 column
+count appears to cost more than the arithmetic it saves, presumably because
+the fixed-width `NR = 8` tile is what lets the loops compile to whole
+vector operations, and a variable-length `live` tail reintroduces exactly the
+per-row irregularity the padding was added to remove. **The pad columns are
+not waste — they are what keeps every loop a whole number of 8-wide
+operations.** 8 extra multiply-adds on aligned lanes beat 7 skipped ones
+behind a mask.
 
-**Replaced by** an in-process design: the `kernel-probe` feature (off by
-default, compiled out entirely) exposes
-`set_blas3_nrhs_threshold`, so one process can time rank-1 and BLAS-3 at the
-*same* `nrhs`, alternating within each repetition — microseconds apart instead
-of 25 minutes. See `dev/research/blas3-threshold-refit.md`.
-
-**Kept from this attempt:** the single-build, single-process runs are valid,
-because looped-vs-batched was measured within one process. Two findings survive
-and are recorded in the research note: the 31→32 dispatch discontinuity (3% more
-work, batched time *drops* 1.36–1.77×), and that at `nrhs ∈ {2, 4}` batching is
-**21–27% slower** than looping single-RHS solves.
+**Consequence.** `a0b4d64`'s padded stride stands as the final form. The
+`40/33` residual is not recoverable this way and should not be described as
+"available headroom" in future notes. Reverted in full; no code from this
+attempt was kept.
 
 ## Source Files
 ```

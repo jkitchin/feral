@@ -5747,3 +5747,61 @@ because looped-vs-batched was measured within one process. Two findings survive
 and are recorded in the research note: the 31→32 dispatch discontinuity (3% more
 work, batched time *drops* 1.36–1.77×), and that at `nrhs ∈ {2, 4}` batching is
 **21–27% slower** than looping single-RHS solves.
+
+## 2026-08-20 — Masked-tile iteration over only the live multi-RHS columns (rejected: 1.22x SLOWER)
+
+**What was tried.** After `a0b4d64` padded the multi-RHS row stride to a
+cache line, the residual cost at `nrhs = 33` was exactly `40/33` — the
+arithmetic on the 7 zero pad columns. The obvious follow-up: keep the padded
+*stride* for alignment, but iterate only the `nrhs` live columns, with a
+masked final tile. `gemm_tile` already took a `live` argument, so the kernel
+side was ready. Implemented by threading a stride-vs-live distinction (`ld`
+vs `nrhs`) through `fwd_blas3`, `back_blas3`, `dsolve_node` and
+`gemm_panel_minus`, leaving the main `MR x NR` register loop byte-identical.
+
+**It was correct.** Full suite green (445 passed, 0 failed), clippy
+`--all-targets --all-features -D warnings` RC=0, and the bit-identity sweep
+extended to 1600 shapes covering both stride regimes plus a new assertion
+that the pad columns come back bit-for-bit unwritten. That assertion was
+mutation-checked: re-injecting the full-`ld` column loop fails it with
+`pad column 1 written at row 0 for nrhs=1 ld=8`. The rank1-vs-blas3 max abs
+diff was unchanged at all 42 measured points.
+
+**It was slower.** Anchored on `nrhs = 32` (identical machine code in both
+builds), geomean across seven large KKT matrices:
+
+| nrhs | pad cols | before `t(n)/t(32)` | after | masking speedup |
+|---:|---:|---:|---:|---:|
+| 33 | 7 | 1.225 | 1.490 | **0.823x** |
+| 36 | 4 | 1.254 | 1.570 | **0.799x** |
+| 47 | 1 | 1.486 | 1.865 | **0.797x** |
+
+Slower in raw microseconds too, on every matrix, at `nrhs = 33`: 7081->8859,
+10553->12916, 49446->66054, 98328->109038, 103250->138675, 57546->66620,
+193056->243217 (1.11x to 1.34x worse).
+
+**The A/B is trustworthy.** `nrhs` in {32, 40, 48} are multiples of 8, where
+`padded_ldw(n) == n` makes the masking a provable no-op — identical machine
+code in both builds. Those null controls moved 1.019x (range 0.973-1.046),
+so the drift term is ~1.9% against a ~20% effect.
+
+**Why, as far as the measurement shows.** Pre-mask, cost was a pure function
+of `padded_ldw(nrhs)`, confirmed three ways: `t(36) ~ t(40)` on all seven
+matrices (7059 vs 7111 us on bcsstk38; 104460 vs 104470 on dirichlet120),
+`t(47) ~ t(48)` on all seven, and `t(33)/t(32) = 1.225` against `40/33 =
+1.212` predicted. Post-mask, cost tracks neither model — 1.490 at `nrhs = 33`
+is worse than the 1.250 pad model *and* far worse than the 1.031 work model.
+
+Mechanism is inference, not measurement: iterating a non-multiple-of-8 column
+count appears to cost more than the arithmetic it saves, presumably because
+the fixed-width `NR = 8` tile is what lets the loops compile to whole
+vector operations, and a variable-length `live` tail reintroduces exactly the
+per-row irregularity the padding was added to remove. **The pad columns are
+not waste — they are what keeps every loop a whole number of 8-wide
+operations.** 8 extra multiply-adds on aligned lanes beat 7 skipped ones
+behind a mask.
+
+**Consequence.** `a0b4d64`'s padded stride stands as the final form. The
+`40/33` residual is not recoverable this way and should not be described as
+"available headroom" in future notes. Reverted in full; no code from this
+attempt was kept.
