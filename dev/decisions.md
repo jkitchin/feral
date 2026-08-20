@@ -7026,3 +7026,73 @@ oracle is v0.16.0's shipped behaviour reached through
 to the session that wrote the fix. Non-vacuity is asserted rather than
 assumed: on chain_400 the two cores must differ bit-for-bit or the test
 fails saying so, so a regression to `ContribBlock` cannot pass silently.
+
+## 2026-08-20 — Coverage is measured, not gated (Codecov)
+
+**The decision.** Add a `Coverage` workflow that runs the test suite
+under `cargo llvm-cov` and uploads lcov to Codecov, with three
+deliberate choices: the status checks are informational, the scope is
+`--workspace --exclude feral-diagnostics`, and the coverage job skips one
+test that ci.yml still runs.
+
+**Informational, never blocking.** Both the project and patch statuses
+carry `informational: true`, so Codecov comments a number on a PR and
+never turns a check red. Coverage is a measurement whose denominator
+moves for reasons that have nothing to do with a change's quality — add
+a module of `Display` impls and the percentage drops. The blocking set
+stays what it already was, and each of those is an invariant rather than
+a proxy: fmt, clippy, the test suite, the stress gate, the amd-cleanroom
+check. This also matches how ci.yml already treats its other
+measurements (the x86 FMA probe is `continue-on-error`; the fixture-skip
+step is summary-only).
+
+**Scope: the workspace minus diagnostics.** `feral-diagnostics` is
+`publish = false` — roughly 144 one-off probe binaries (issue #71). It is
+a measurement tool, not shipped code, and it is large enough that its
+number would swamp the signal from `src/`. Everything else in the
+workspace is in, including the six ordering crates.
+
+That last part is a change in what CI runs, not only in what it
+measures. `Cargo.toml` declares a root package and no `default-members`,
+so a bare `cargo test` at the workspace root resolves to the `feral`
+package alone; every `cargo test` invocation in ci.yml is either bare or
+`-p feral-diagnostics`. The consequence, verified by reading the
+manifest and the workflow rather than assumed: the ordering crates' 258
+tests — `feral-ordering-core` 69, `feral-metis` 59, `feral-kahip` 63,
+`feral-scotch` 45, `feral-amd` 12, `feral-amf` 10 — have never run in
+CI. `--workspace` runs them for the first time here.
+
+**One test is skipped under instrumentation, and why that is not a
+loosened tolerance.** `dirichlet120_parallel_factor_does_not_deadlock`
+asserts that a parallel dense-front factor of dirichlet120 completes
+inside a hard 120 s wall clock; it is the issue #102 re-entrant-deadlock
+guard. Under `cargo llvm-cov` the build is unoptimized *and* carries
+per-region counters, and the factor misses the budget:
+
+    test dirichlet120_parallel_factor_does_not_deadlock ... FAILED
+    panicked at tests/issue102_intrafront_deadlock.rs:72:13:
+    issue #102 regression: ... did not finish in 120 s
+    test result: FAILED. 0 passed; 1 failed; finished in 123.25s
+    real 3m4.912s   user 11m14.718s
+
+The same test passes under `cargo test` and under `cargo test --release`
+in the same tree. So this is instrumentation overhead, and had the
+workflow shipped without the skip the coverage job would have been red
+from its first run in a way that reads like issue #102 came back.
+
+The alternative — raising the 120 s budget so it survives instrumentation
+— is loosening a tolerance, which needs human approval, and it would
+weaken the guard everywhere to accommodate one job. Skipping in the
+coverage job only leaves the assertion at 120 s in ci.yml's `check` job,
+which runs on every push and PR. The guard keeps its teeth; coverage
+just does not measure that path. An audit found no other test that needs
+the same treatment: `large_matrix_smoke` and `rook_rescue_kkt` time
+themselves but assert nothing about the elapsed time, so
+`issue102_intrafront_deadlock` is the tree's only wall-clock assertion.
+
+**How to read the number.** Fixture-gated tests SKIP-and-pass when their
+gitignored fixtures are absent, so on CI every path they guard reads as
+uncovered while being covered locally. The coverage job prints the skip
+list to the run summary — the same step ci.yml has — so a low number in
+those modules can be checked against it before being treated as a real
+gap.

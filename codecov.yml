@@ -1,0 +1,68 @@
+# Codecov configuration for feral.
+#
+# Validate after editing:
+#   curl -X POST --data-binary @codecov.yml https://codecov.io/validate
+#
+# Coverage here is a MEASUREMENT, not a gate. Both status checks are
+# informational, so Codecov comments the numbers on a PR and never turns
+# a check red. This matches how ci.yml already treats its other
+# measurements (the x86 FMA probe is continue-on-error; the
+# fixture-skip step is summary-only) and keeps the blocking set to
+# things that are actually invariants: fmt, clippy, the test suite, the
+# stress gate, and the amd-cleanroom check.
+#
+# Read the number with the fixture caveat in mind. Fixture-gated tests
+# SKIP-and-pass when their (gitignored) fixtures are absent, so on CI
+# every path they guard reads as uncovered. The coverage job prints the
+# skip list to the run summary; consult it before treating a low number
+# in those modules as a real gap.
+
+coverage:
+  precision: 2
+  round: down
+  range: "60...90"
+
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: 80%
+        informational: true
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+# Paths excluded from the report. These are not "untested code we are
+# ignoring" -- they are code that is not the library, or code whose
+# coverage number carries no information.
+ignore:
+  # publish = false. ~144 one-off probe binaries (issue #71). A
+  # measurement tool, not shipped code; its size would swamp src/.
+  - "crates/feral-diagnostics/**"
+  # Test and measurement code measures itself at ~100% by construction.
+  - "tests/**"
+  - "benches/**"
+  - "examples/**"
+  - "src/bin/**"
+  - "**/tests/**"
+  # Vendored reference sources (MUMPS, SPRAL, Ipopt, faer) read for
+  # clean-room comparison. Never compiled into feral.
+  - "ref/**"
+  # Harnesses, corpora and oracle data.
+  - "external_benchmarks/**"
+  - "data/**"
+  - "scripts/**"
+  # PyO3 binding shim; exercised by the wheel tests in
+  # python-wheels.yml, which do not feed this report.
+  - "python/**"
+  # Prose.
+  - "dev/**"
+  - "manuscript/**"
+  - "book/**"
+  - ".crucible/**"

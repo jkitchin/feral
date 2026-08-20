@@ -1,0 +1,109 @@
+name: Coverage
+
+# Scoped to `main` on both triggers so a PR from a branch in this repo
+# produces ONE coverage run, not the two that `on: [push, pull_request]`
+# gives ci.yml. Codecov keys its comparison off a single head commit;
+# duplicate uploads for the same SHA are merged, but the second run is
+# pure cost.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  coverage:
+    name: llvm-cov -> Codecov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: run tests under instrumentation
+        # `--workspace --exclude feral-diagnostics`: diagnostics is a
+        # publish = false crate of ~144 one-off probe binaries (issue #71).
+        # It is a measurement tool, not shipped code, and its coverage
+        # number would be both meaningless and large enough to swamp the
+        # signal from src/.
+        #
+        # Note this runs MORE tests than ci.yml does. `cargo test` at the
+        # workspace root resolves to the `feral` package alone, so the six
+        # ordering crates' 258 tests have never run in CI; `--workspace`
+        # picks them up. That is deliberate — see the coverage note in
+        # dev/decisions.md.
+        #
+        # `-- --nocapture` + tee mirrors ci.yml so fixture-gated "SKIP:"
+        # lines survive libtest's stderr swallowing and can be surfaced
+        # below. `shell: bash` turns on pipefail so the tee cannot mask a
+        # test failure.
+        #
+        # `--skip dirichlet120_parallel_factor_does_not_deadlock`: that
+        # test asserts a parallel dense-front factor of dirichlet120
+        # finishes inside a hard 120 s wall clock (issue #102 guard). Under
+        # llvm-cov the build is unoptimized AND carries per-region counters,
+        # and the factor blows the budget:
+        #
+        #   test result: FAILED. 0 passed; 1 failed; finished in 123.25s
+        #
+        # while the same test passes under both `cargo test` and
+        # `cargo test --release`. That is instrumentation overhead, not a
+        # deadlock regression, so measuring it here would give a permanently
+        # red coverage job that reads like issue #102 came back. The test is
+        # NOT weakened: ci.yml's `check` job still runs it at 120 s on every
+        # push and PR, so the guard keeps its teeth. Coverage simply does not
+        # measure that one path. It is the only test in the tree with a
+        # wall-clock assertion (large_matrix_smoke and rook_rescue_kkt time
+        # themselves but assert nothing about it), so no other test needs
+        # this treatment.
+        shell: bash
+        run: >-
+          cargo llvm-cov --workspace --exclude feral-diagnostics
+          --lcov --output-path lcov.info
+          -- --nocapture --skip dirichlet120_parallel_factor_does_not_deadlock
+          2>&1 | tee /tmp/coverage-test.log
+
+      - name: surface fixture-gated skips
+        # A coverage percentage is only readable if you know what did not
+        # run. Fixture-gated tests SKIP-and-pass when their (gitignored)
+        # fixtures are absent, so every path they guard reads as uncovered
+        # on CI while being covered locally. Same reasoning as the
+        # identical step in ci.yml — without this the number silently
+        # understates and nobody knows by how much.
+        if: always()
+        run: |
+          {
+            echo "### Fixture-gated tests skipped (fixtures absent on CI)"
+            echo ""
+            echo "Paths these guard read as UNCOVERED in this report."
+            echo ""
+            grep "SKIP:" /tmp/coverage-test.log | sort -u \
+              || echo "none — all fixture-gated tests ran"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          flags: rust-stable
+          # Fail loudly on a broken upload. A silently-missing upload
+          # leaves Codecov comparing against a stale baseline, which is
+          # worse than a red check because it looks like a real coverage
+          # change.
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
