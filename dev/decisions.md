@@ -6960,3 +6960,69 @@ Evidence: `src/env.rs` (`past_f64_range_clamps_like_any_other_magnitude`);
 `tests/env_knob_scan.rs` (fails with 21 offenders before the conversions);
 `tests/env_knob_parsing.rs` (`1e400` -> `u64::MAX`);
 `dev/research/env-knob-parsing-2026-08-19.md` addendum.
+
+## 2026-08-19 — `solve_sparse_refined_parallel` maps to `Auto`, not `ContribBlock` (pre-release review of #177)
+
+Issue #177 established that which core runs must be a function of the
+factor alone (see the entry above). Applying that to
+`solve_sparse_refined_parallel` was done by mapping it to
+`SolveCore::ContribBlock { parallel: true }`. That is the wrong mapping,
+and the pre-release review of the six PRs merged since v0.16.0 caught it
+before the 0.17.0 tag.
+
+**What the function did through v0.16.0.** It built a CB workspace and
+used it only when the gate accepted the factor:
+
+```rust
+let mut cb_ws: Option<CbSolveWorkspace> = if parallel_cb && n > 0 {
+    let cb = CbSolveWorkspace::for_factors(factors);
+    cb.worthwhile().then_some(cb)
+} else { None };
+```
+
+On a rejected factor it ran the shared-vector core. `ContribBlock` has no
+gate — `solve_sparse_refined_core` maps it to `use_cb = true`
+unconditionally — so the rewrite changed the reassociation this public
+function returns on every factor the gate used to reject, and made it the
+slower of the two. PR #180's own rejected-alternative table measures that
+design at 1.86x on poisson_40 (refined solve, 659 µs -> 1228 µs): the
+review had already priced this arrangement and rejected it, and it
+shipped to `main` anyway because nothing pinned the entry point's core.
+
+**The decision.** Map it to `SolveCore::Auto { parallel: true }`.
+
+The tempting alternative — restore the v0.16.0 gate — is not available.
+`worthwhile()` reads `rayon::current_num_threads()` and
+`FERAL_CB_THRESH`, which is exactly the host-dependence #177 exists to
+remove; restoring it would undo the release's headline contract to fix a
+regression the contract's own implementation introduced. `Auto` keeps the
+fallback and derives it from `cb_core_profitable`, the shape half of the
+gate, which reads the factor and nothing else.
+
+**What this costs, stated plainly.** `Auto` restores the *fallback* but
+not v0.16.0's *bits*. The old predicate was `worthwhile()` (threads +
+env); the new one is `cb_core_profitable` (shape only). On a host where
+those disagree about a factor — which is the entire point of #177 — the
+function returns the other core's reassociation than 0.16.0 did. That is
+unavoidable if #177's contract holds, so 0.17.0 is a last-bits-change
+release for three public entry points (`Solver::solve_refined`,
+`solve_many_refined`, `solve_sparse_refined_parallel`), not a purely
+additive one. The CHANGELOG says so under its own heading rather than
+leaving it to be discovered; issue #16 documents how a last-bit solve
+change amplifies along an IPM trajectory.
+
+**Consequence for the API surface.** `solve_sparse_refined_parallel` is
+now an exact alias of `solve_sparse_refined_auto(.., true)`. Its name
+predates the separation of *which core* (numerical) from *how it
+executes* (scheduling), so it reads as a core selector and is not one.
+Kept as the pre-#177 name with a doc comment that says what it actually
+is and points new code at `_auto`; not deprecated in this release, since
+the fix already moves its bits and a deprecation warning on top would be
+two changes to absorb at once.
+
+Evidence: `tests/issue177_parallel_entry_point_core.rs`, four tests. The
+oracle is v0.16.0's shipped behaviour reached through
+`solve_sparse_refined`, which is unchanged and golden-pinned — external
+to the session that wrote the fix. Non-vacuity is asserted rather than
+assumed: on chain_400 the two cores must differ bit-for-bit or the test
+fails saying so, so a regression to `ContribBlock` cannot pass silently.
