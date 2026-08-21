@@ -18,8 +18,8 @@ All notable changes to FERAL will be documented in this file.
   count with no principled value: the right count is problem-dependent, so
   tuning it is guessing.
 - **What changed.** `RefineOptions` gains a `stop: StopCriterion` field:
-  - `StopCriterion::EpsSqrtN` — the historical behavior, and still the
-    default. Bit-for-bit unchanged.
+  - `StopCriterion::EpsSqrtN` — the historical behavior. Bit-for-bit
+    unchanged, but no longer the default; see the entry below.
   - `StopCriterion::RelativeResidual(t)` — stop once
     `||r||_2 <= t * ||b||_2`.
   - `StopCriterion::BackwardError(t)` — stop once the componentwise backward
@@ -67,6 +67,71 @@ All notable changes to FERAL will be documented in this file.
 - See `dev/research/issue-190-refine-target.md` and
   `dev/plans/issue-190-refine-target.md`.
 
+
+### Changed - refinement's default stopping criterion now certifies componentwise accuracy (MA57/MUMPS parity)
+
+- **The defect.** `RefineOptions::default()` stopped on
+  `||r||_2 < eps * sqrt(n) * ||b||_2` alone. That test is normwise, so it is
+  dominated by the rows carrying the largest right-hand-side entries. On a RHS
+  whose entries span `1e-6..1e6` — the shape an interior-point method produces
+  near convergence, where the dual, primal and complementarity blocks differ by
+  many orders — it passes on the *raw* solve, and refinement never runs.
+  Measured against canonical MUMPS 5.8.2 on identical systems with identical
+  right-hand sides, FERAL returned:
+
+  | matrix | FERAL omega | MUMPS omega1 | FERAL steps |
+  |---|---:|---:|---:|
+  | `r05_kkt` | 9.520e-5 | 3.608e-16 | 0 |
+  | `bratu3d` | 8.953e-6 | 2.844e-16 | 0 |
+  | `cont-201` | 3.860e-7 | 2.728e-16 | 0 |
+
+  Nine to eleven orders behind the reference, reported as `Converged`, after
+  zero correction steps. MUMPS does not have this failure mode because its
+  `ICNTL(10)` loop stops on the componentwise backward error against
+  `CNTL(2)`, not on a norm ratio. In an IPM the small RHS blocks are the
+  complementarity residuals of near-active constraints — the rows that set the
+  step — so this was silently wrong exactly where it mattered, on
+  badly-scaled systems only.
+- **What changed.** `StopCriterion` gains `EpsSqrtNAndBackwardError(f64)`, and
+  it is the new `RefineOptions::default()` with
+  `DEFAULT_BACKWARD_ERROR_TARGET = sqrt(eps) = 1.4901161193847656e-8` —
+  MUMPS's `CNTL(2)` (`ref/mumps/src/dini_defaults.F:1094`). Refinement now
+  stops only when `||r||_2 < eps * sqrt(n) * ||b||_2` **and** `omega <=
+  sqrt(eps)`. Both are evaluated on the same best-iterate, so the returned `x`
+  satisfies both at once.
+- **It cannot regress an existing caller.** The new criterion is strictly
+  harder to satisfy than the old one, so the default can only refine *more*,
+  never less. No accuracy gate was loosened.
+- **What it costs, measured.** Seven matrices, n up to 180,900, both RHS
+  families. With a **well-scaled** RHS: identical to the old default on all
+  seven — same step counts, same residuals, no added work. With a
+  **badly-scaled** RHS: `r05_kkt`, `bratu3d` and `cont-201` each take one
+  extra correction step (5-14 ms) and their componentwise error drops to
+  `2.7e-16`, `3.2e-16` and `2.9e-16`, level with MUMPS. Worst-case step count
+  across all fourteen combinations is still 2, the bound `EpsSqrtN` already
+  had.
+- **Rejected on measurement.** A *pure* `BackwardError(sqrt(eps))` default was
+  tried first: it fixes the componentwise gap but stops earlier than
+  `EpsSqrtN` normwise, and `tests/parity.rs` caught it — `ROSZMAN1_0241` at
+  `4.805e-14` against a MUMPS-anchored gate of `2.077e-14`. `BackwardError(eps)`
+  — LAPACK `dgerfs`'s target — was also rejected: it is unreachable here,
+  stagnating or exhausting the step budget on five of seven under a
+  badly-scaled RHS.
+- **Not a fix for #190's cost complaint.** The conjunction keeps the
+  `EpsSqrtN` half, so a normwise target that a given problem cannot reach
+  still runs the step budget out. Hosts that know their own accuracy
+  requirement should say so via `RefineOptions::with_target(t)` or
+  `with_backward_error(t)`.
+- **Also ruled out this session, with evidence.** The gap was *not* the pivot
+  threshold and *not* `ZeroPivotAction::ForceAccept`. `ForceAccept` never
+  fires on this corpus (`inertia.zero == 0`, `n_tiny == 0` on all seven), and
+  FERAL's `pivot_threshold = 1e-8` already matches what Ipopt — the host
+  pounce ports — sets for MA27 and MA57 (`ma27_pivtol`, `ma57_pivtol`, both
+  `1e-8`; `mumps_pivtol` is `1e-6`). The standalone `CNTL(1) = 0.01` figure is
+  the library default Ipopt deliberately overrides downward. FERAL's inertia
+  matched MUMPS exactly on all seven matrices, including `qap15_kkt` at
+  `cond1 = 3.9e12`.
+- See `dev/research/issue-190-refine-target.md`, addendum 2026-08-21.
 
 ### Changed - `needs_refinement` now measures growth against the pivot threshold, not a fixed 1e6
 

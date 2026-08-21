@@ -2122,18 +2122,34 @@ pub struct RefineOptions {
     pub stop: StopCriterion,
 }
 
+/// The default componentwise target: MUMPS's `CNTL(2)`.
+///
+/// MUMPS sets `CNTL(2) = sqrt(epsilon)` (`ref/mumps/src/dini_defaults.F:1094`)
+/// and stops its `ICNTL(10)` refinement when the Arioli-Demmel-Duff
+/// backward error falls below it. FERAL uses the same number for the
+/// same purpose, so a default-configured `solve_refined` certifies at
+/// least what a default-configured MUMPS does.
+///
+/// `f64::EPSILON` itself -- LAPACK `dgerfs`'s target -- was measured and
+/// rejected: on the seven-matrix large corpus it stagnates or exhausts
+/// the step budget on five of seven under a badly scaled RHS (up to 10
+/// steps) while `sqrt(eps)` converges in at most one. See
+/// `dev/research/issue-190-refine-target.md`.
+pub const DEFAULT_BACKWARD_ERROR_TARGET: f64 = 1.4901161193847656e-8;
+
 impl Default for RefineOptions {
     fn default() -> Self {
         Self {
             max_steps: DEFAULT_REFINE_MAX_STEPS,
-            stop: StopCriterion::EpsSqrtN,
+            stop: StopCriterion::EpsSqrtNAndBackwardError(DEFAULT_BACKWARD_ERROR_TARGET),
         }
     }
 }
 
 impl RefineOptions {
     /// Options capping refinement at `max_steps` correction steps,
-    /// keeping the default [`StopCriterion::EpsSqrtN`].
+    /// keeping the default
+    /// [`StopCriterion::EpsSqrtNAndBackwardError`].
     ///
     /// `RefineOptions::with_max_steps(1)` is the interior-point host's
     /// case: one correction per call, leaving the convergence decision to
@@ -2233,6 +2249,26 @@ pub enum StopCriterion {
     /// ([`CscMatrix::abs_symv`]) and **no extra solves** — in contrast
     /// to [`RefinementDiagnostics::kappa_1_est`], which costs 3–5.
     BackwardError(f64),
+    /// Both at once: `‖r‖₂ < ε·√n·‖b‖₂` **and** `ω ≤ target`.
+    ///
+    /// This is the default, with `target = DEFAULT_BACKWARD_ERROR_TARGET`.
+    ///
+    /// Neither test alone is sufficient. [`Self::EpsSqrtN`] is normwise,
+    /// so it is dominated by the rows carrying the largest right-hand-side
+    /// entries: on a RHS whose entries span 1e-6..1e6 it passes on the
+    /// *raw* solve — `r05_kkt` reaches `‖r‖₂/‖b‖₂ = 2.7e-14` at step 0 —
+    /// while the rows carrying the small entries still sit at
+    /// `ω = 9.5e-5`, nine orders worse than MUMPS on the same system.
+    /// [`Self::BackwardError`] alone fixes that but, being satisfied at
+    /// `√ε`, can stop while `‖r‖₂/‖b‖₂` is still looser than the
+    /// historical rule delivered.
+    ///
+    /// Requiring both means the returned iterate is never worse than
+    /// what `EpsSqrtN` shipped, and additionally carries the
+    /// Arioli-Demmel-Duff certificate. Measured cost on the seven-matrix
+    /// large corpus, both RHS families: at most two correction steps,
+    /// the same bound `EpsSqrtN` already had.
+    EpsSqrtNAndBackwardError(f64),
 }
 
 /// Why a refinement call stopped, and how much it did.
@@ -2376,13 +2412,13 @@ fn backward_error(
 /// the returned `x` is no worse than the unrefined `solve_sparse()` output.
 ///
 /// Convergence test: whichever `StopCriterion` the caller selected, or
-/// after 10 steps. The default criterion is `EpsSqrtN` — stop when
-/// `||r||₂ / ||b||₂ < ε·√n`, i.e. we've reached machine precision.
-/// That test is normwise, so on a badly-scaled right-hand side it can
-/// stop at `||r||₂/||b||₂ ≈ 4e-16` while the componentwise backward
-/// error is `9e-6` (measured, bratu3d); `StopCriterion::BackwardError`
-/// is the one with a principled stopping value (issue #190). 10 comes
-/// from FERAL's corpus,
+/// after 10 steps. The default is `EpsSqrtNAndBackwardError(√ε)` — stop
+/// once `||r||₂ / ||b||₂ < ε·√n` *and* the componentwise backward error
+/// `ω ≤ √ε`. The normwise half alone is not enough: on a badly-scaled
+/// right-hand side it stops at `||r||₂/||b||₂ ≈ 4e-16` while `ω = 9e-6`
+/// (measured, bratu3d), because it is dominated by the rows carrying
+/// the largest RHS entries. `√ε` is MUMPS's `CNTL(2)`, the same number
+/// its `ICNTL(10)` refinement stops on. 10 comes from FERAL's corpus,
 /// not from MUMPS (whose `ICNTL(10)` default is `0` — no refinement at
 /// all; the comparison harness sets it to `2`): below 10 some
 /// near-rank-deficient KKT matrices
@@ -2957,6 +2993,14 @@ fn solve_sparse_refined_core(
                 }
             }
             StopCriterion::BackwardError(t) => omega <= t,
+            StopCriterion::EpsSqrtNAndBackwardError(t) => {
+                let normwise = if b_norm > 0.0 {
+                    r_norm < threshold * b_norm
+                } else {
+                    r_norm < threshold
+                };
+                normwise && omega <= t
+            }
         }
     };
 
@@ -2965,7 +3009,10 @@ fn solve_sparse_refined_core(
     // ω is only formed when it is the criterion; under the other two it
     // stays `INFINITY` and is never read. One `abs_symv` per step, no
     // extra solves.
-    let wants_omega = matches!(opts.stop, StopCriterion::BackwardError(_));
+    let wants_omega = matches!(
+        opts.stop,
+        StopCriterion::BackwardError(_) | StopCriterion::EpsSqrtNAndBackwardError(_)
+    );
     let mut omega_scratch = if wants_omega {
         vec![0.0; n]
     } else {
@@ -3195,9 +3242,20 @@ pub fn solve_sparse_many_refined_into(
                 }
             }
             StopCriterion::BackwardError(t) => omega <= t,
+            StopCriterion::EpsSqrtNAndBackwardError(t) => {
+                let normwise = if b_norm > 0.0 {
+                    r_norm < threshold * b_norm
+                } else {
+                    r_norm < threshold
+                };
+                normwise && omega <= t
+            }
         }
     };
-    let wants_omega = matches!(opts.stop, StopCriterion::BackwardError(_));
+    let wants_omega = matches!(
+        opts.stop,
+        StopCriterion::BackwardError(_) | StopCriterion::EpsSqrtNAndBackwardError(_)
+    );
     let mut om_scratch = if wants_omega {
         vec![0.0f64; n]
     } else {
