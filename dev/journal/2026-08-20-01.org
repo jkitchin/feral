@@ -611,3 +611,149 @@ Conclusion: the padding is not waste, it is what keeps every loop a whole
 number of 8-wide vector operations. My "18% available headroom" note from
 16:05 was WRONG and is retracted. Reverted in full; nothing kept. Recorded
 in tried-and-rejected.md.
+
+* 20:10 :issue-190:refinement:verify:
+Read feral#190 in full and checked all five of its code claims against
+the tree at 7de1a93. All confirmed. The issue cites solve.rs:2574 and
+:2749; those predate a0b4d64 (+~250 lines), so located by content:
+threshold is at :2693 (single-RHS) and :2872 (multi-RHS), RefineOptions
+at :2118, the ForceAccept comment at :2146 (quoted verbatim in the
+issue), and both Solver::*_refined_into sites at solver.rs:1676 / :1824
+do discard diagnostics. Arithmetic checks too: eps*sqrt(118276) =
+7.636e-14, so the target really is out of reach on that KKT and the
+"always runs to the cap" mechanism follows.
+
+* 20:25 :issue-190:design:cost:
+Two design findings before writing anything.
+
+(1) Returning RefinementDiagnostics from the hot path would be a serious
+cost regression. solve.rs:2596 gates kappa_1_est on with_diagnostics,
+and kappa comes from estimate_inverse_norm_1 (Hager-Higham) which the
+struct's own doc puts at 3-5 extra solves per run. #190's benchmark
+already spends 48.962 s in back-solve at max_steps=10 -- routing the
+host's normal call through diagnostics multiplies exactly the cost the
+issue exists to cut. The issue allows "even just usize". Everything a
+host needs (steps taken, relative residual, which exit fired) is already
+computed in the loop and discarded, so a small Copy struct is free.
+
+(2) ||r||_2/||b||_2 is a weaker measure than #190's own stated goal.
+The issue says the host wants "what a stable LDL^T would have returned
+-- a backward-stable solve of the system it factorized". The direct
+measure of that is the componentwise backward error of Arioli-Demmel-Duff
+1989, omega = max_i |r_i| / (|A||x| + |b|)_i, which is what MA57
+(RINFO(6..8)) and MUMPS (RINFO(7..8)) actually report. It has a
+principled stopping point (omega <~ u = "the solve is honest", no guessed
+number) and it is scale-aware per row, which matters because #190's
+corpus includes a badly-scaled LP at data scale 1e11. Cost is one extra
+pass over A per step and ZERO extra solves -- unlike anything derived
+from kappa.
+
+Naive omega is fragile: a row whose denominator underflows gives a
+spuriously huge ratio that refinement cannot reduce, so the criterion
+would never fire -- the same failure mode #190 reports for eps*sqrt(n).
+Adopting LAPACK dgerfs' guarded form (safe1 = (n+1)*MIN_POSITIVE,
+safe2 = safe1/EPSILON) instead. Side benefit: a published formula is an
+external oracle, which CLAUDE.md requires when implementation and test
+would otherwise be written in the same session.
+
+Asked the user; they chose both criteria via a StopCriterion enum, and
+deferred the release-shape decision until #190 is measured. Research
+note at dev/research/issue-190-refine-target.md, plan at
+dev/plans/issue-190-refine-target.md.
+
+* 21:40 :issue-190:implement:
+Implemented the full #190 design. `CscMatrix::abs_symv` (4 tests),
+`backward_error` in solve.rs against the LAPACK dgerfs formula (4 oracle
+tests, expected values from an independent Python script written before the
+Rust), `StopCriterion`/`RefineOptions.stop`, `RefineOutcome`/`RefineStop`,
+wired through the single-RHS core, the batched multi-RHS path, and both
+`Solver` entry points. New integration suite `tests/issue190_refine_target.rs`
+(15 tests) including a bit-identity check that the default criterion
+reproduces pre-#190 behavior and that the batched path matches the
+per-column loop.
+
+Three compile errors surfaced and fixed along the way:
+- `probe_largen_solve_levers.rs:150` matched `Ok(())` against what is now
+  `Result<RefineOutcome, _>` (E0308) -> `Ok(_)`.
+- the new test used `Solver::factor(..).is_ok()`, but `factor` returns
+  `FactorStatus`, not `Result` (E0599).
+- `FactorStatus` derives only `Debug`, no `PartialEq`, so `assert_eq!` on it
+  does not compile either. Used `matches!` rather than widening the public
+  derive set for a test's convenience.
+
+Docs done: CHANGELOG `[Unreleased]` entry and a `dev/decisions.md` append
+recording why an enum rather than a numeric field, why `RefineOutcome` and
+not `RefinementDiagnostics` (kappa_1_est = 3-5 extra solves), and the
+documented `d_i == 0` deviation from dgerfs with its proof.
+
+* 22:05 :issue-190:test:measurement:
+First full run of `tests/issue190_refine_target.rs` failed 3 of 15. All three
+were my test constants, not the implementation: I had guessed target values
+instead of measuring what the fixture can reach.
+
+  a_backward_error_target_stops_early_too      berr 1e-8  -> MaxSteps
+  a_tighter_relative_target_costs_more_steps   rel  1e-10 -> MaxSteps
+  the_multi_rhs_path_honors_each_criterion     rel  1e-6  -> MaxSteps
+
+Wrote a throwaway probe (`tests/tmp_probe190.rs`, deleted after) to get the
+actual ladder for `full_budget_case()`, single RHS, per correction step:
+
+  k     1        2        3        4        5
+  rel 2.37e-3  7.74e-4  2.55e-4  8.38e-5  2.76e-5
+  ome 1.21e-3  4.85e-4  1.66e-4  5.53e-5  1.82e-5
+  k     6        7        8        9       10
+  rel 9.07e-6  2.99e-6  9.82e-7  3.23e-7  1.06e-7
+  ome 6.01e-6  1.98e-6  6.51e-7  2.14e-7  7.05e-8
+
+Contraction is 3.0x per step and the 10-step floor is rel 1.06e-7 /
+omega 7.05e-8. So 1e-10 and 1e-8 were below the floor; the loop was
+correctly reporting MaxSteps. Retargeted to 1e-4 (4 steps) and 1e-6
+(8 steps), both measured, and put the ladder in the module comment so the
+constants are not magic. 15/15 pass.
+
+** Unplanned finding: omega is far more uniform across columns than ||r||/||b||
+On the 20-column `many_rhs` fixture at the cap:
+
+  criterion  best column   worst column   spread
+  rel        1.06e-7       4.46e-6        42x
+  omega      2.86e-8       7.65e-8        2.7x
+
+The columns differ only by an additive offset in b, so ||b|| varies and the
+normwise ratio inherits that variation; the componentwise measure does not.
+Consequence at a fixed numeric target on the batched path:
+
+  t      rel steps        berr steps
+  1e-3   6  Converged     2  Converged
+  1e-4   8  Converged     4  Converged
+  1e-5  10  Converged     6  Converged
+  1e-6  10  MaxSteps      8  Converged
+  1e-7  10  MaxSteps     10  Converged
+
+A batched normwise target is hostage to its worst-scaled column: at 1e-5 it
+costs 10 steps where the componentwise target costs 6 for a solution of
+equivalent backward quality. This was not an argument I had for the design
+beforehand -- the research note justified omega on scale-awareness within a
+single system. It is a stronger argument on the multi-RHS path, which is
+exactly the path pounce's Schur solver uses.
+
+* 22:20 :needs-refinement:provenance:caveat:
+Found an uncommitted change to =src/dense/factor.rs= in the working tree
+while staging #190: =flag_growth_for_refinement= now compares =|L_ij|=
+against =1/pivot_threshold= (the multiplier bound TPP actually promises)
+instead of a fixed =1e6=, with the constant kept only as the =u = 0=
+fallback. Four new =growth_flag_tests= cases; suite green, clippy clean.
+
+The change stands on its own: =|L_ij| <= 1/u= is the contract of threshold
+partial pivoting, so it is the right thing to check the factor against, and
+unlike =1e6= it is scale-free and moves with =increase_quality=.
+
+**Provenance caveat, stated because it matters.** The doc comment cites a
+pounce measurement -- a 126028-order KKT where the old test fired on 91 of
+108 factorizations whose actual growth =max|L|/max|A|= was 8.7e-8, and where
+the largest =|L|= anywhere was 5.1e7 against a promised 1e8 -- and I cannot
+reproduce that measurement from anything in this session's record. Grepping
+the transcript finds those numbers only inside the diff itself, and there is
+no probe output, research note, or journal entry behind them. Committing it
+separately from #190 for exactly that reason: the mathematical argument is
+sound and self-contained, the cited numbers are not independently checkable
+here and should be re-derived before they are quoted anywhere else.

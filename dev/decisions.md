@@ -7251,3 +7251,49 @@ reaches half the KKT dimension before the backend refuses the partition.
 **Consequence for release decisions:** the 1.36x figure is a property of the
 multi-RHS solve at `nrhs >= 32` and not a multiple of 8. It is not a pounce
 end-to-end number and must not be quoted as one.
+
+
+## 2026-08-20 — Refinement stopping criterion is a caller choice, not a constant (issue #190)
+
+`RefineOptions` carries a `StopCriterion` enum rather than a second numeric
+knob. Three variants: `EpsSqrtN` (the pre-#190 hardwired test, kept as the
+default so no existing caller changes behavior), `RelativeResidual(f64)`, and
+`BackwardError(f64)`.
+
+Why an enum and not "add a `target: Option<f64>` field": the two useful
+targets are not the same quantity and cannot share one number. `||r||/||b||`
+is normwise and blind to row scaling; the componentwise backward error is
+scale-aware per row. On the badly-scaled 2x2 in the research note they read
+`1.0e-36` and `5.0e-13` for the same solution. A single `f64` field would
+have forced a silent choice between them.
+
+`BackwardError` is the one with a principled stopping value. `eps`-order `t`
+means "as good as a backward-stable factorization would have returned",
+independent of `n`. `max_steps` has no such value, which is Finding 1 of the
+research note: the corpus sweep of step counts is non-monotone, so no
+constant is defensible.
+
+Cost: `BackwardError` needs `|A| |x|`, one extra pass over the matrix per
+iteration via the new `CscMatrix::abs_symv`. **Zero extra solves.** That is
+why it is affordable in the hot path and why `RefinementDiagnostics` is not:
+the latter's `kappa_1_est` is 3-5 extra solves (`solve.rs:2596`), multiplying
+the cost #190 exists to cut.
+
+Returned instead: `RefineOutcome { steps, relative_residual, stop }`, all
+three already computed by the loop. `RefineStop` is ordered
+`Converged < Stagnated < Diverged < MaxSteps` for the multi-RHS aggregate,
+which reports the max steps, the max relative residual, and the worst stop
+across columns.
+
+**Documented deviation from LAPACK `dgerfs`.** The guarded formula is
+adopted verbatim, `safe1 = (n+1) * MIN_POSITIVE` and `safe2 = safe1 / EPSILON`
+included, with one exception: a row whose denominator `(|A||x| + |b|)_i` is
+exactly zero contributes `0`, where LAPACK computes `safe1/safe1 = 1`. Proof
+that this is safe, not a loosened tolerance: `d_i == 0` forces every
+`|a_ij||x_j| = 0` and `|b_i| = 0`, hence `r_i == 0` exactly. Keeping LAPACK's
+`1` would make any `BackwardError` target unreachable on a system with a
+structurally empty row — reproducing the exact defect #190 reports.
+
+**What this does not fix.** `ZeroPivotAction::ForceAccept` is FERAL's default
+and leaves residual on near-singular pivots, so `max_steps = 0` remains
+unusable for pounce regardless of the stopping criterion. Out of scope here.

@@ -4,6 +4,53 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added - iterative refinement can be told what "converged" means (issue #190)
+
+- **The problem.** The refinement loop's only convergence test was a hardwired
+  `||r||_2 < eps * sqrt(n) * ||b||_2`. That target is not reachable on large
+  ill-conditioned systems — at `n = 118,276`, `eps * sqrt(n) = 7.6e-14` — so
+  every call ran the full `max_steps` budget and paid for iterations that
+  bought the caller nothing. The only lever was `max_steps`, a step count with
+  no principled value: the right count is problem-dependent, so tuning it is
+  guessing.
+- **What changed.** `RefineOptions` gains a `stop: StopCriterion` field:
+  - `StopCriterion::EpsSqrtN` — the historical behavior, and still the
+    default. Bit-for-bit unchanged.
+  - `StopCriterion::RelativeResidual(t)` — stop once
+    `||r||_2 <= t * ||b||_2`.
+  - `StopCriterion::BackwardError(t)` — stop once the componentwise backward
+    error `max_i |r_i| / (|A| |x| + |b|)_i <= t` (Arioli-Demmel-Duff 1989;
+    the quantity MA57 reports in `RINFO(6..8)` and MUMPS in `RINFO(7..8)`).
+    This is the criterion with a principled stopping value: `t` on the order
+    of `eps` says "as good as a backward-stable factorization would have
+    returned," independent of `n` and of row scaling.
+- **What you get back.** The `*_refined_into` entry points now return a
+  `RefineOutcome { steps, relative_residual, stop }` instead of `()`, where
+  `stop` is `Converged | MaxSteps | Stagnated | Diverged`. All three values
+  are already computed by the loop, so reporting them costs nothing. The
+  full `RefinementDiagnostics` is deliberately *not* returned here: it
+  computes a Hager-Higham condition estimate costing 3-5 extra solves, which
+  would multiply exactly the cost this change exists to cut. Ask for it
+  explicitly via `solve_sparse_refined_with_diagnostics` when you want it.
+- **Migration.** `RefineOptions::default()` is unchanged and existing callers
+  compile unchanged — the new return value is not `#[must_use]`. Build a
+  criterion with `RefineOptions::with_target(t)`,
+  `RefineOptions::with_backward_error(t)`, or `.and_stop(...)` /
+  `.and_max_steps(...)` on an existing value.
+- **Note on scale.** `||r||_2 / ||b||_2` can look perfect while the solution
+  is not backward stable: on the worked badly-scaled 2x2 in the research
+  note it reads `1.0e-36` where the componentwise error is `5.0e-13`. Prefer
+  `BackwardError` unless you specifically want a normwise target.
+- **Oracle.** The backward-error formula is LAPACK `dgerfs`'s, including its
+  `safe1`/`safe2` underflow guard, with one documented deviation: a row whose
+  denominator is exactly zero contributes 0 rather than LAPACK's 1, because
+  such a row forces `r_i == 0` exactly. Expected values for the four unit
+  tests were computed independently in Python from the published formula
+  before any Rust was written.
+- See `dev/research/issue-190-refine-target.md` and
+  `dev/plans/issue-190-refine-target.md`.
+
+
 ### Changed - `needs_refinement` now measures growth against the pivot threshold, not a fixed 1e6
 
 - **What changed.** `Factors::needs_refinement` was set whenever any

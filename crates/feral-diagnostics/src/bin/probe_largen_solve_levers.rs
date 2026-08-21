@@ -147,7 +147,7 @@ fn run(path: &Path) {
             RefineOptions::with_max_steps(0),
         ) {
             Err(e) => format!("error: {e:?}"),
-            Ok(()) => {
+            Ok(_) => {
                 let sv = solve_sparse(factors, &probe_rhs).expect("sv probe");
                 let cb = solve_sparse_cb(factors, &probe_rhs, false).expect("cb probe");
                 let m_sv = sv

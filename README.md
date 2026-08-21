@@ -162,13 +162,27 @@ The step budget is a per-call parameter. `RefineOptions::with_max_steps(k)`
 caps the *correction* steps at `k` (the initial solve always runs, so a call
 does at most `k + 1` substitution passes); `RefineOptions::default()` is the
 historical budget, `DEFAULT_REFINE_MAX_STEPS = 10`. It is a cap, not a target:
-the `ε·√n` residual test, the divergence guard, and the plateau exit all keep
+the convergence test, the divergence guard, and the plateau exit all keep
 priority, and best-iterate holds under every `k`, so no cap returns an answer
 worse than the unrefined solve. `k = 0` *is* the unrefined solve, and costs the
 same — the residual matvec is skipped rather than computed and discarded. The
 caller that wants this is one running its own refinement loop over the same
 system, an interior-point method being the standard case: without a cap the two
 loops nest and one solve can cost `10 × 11 = 110` passes.
+
+What counts as converged is a per-call parameter too. `RefineOptions::default()`
+keeps FERAL's historical `ε·√n` relative-residual test, but that target is
+unreachable on large ill-conditioned systems — at `n = 118 276` it is
+`7.6e-14` — so every call runs the full budget. `RefineOptions::with_target(t)`
+stops at `||r||₂ ≤ t·||b||₂`, and `RefineOptions::with_backward_error(t)` stops at
+the componentwise backward error `maxᵢ |rᵢ| / (|A||x| + |b|)ᵢ ≤ t`
+(Arioli–Demmel–Duff; the quantity MA57 reports in `RINFO(6..8)`). The
+componentwise form is the one with a principled stopping value — `t` of order
+`ε` means "as good as a backward-stable factorization would have returned",
+independent of `n` and of row scaling — and it costs one extra pass over `A`
+per step and no extra solves. The `*_refined_into` entry points return a
+`RefineOutcome { steps, relative_residual, stop }` so the caller can see which
+of `Converged`/`MaxSteps`/`Stagnated`/`Diverged` ended the loop.
 
 Every entry point has an `_opts` form taking `RefineOptions` and an `_into`
 form writing into a caller-owned buffer instead of allocating —

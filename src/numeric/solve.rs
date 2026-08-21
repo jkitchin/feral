@@ -2114,29 +2114,251 @@ pub const DEFAULT_REFINE_MAX_STEPS: usize = 10;
 /// same, since the residual matvec is skipped rather than computed and
 /// discarded. (Under the diagnostics entry point the matvec still runs:
 /// `steps[0]` is the point there.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RefineOptions {
     /// Maximum number of correction steps. See the type-level docs.
     pub max_steps: usize,
+    /// What "accurate enough" means. See [`StopCriterion`].
+    pub stop: StopCriterion,
 }
 
 impl Default for RefineOptions {
     fn default() -> Self {
         Self {
             max_steps: DEFAULT_REFINE_MAX_STEPS,
+            stop: StopCriterion::EpsSqrtN,
         }
     }
 }
 
 impl RefineOptions {
-    /// Options capping refinement at `max_steps` correction steps.
+    /// Options capping refinement at `max_steps` correction steps,
+    /// keeping the default [`StopCriterion::EpsSqrtN`].
     ///
     /// `RefineOptions::with_max_steps(1)` is the interior-point host's
     /// case: one correction per call, leaving the convergence decision to
     /// the host's own refinement loop.
     pub fn with_max_steps(max_steps: usize) -> Self {
-        Self { max_steps }
+        Self {
+            max_steps,
+            ..Self::default()
+        }
     }
+
+    /// Options targeting a normwise relative residual of `target`
+    /// (`‖r‖₂/‖b‖₂ ≤ target`), keeping the default step budget.
+    ///
+    /// This is issue #190's ask. See [`StopCriterion::RelativeResidual`]
+    /// for when [`Self::with_backward_error`] is the better measure.
+    pub fn with_target(target: f64) -> Self {
+        Self {
+            stop: StopCriterion::RelativeResidual(target),
+            ..Self::default()
+        }
+    }
+
+    /// Options targeting a componentwise backward error of `target`
+    /// (`ω ≤ target`), keeping the default step budget.
+    ///
+    /// `with_backward_error(f64::EPSILON)` is "stop once the solve is
+    /// backward stable" — the contract an interior-point host assumes of
+    /// its linear backend. See [`StopCriterion::BackwardError`].
+    pub fn with_backward_error(target: f64) -> Self {
+        Self {
+            stop: StopCriterion::BackwardError(target),
+            ..Self::default()
+        }
+    }
+
+    /// Builder: set the step cap, keeping the criterion already chosen.
+    pub fn and_max_steps(self, max_steps: usize) -> Self {
+        Self { max_steps, ..self }
+    }
+
+    /// Builder: set the stopping criterion, keeping the cap already chosen.
+    pub fn and_stop(self, stop: StopCriterion) -> Self {
+        Self { stop, ..self }
+    }
+}
+
+/// What a refinement call is trying to achieve — as distinct from
+/// [`RefineOptions::max_steps`], which only says how long it may try.
+///
+/// # Why this exists (issue #190)
+///
+/// Before #190 the target was hardwired to `ε·√n`. On a large
+/// near-singular KKT system that is not a target, it is an unreachable
+/// one: at `n = 118 276`, `ε·√n ≈ 7.6e-14`, each step improves the
+/// residual slightly so the 2-strike plateau exit never fires, the
+/// divergence guard never fires, and the loop runs to `max_steps` on
+/// every call. The step cap then becomes the *de facto* stopping rule,
+/// and it is a bad one: sweeping a 118-problem corpus, `max_steps` was
+/// not monotone in outcome — one problem returned a false infeasibility
+/// verdict at `k = 1` while succeeding at `k = 0`, `2` and `10`. A knob
+/// behaves that way when it does not control the quantity the caller
+/// cares about.
+///
+/// See `dev/research/issue-190-refine-target.md`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StopCriterion {
+    /// `‖r‖₂ < ε·√n·‖b‖₂` — FERAL's historical rule, and the default.
+    ///
+    /// Kept bit-for-bit, including the strict `<`, so every call that
+    /// does not opt into a target performs exactly the arithmetic it
+    /// did before #190.
+    EpsSqrtN,
+    /// `‖r‖₂/‖b‖₂ ≤ target` — normwise relative residual.
+    ///
+    /// Simple and cheap, but *normwise*: one number over the whole
+    /// system, dominated by its largest-magnitude rows. On a badly
+    /// scaled system it can read as converged while individual
+    /// equations are badly violated. The worked case in
+    /// `dev/research/issue-190-refine-target.md` has
+    /// `‖r‖₂/‖b‖₂ = 1.0e-36` and `ω = 5.0e-13` for the same iterate.
+    /// Prefer [`Self::BackwardError`] when the caller's real question is
+    /// "is this solve honest?".
+    RelativeResidual(f64),
+    /// `ω ≤ target`, where `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ` is the
+    /// componentwise backward error of Arioli, Demmel & Duff (1989).
+    ///
+    /// `ω ≤ u` certifies that the computed `x` is the *exact* solution
+    /// of `(A+δA)x = b+δb` with `|δA| ≤ ω|A|` and `|δb| ≤ ω|b|`,
+    /// entry by entry. That is the property "a backward-stable `LDLᵀ`"
+    /// names, so unlike a relative-residual target it has a principled
+    /// value — `f64::EPSILON` — and the caller need not invent one.
+    /// It is also what MA57 (`RINFO(6..8)`) and MUMPS (`RINFO(7..8)`)
+    /// report.
+    ///
+    /// Costs one extra pass over `A` per step
+    /// ([`CscMatrix::abs_symv`]) and **no extra solves** — in contrast
+    /// to [`RefinementDiagnostics::kappa_1_est`], which costs 3–5.
+    BackwardError(f64),
+}
+
+/// Why a refinement call stopped, and how much it did.
+///
+/// Returned by the `*_into` refinement entry points. Everything here is
+/// computed by the refinement loop anyway; surfacing it costs nothing.
+///
+/// Issue #190 asked for this because back-solve wall time cannot
+/// distinguish "the budget bound" from "refinement bottomed out after
+/// two non-improving steps" — very different diagnoses for a host
+/// deciding what to pass next. The alternative, returning
+/// [`RefinementDiagnostics`], would have dragged in the Hager–Higham
+/// condition estimate and its 3–5 extra solves per call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefineOutcome {
+    /// Correction steps actually performed. `0` means the direct solve
+    /// already satisfied the criterion (or that `max_steps` was `0`).
+    ///
+    /// For a multi-RHS call this is the maximum over columns.
+    pub steps: usize,
+    /// `‖r‖₂/‖b‖₂` of the iterate that was returned, or `‖r‖₂` when
+    /// `‖b‖₂ = 0`.
+    ///
+    /// **`NaN` when `max_steps == 0`**: issue #178 requires that setting
+    /// cost exactly what an unrefined solve costs, so no residual is
+    /// formed and there is nothing honest to report. For a multi-RHS
+    /// call this is the maximum over columns.
+    pub relative_residual: f64,
+    /// Which exit fired. For a multi-RHS call, the worst over columns in
+    /// the order `MaxSteps > Diverged > Stagnated > Converged` —
+    /// `MaxSteps` ranks first because "did the budget bind?" is the
+    /// question this type exists to answer.
+    pub stop: RefineStop,
+}
+
+/// The four ways [`solve_sparse_refined_core`] can exit. See
+/// [`RefineOutcome::stop`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefineStop {
+    /// The [`StopCriterion`] was satisfied.
+    Converged,
+    /// The step budget was exhausted with the criterion unmet. This is
+    /// the signal that [`RefineOptions::max_steps`] was the binding
+    /// constraint — raise it, or loosen the criterion.
+    MaxSteps,
+    /// Two consecutive steps failed to improve the best `‖r‖₂`.
+    /// Refinement has bottomed out; more steps will not help.
+    Stagnated,
+    /// A step drove `‖r‖₂` past 100× the best seen. The best iterate is
+    /// still what gets returned.
+    Diverged,
+}
+
+impl RefineStop {
+    /// Rank for the multi-RHS aggregation described on
+    /// [`RefineOutcome::stop`]. Higher wins.
+    pub(crate) fn rank(self) -> u8 {
+        match self {
+            RefineStop::Converged => 0,
+            RefineStop::Stagnated => 1,
+            RefineStop::Diverged => 2,
+            RefineStop::MaxSteps => 3,
+        }
+    }
+
+    pub(crate) fn worst(self, other: RefineStop) -> RefineStop {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// Componentwise backward error `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ`,
+/// in the guarded form LAPACK's `dgerfs` uses for `BERR`:
+///
+/// ```text
+/// safe1 = (n+1)·f64::MIN_POSITIVE      safe2 = safe1 / f64::EPSILON
+/// dᵢ = (|A|·|x| + |b|)ᵢ
+/// dᵢ > safe2  →  |rᵢ| / dᵢ
+/// otherwise   →  (|rᵢ| + safe1) / (dᵢ + safe1)
+/// ```
+///
+/// The guard matters: an unguarded ratio on a row whose denominator has
+/// underflowed reports a spuriously enormous `ω` that refinement cannot
+/// reduce, which would make a [`StopCriterion::BackwardError`] target
+/// unreachable — reproducing the exact defect issue #190 reports for
+/// `ε·√n`.
+///
+/// **One deviation from `dgerfs`**, and it is deliberate: a row with
+/// `dᵢ == 0` contributes `0`, where LAPACK's guarded branch yields
+/// `safe1/safe1 = 1`. `dᵢ == 0` forces every `|aᵢⱼ||xⱼ|` and `|bᵢ|` to
+/// be zero, hence `rᵢ = bᵢ − (Ax)ᵢ = 0` exactly — the equation is
+/// satisfied, not violated. Reporting `1` for a structurally empty row
+/// would make any `BackwardError` target unreachable on such a system.
+///
+/// `scratch` must be `n` long; it receives `|A|·|x|`.
+fn backward_error(
+    matrix: &CscMatrix,
+    x: &[f64],
+    rhs: &[f64],
+    r: &[f64],
+    scratch: &mut [f64],
+) -> f64 {
+    let n = matrix.n;
+    matrix.abs_symv(x, scratch);
+    let safe1 = ((n + 1) as f64) * f64::MIN_POSITIVE;
+    let safe2 = safe1 / f64::EPSILON;
+    let mut omega: f64 = 0.0;
+    for i in 0..n {
+        let d = scratch[i] + rhs[i].abs();
+        if d == 0.0 {
+            // r[i] is provably 0 here; see the doc comment.
+            continue;
+        }
+        let term = if d > safe2 {
+            r[i].abs() / d
+        } else {
+            (r[i].abs() + safe1) / (d + safe1)
+        };
+        if term > omega {
+            omega = term;
+        }
+    }
+    omega
 }
 
 /// Solve A·x = rhs using the sparse factorization with iterative refinement.
@@ -2153,8 +2375,13 @@ impl RefineOptions {
 /// `dx = A⁻¹·r` can amplify error; tracking the best iterate guarantees
 /// the returned `x` is no worse than the unrefined `solve_sparse()` output.
 ///
-/// Convergence test: stop when `||r||₂ / ||b||₂ < ε·√n` (we've reached
-/// machine precision) or after 10 steps. 10 comes from FERAL's corpus,
+/// Convergence test: whichever `StopCriterion` the caller selected, or
+/// after 10 steps. The default criterion is `EpsSqrtN` — stop when
+/// `||r||₂ / ||b||₂ < ε·√n`, i.e. we've reached machine precision.
+/// On a large ill-conditioned system that target is not reachable and
+/// the loop always runs the full budget; `StopCriterion::BackwardError`
+/// is the one with a principled stopping value (issue #190). 10 comes
+/// from FERAL's corpus,
 /// not from MUMPS (whose `ICNTL(10)` default is `0` — no refinement at
 /// all; the comparison harness sets it to `2`): below 10 some
 /// near-rank-deficient KKT matrices
@@ -2211,8 +2438,8 @@ pub fn solve_sparse_refined_into(
     rhs: &[f64],
     x_out: &mut [f64],
     opts: RefineOptions,
-) -> Result<(), FeralError> {
-    solve_sparse_refined_core(
+) -> Result<RefineOutcome, FeralError> {
+    let (outcome, _) = solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2221,7 +2448,7 @@ pub fn solve_sparse_refined_into(
         SolveCore::SharedVector,
         opts,
     )?;
-    Ok(())
+    Ok(outcome)
 }
 
 /// Iterative refinement through the contribution-block solve core (issue
@@ -2325,8 +2552,8 @@ pub fn solve_sparse_refined_auto_into(
     x_out: &mut [f64],
     parallel: bool,
     opts: RefineOptions,
-) -> Result<(), FeralError> {
-    solve_sparse_refined_core(
+) -> Result<RefineOutcome, FeralError> {
+    let (outcome, _) = solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2335,7 +2562,7 @@ pub fn solve_sparse_refined_auto_into(
         SolveCore::Auto { parallel },
         opts,
     )?;
-    Ok(())
+    Ok(outcome)
 }
 
 /// Iterative refinement with tree-parallel execution requested, and the
@@ -2403,8 +2630,8 @@ pub fn solve_sparse_refined_parallel_into(
     rhs: &[f64],
     x_out: &mut [f64],
     opts: RefineOptions,
-) -> Result<(), FeralError> {
-    solve_sparse_refined_core(
+) -> Result<RefineOutcome, FeralError> {
+    let (outcome, _) = solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2413,7 +2640,7 @@ pub fn solve_sparse_refined_parallel_into(
         SolveCore::Auto { parallel: true },
         opts,
     )?;
-    Ok(())
+    Ok(outcome)
 }
 
 /// Per-step diagnostic data emitted by
@@ -2504,7 +2731,7 @@ pub fn solve_sparse_refined_with_diagnostics_opts(
     opts: RefineOptions,
 ) -> Result<(Vec<f64>, RefinementDiagnostics), FeralError> {
     let mut x = vec![0.0; factors.n];
-    let diag = solve_sparse_refined_core(
+    let (_outcome, diag) = solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2574,7 +2801,7 @@ fn solve_sparse_refined_core(
     with_diagnostics: bool,
     core: SolveCore,
     opts: RefineOptions,
-) -> Result<Option<RefinementDiagnostics>, FeralError> {
+) -> Result<(RefineOutcome, Option<RefinementDiagnostics>), FeralError> {
     let n = factors.n;
     if rhs.len() != n {
         return Err(FeralError::DimensionMismatch {
@@ -2649,7 +2876,16 @@ fn solve_sparse_refined_core(
     // exception: `steps[0]` carries that residual, so it runs the matvec
     // and then simply skips the loop.
     if opts.max_steps == 0 && !with_diagnostics {
-        return Ok(None);
+        return Ok((
+            RefineOutcome {
+                steps: 0,
+                // No residual was formed, so there is nothing honest to
+                // report. See `RefineOutcome::relative_residual`.
+                relative_residual: f64::NAN,
+                stop: RefineStop::MaxSteps,
+            },
+            None,
+        ));
     }
 
     // `x` is the working iterate the corrections accumulate into;
@@ -2693,18 +2929,56 @@ fn solve_sparse_refined_core(
     let threshold = f64::EPSILON * n_sqrt;
     let divergence_factor = 100.0;
     let b_norm = norm2(rhs);
-    // Target is a RELATIVE residual: ||r||/||b|| < ε·√n. When ||b|| = 0
-    // the true answer is x = 0 and r = -A·x; we target ||r|| < threshold
-    // directly in that case.
-    let relative_reached = |r_norm: f64| -> bool {
-        if b_norm > 0.0 {
-            r_norm < threshold * b_norm
-        } else {
-            r_norm < threshold
+    // Issue #190 made the *target* a per-call choice too. `EpsSqrtN`
+    // reproduces the historical rule exactly, strict `<` included, so
+    // callers that do not opt in run the same arithmetic they always
+    // did. The two target variants use `<=`, so `target = 0.0` means
+    // "only an exact zero residual stops you" rather than "unreachable".
+    //
+    // The residual targets are RELATIVE: ||r||/||b||. When ||b|| = 0 the
+    // true answer is x = 0 and r = -A·x; we compare ||r|| directly.
+    // `BackwardError` needs no such special case: its denominator
+    // carries |b| per row already.
+    let reached = |r_norm: f64, omega: f64| -> bool {
+        match opts.stop {
+            StopCriterion::EpsSqrtN => {
+                if b_norm > 0.0 {
+                    r_norm < threshold * b_norm
+                } else {
+                    r_norm < threshold
+                }
+            }
+            StopCriterion::RelativeResidual(t) => {
+                if b_norm > 0.0 {
+                    r_norm <= t * b_norm
+                } else {
+                    r_norm <= t
+                }
+            }
+            StopCriterion::BackwardError(t) => omega <= t,
         }
     };
 
     let rel_res = |rn: f64| if b_norm > 0.0 { rn / b_norm } else { rn };
+
+    // ω is only formed when it is the criterion; under the other two it
+    // stays `INFINITY` and is never read. One `abs_symv` per step, no
+    // extra solves.
+    let wants_omega = matches!(opts.stop, StopCriterion::BackwardError(_));
+    let mut omega_scratch = if wants_omega {
+        vec![0.0; n]
+    } else {
+        Vec::new()
+    };
+    // Evaluated on the *best* iterate, matching how the residual targets
+    // are tested against `best_r_norm`. Best-iterate selection itself is
+    // unchanged (smallest ||r||₂), so the contract in
+    // `solve_sparse_refined`'s docs holds under every criterion.
+    let mut best_omega = if wants_omega {
+        backward_error(matrix, &x, rhs, &r, &mut omega_scratch)
+    } else {
+        f64::INFINITY
+    };
 
     let mut steps: Vec<RefinementStep> = if with_diagnostics {
         let rr = rel_res(r_norm);
@@ -2720,8 +2994,15 @@ fn solve_sparse_refined_core(
     };
     let mut returned_step: usize = 0;
 
+    // Assume the budget binds; every other exit overwrites this, and a
+    // post-loop re-check catches the case where the final step happened
+    // to land on the target.
+    let mut stop = RefineStop::MaxSteps;
+    let mut steps_taken: usize = 0;
+
     for step in 1..=max_steps {
-        if relative_reached(best_r_norm) {
+        if reached(best_r_norm, best_omega) {
+            stop = RefineStop::Converged;
             break;
         }
 
@@ -2740,10 +3021,17 @@ fn solve_sparse_refined_core(
             r[i] = rhs[i] - r[i];
         }
         r_norm = norm2(&r);
+        steps_taken = step;
+        let omega = if wants_omega {
+            backward_error(matrix, &x, rhs, &r, &mut omega_scratch)
+        } else {
+            f64::INFINITY
+        };
 
         let improved = r_norm < best_r_norm;
         if improved {
             best_r_norm = r_norm;
+            best_omega = omega;
             x_out.copy_from_slice(&x);
             stagnant_count = 0;
             if with_diagnostics {
@@ -2765,6 +3053,7 @@ fn solve_sparse_refined_core(
         }
 
         if r_norm > best_r_norm * divergence_factor {
+            stop = RefineStop::Diverged;
             break;
         }
         // Plateau: `max_stagnant_steps` consecutive non-improving
@@ -2773,9 +3062,24 @@ fn solve_sparse_refined_core(
         // A single non-improving step is allowed because some KKT
         // matrices oscillate into a better basin on the next step.
         if stagnant_count >= max_stagnant_steps {
+            stop = RefineStop::Stagnated;
             break;
         }
     }
+
+    // Exhausting the budget on the step that *reached* the target is not
+    // the budget binding. Without this, `steps == max_steps` would be
+    // ambiguous and the "did it run to the cap?" question issue #190
+    // asks would still not be answerable.
+    if stop == RefineStop::MaxSteps && reached(best_r_norm, best_omega) {
+        stop = RefineStop::Converged;
+    }
+
+    let outcome = RefineOutcome {
+        steps: steps_taken,
+        relative_residual: rel_res(best_r_norm),
+        stop,
+    };
 
     let diag = if with_diagnostics {
         Some(RefinementDiagnostics {
@@ -2787,7 +3091,7 @@ fn solve_sparse_refined_core(
     } else {
         None
     };
-    Ok(diag)
+    Ok((outcome, diag))
 }
 
 /// Multi-RHS solve with per-column iterative refinement, batched through
@@ -2797,7 +3101,7 @@ fn solve_sparse_refined_core(
 /// refined solves reach the BLAS-3 panel kernel that fix #2 added.
 ///
 /// The per-column convergence logic mirrors `solve_sparse_refined_core`
-/// exactly (same `max_steps`, 2-strike plateau, `ε·√n` relative target,
+/// exactly (same `max_steps`, 2-strike plateau, `StopCriterion`,
 /// 100× divergence guard, and per-column best-iterate). Each step
 /// **compacts** the active (un-converged) columns into the batched
 /// solve, so the work never exceeds the per-column loop. `rhs` is
@@ -2842,7 +3146,7 @@ pub fn solve_sparse_many_refined_into(
     nrhs: usize,
     x_out: &mut [f64],
     opts: RefineOptions,
-) -> Result<(), FeralError> {
+) -> Result<RefineOutcome, FeralError> {
     let n = factors.n;
     if rhs.len() != n * nrhs {
         return Err(FeralError::DimensionMismatch {
@@ -2858,21 +3162,45 @@ pub fn solve_sparse_many_refined_into(
     }
     if nrhs == 0 || n == 0 {
         x_out.fill(0.0);
-        return Ok(());
+        return Ok(RefineOutcome {
+            steps: 0,
+            relative_residual: 0.0,
+            stop: RefineStop::Converged,
+        });
     }
 
     // Same constants as the single-RHS refiner (solve_sparse_refined_core),
-    // including the issue #178 per-call step cap.
+    // including the issue #178 per-call step cap and the issue #190
+    // per-call stopping criterion. The criterion is applied per column,
+    // exactly as the `ε·√n` target was.
     let max_steps = opts.max_steps;
     let max_stagnant_steps = 2;
     let threshold = f64::EPSILON * (n as f64).sqrt();
     let divergence_factor = 100.0;
-    let relative_reached = |r_norm: f64, b_norm: f64| -> bool {
-        if b_norm > 0.0 {
-            r_norm < threshold * b_norm
-        } else {
-            r_norm < threshold
+    let reached = |r_norm: f64, b_norm: f64, omega: f64| -> bool {
+        match opts.stop {
+            StopCriterion::EpsSqrtN => {
+                if b_norm > 0.0 {
+                    r_norm < threshold * b_norm
+                } else {
+                    r_norm < threshold
+                }
+            }
+            StopCriterion::RelativeResidual(t) => {
+                if b_norm > 0.0 {
+                    r_norm <= t * b_norm
+                } else {
+                    r_norm <= t
+                }
+            }
+            StopCriterion::BackwardError(t) => omega <= t,
         }
+    };
+    let wants_omega = matches!(opts.stop, StopCriterion::BackwardError(_));
+    let mut om_scratch = if wants_omega {
+        vec![0.0f64; n]
+    } else {
+        Vec::new()
     };
 
     // Initial batched solve, written straight into the caller's buffer:
@@ -2886,11 +3214,21 @@ pub fn solve_sparse_many_refined_into(
     // the same — return before the per-column residual sweep rather than
     // computing residuals nobody will act on.
     if max_steps == 0 {
-        return Ok(());
+        return Ok(RefineOutcome {
+            steps: 0,
+            // No residual formed; see `RefineOutcome::relative_residual`.
+            relative_residual: f64::NAN,
+            stop: RefineStop::MaxSteps,
+        });
     }
 
     let mut best_rn = vec![0.0f64; nrhs];
     let mut bnorm = vec![0.0f64; nrhs];
+    // ω of each column's best iterate; untouched unless it is the criterion.
+    let mut best_om = vec![f64::INFINITY; nrhs];
+    // Per-column exit and correction count, aggregated at the end.
+    let mut col_stop = vec![RefineStop::Converged; nrhs];
+    let mut col_steps = vec![0usize; nrhs];
 
     // Initial per-column residual r_c = b_c - A·x_c into a small reused
     // scratch; build the active set (columns not yet at the target). The
@@ -2909,12 +3247,24 @@ pub fn solve_sparse_many_refined_into(
         }
         bnorm[c] = norm2(&rhs[c * n..(c + 1) * n]);
         best_rn[c] = norm2(&rc);
-        if !relative_reached(best_rn[c], bnorm[c]) {
+        if wants_omega {
+            best_om[c] = backward_error(
+                matrix,
+                &x_out[c * n..(c + 1) * n],
+                &rhs[c * n..(c + 1) * n],
+                &rc,
+                &mut om_scratch,
+            );
+        }
+        if !reached(best_rn[c], bnorm[c], best_om[c]) {
+            // Every column starts out assuming the budget will bind; the
+            // per-column exits below overwrite it.
+            col_stop[c] = RefineStop::MaxSteps;
             active.push(c);
         }
     }
     if active.is_empty() {
-        return Ok(());
+        return Ok(aggregate_outcome(&col_stop, &col_steps, &best_rn, &bnorm));
     }
 
     // Refinement is needed for at least one column. `x_out` holds the
@@ -2954,9 +3304,22 @@ pub fn solve_sparse_many_refined_into(
                 rc[i] = rhs[c * n + i] - rc[i];
             }
             let rn = norm2(&rc);
+            col_steps[c] += 1;
+            let om = if wants_omega {
+                backward_error(
+                    matrix,
+                    &x[c * n..(c + 1) * n],
+                    &rhs[c * n..(c + 1) * n],
+                    &rc,
+                    &mut om_scratch,
+                )
+            } else {
+                f64::INFINITY
+            };
 
             if rn < best_rn[c] {
                 best_rn[c] = rn;
+                best_om[c] = om;
                 x_out[c * n..(c + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]);
                 stagnant[c] = 0;
             } else {
@@ -2964,18 +3327,59 @@ pub fn solve_sparse_many_refined_into(
             }
 
             // Stop this column on convergence, divergence, or plateau —
-            // identical predicates to the single-RHS refiner.
-            let done = relative_reached(best_rn[c], bnorm[c])
-                || rn > best_rn[c] * divergence_factor
-                || stagnant[c] >= max_stagnant_steps;
-            if !done {
+            // identical predicates to the single-RHS refiner, tested in
+            // the same order so the recorded reason matches which one
+            // actually fired first.
+            if reached(best_rn[c], bnorm[c], best_om[c]) {
+                col_stop[c] = RefineStop::Converged;
+            } else if rn > best_rn[c] * divergence_factor {
+                col_stop[c] = RefineStop::Diverged;
+            } else if stagnant[c] >= max_stagnant_steps {
+                col_stop[c] = RefineStop::Stagnated;
+            } else {
                 still.push(c);
             }
         }
         active = still;
     }
 
-    Ok(())
+    Ok(aggregate_outcome(&col_stop, &col_steps, &best_rn, &bnorm))
+}
+
+/// Collapse the per-column refinement record into one [`RefineOutcome`],
+/// as documented on its fields: `steps` and `relative_residual` are
+/// maxima, and `stop` is the worst exit by [`RefineStop::rank`].
+///
+/// Returning a maximum rather than a per-column `Vec` keeps the multi-RHS
+/// refiner allocation-free on this path — the wide buffers it does
+/// allocate are already the dominant cost, and a host asking "did the
+/// budget bind anywhere?" does not need the breakdown.
+fn aggregate_outcome(
+    col_stop: &[RefineStop],
+    col_steps: &[usize],
+    best_rn: &[f64],
+    bnorm: &[f64],
+) -> RefineOutcome {
+    let mut stop = RefineStop::Converged;
+    let mut steps = 0usize;
+    let mut worst_rel = 0.0f64;
+    for c in 0..col_stop.len() {
+        stop = stop.worst(col_stop[c]);
+        steps = steps.max(col_steps[c]);
+        let rel = if bnorm[c] > 0.0 {
+            best_rn[c] / bnorm[c]
+        } else {
+            best_rn[c]
+        };
+        if rel > worst_rel {
+            worst_rel = rel;
+        }
+    }
+    RefineOutcome {
+        steps,
+        relative_residual: worst_rel,
+        stop,
+    }
 }
 
 fn norm2(v: &[f64]) -> f64 {
@@ -3475,6 +3879,117 @@ mod tests {
             }
         }
         CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    // --- componentwise backward error ω (issue #190) -----------------
+    //
+    // Oracle: values produced independently in Python from the published
+    // LAPACK `dgerfs` BERR formula (see
+    // `dev/research/issue-190-refine-target.md`), not from this code.
+    // CLAUDE.md forbids writing the implementation and its oracle in the
+    // same session without an external source; the published formula is
+    // that source.
+
+    /// Residual `r = b - A·x`, formed exactly as the refiner forms it.
+    fn residual_of(m: &CscMatrix, x: &[f64], b: &[f64]) -> Vec<f64> {
+        let mut r = vec![0.0; m.n];
+        m.symv(x, &mut r);
+        for i in 0..m.n {
+            r[i] = b[i] - r[i];
+        }
+        r
+    }
+
+    fn omega_of(m: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
+        let r = residual_of(m, x, b);
+        let mut scratch = vec![0.0; m.n];
+        backward_error(m, x, b, &r, &mut scratch)
+    }
+
+    fn assert_close(got: f64, want: f64, what: &str) {
+        if want == 0.0 {
+            assert_eq!(got, 0.0, "{what}: expected exactly 0, got {got:e}");
+            return;
+        }
+        let rel = ((got - want) / want).abs();
+        assert!(
+            rel <= 1e-15,
+            "{what}: got {got:e}, oracle {want:e}, relative difference {rel:e}"
+        );
+    }
+
+    #[test]
+    fn backward_error_matches_the_lapack_oracle_on_a_well_scaled_system() {
+        // A = [[4,1,0],[1,3,1],[0,1,2]], x = [1/2, 1/4, 1/8],
+        // b = A·x with 2⁻⁴⁰ added to row 1. All values exact in binary.
+        let m = CscMatrix::from_triplets(
+            3,
+            &[0, 1, 1, 2, 2],
+            &[0, 0, 1, 1, 2],
+            &[4.0, 1.0, 3.0, 1.0, 2.0],
+        )
+        .expect("m");
+        let x = [0.5, 0.25, 0.125];
+        let b = [2.25, 1.375 + f64::from_bits(0x3D70000000000000), 0.5];
+        assert_close(
+            omega_of(&m, &x, &b),
+            3.3072534609913724e-13,
+            "well-scaled ω",
+        );
+    }
+
+    #[test]
+    fn backward_error_sees_what_the_normwise_residual_misses() {
+        // The case the research note quotes: A = diag(1e12, 1e-12),
+        // x = [1,1], b perturbed by 1e-24 in the *small* row.
+        // ‖r‖₂/‖b‖₂ = 1.0e-36 — indistinguishable from a perfect solve —
+        // while ω = 5.0e-13, nowhere near machine precision. This is the
+        // whole argument for offering `StopCriterion::BackwardError`, so
+        // both numbers are asserted, not just ω.
+        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1e12, 1e-12]).expect("m");
+        let x = [1.0, 1.0];
+        let b = [1e12, 1e-12 + 1e-24];
+
+        assert_close(
+            omega_of(&m, &x, &b),
+            5.000242179395196e-13,
+            "badly-scaled ω",
+        );
+
+        let r = residual_of(&m, &x, &b);
+        let rel = norm2(&r) / norm2(&b);
+        assert_close(rel, 1.0000484358795394e-36, "badly-scaled ‖r‖/‖b‖");
+        assert!(
+            rel < f64::EPSILON && omega_of(&m, &x, &b) > 1e3 * f64::EPSILON,
+            "the two measures must disagree here, or this test proves nothing"
+        );
+    }
+
+    #[test]
+    fn backward_error_treats_a_structurally_empty_row_as_satisfied() {
+        // LAPACK's guarded branch would return safe1/safe1 = 1 for row 1.
+        // FERAL returns 0: dᵢ == 0 forces rᵢ == 0, so the equation holds.
+        // Reporting 1 would make any `BackwardError` target unreachable
+        // on such a system — the defect #190 reports for `ε·√n`.
+        let m = CscMatrix::from_triplets(2, &[0], &[0], &[1.0]).expect("m");
+        let x = [1.0, 0.0];
+        let b = [1.0, 0.0];
+        assert_eq!(omega_of(&m, &x, &b), 0.0, "empty row must contribute 0");
+    }
+
+    #[test]
+    fn backward_error_takes_the_guarded_branch_below_safe2() {
+        // dᵢ ≈ 2e-300, under safe2 ≈ 3.0e-292 for n = 2, so the
+        // `(|rᵢ| + safe1)/(dᵢ + safe1)` form is what runs. An unguarded
+        // ratio here would report ~5e-11 instead.
+        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1e-300, 1.0]).expect("m");
+        let x = [1.0, 0.0];
+        let b = [1e-300 + 1e-310, 0.0];
+        assert_close(
+            omega_of(&m, &x, &b),
+            3.342610678347075e-08,
+            "tiny-denominator ω",
+        );
     }
 
     #[test]
