@@ -2378,8 +2378,9 @@ fn backward_error(
 /// Convergence test: whichever `StopCriterion` the caller selected, or
 /// after 10 steps. The default criterion is `EpsSqrtN` — stop when
 /// `||r||₂ / ||b||₂ < ε·√n`, i.e. we've reached machine precision.
-/// On a large ill-conditioned system that target is not reachable and
-/// the loop always runs the full budget; `StopCriterion::BackwardError`
+/// That test is normwise, so on a badly-scaled right-hand side it can
+/// stop at `||r||₂/||b||₂ ≈ 4e-16` while the componentwise backward
+/// error is `9e-6` (measured, bratu3d); `StopCriterion::BackwardError`
 /// is the one with a principled stopping value (issue #190). 10 comes
 /// from FERAL's corpus,
 /// not from MUMPS (whose `ICNTL(10)` default is `0` — no refinement at

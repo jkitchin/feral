@@ -757,3 +757,71 @@ no probe output, research note, or journal entry behind them. Committing it
 separately from #190 for exactly that reason: the mathematical argument is
 sound and self-contained, the cited numbers are not independently checkable
 here and should be re-derived before they are quoted anywhere else.
+
+* 23:05 :issue-190:measurement:unfavorable:
+Ran =probe_refine_stop_criterion= (best-of-5 wall, seven matrices, two RHS
+families) to test #190's stated premise: "on a large ill-conditioned system
+the eps*sqrt(n) target is not reachable and the loop always runs the full
+budget." Output: =/tmp/feralmsg/probe190b.txt=.
+
+*The premise does not reproduce on this corpus.* With a well-scaled RHS the
+default criterion converges in 0-2 steps on every matrix -- never at the
+10-step cap:
+
+: matrix            n        default steps   omega
+: r05_kkt           14842    0  Converged    4.546e-13
+: qap15_kkt         50880    2  Converged    2.690e-16
+: dirichlet120_kkt  54363    0  Converged    1.679e-14
+: cont-201          80595    0  Converged    8.720e-14
+: cont5_late_kkt    180900   1  Converged    1.711e-16
+: bratu3d           27792    0  Converged    2.467e-15
+: bcsstk38          8032     0  Converged    1.324e-15
+
+So there is no wasted-step saving to claim. The largest local matrix is
+=c-big= at n=345241; the n=118276 system #190 cites is a pounce *runtime*
+KKT and is not in the local corpus, so the premise is untested at its own
+scale, not refuted at it. Stated as a corpus limit, not as vindication.
+
+*What the measurement did find is a correctness gap, not a speed gap.* With
+a badly-scaled RHS (entries 1e-6..1e6, alternating sign) the default
+declares =Converged= at normwise rel ~1e-14..1e-17 while the componentwise
+backward error is up to eleven orders worse:
+
+: matrix            default: steps  rel        omega      | BE(1e-12): steps  omega      cost
+: r05_kkt                   0       2.674e-14  9.520e-5   | 1                 2.655e-16  0.48x
+: bratu3d                   0       4.141e-16  8.953e-6   | 1                 3.170e-16  0.48x
+: cont-201                  0       3.385e-16  3.860e-7   | 1                 2.909e-16  0.48x
+: dirichlet120_kkt          0       7.720e-17  4.310e-10  | 1                 2.658e-16  0.49x
+: bcsstk38                  0       2.456e-15  1.098e-10  | 1                 7.742e-16  0.39x
+: qap15_kkt                 2       1.303e-16  1.229e-10  | 8 Stagnated       4.218e-11  0.32x
+: cont5_late_kkt            1       1.867e-16  8.398e-14  | 1 (BE 1e-14: 2)   4.474e-16  0.61x
+
+Six of seven: the default stops at a solution that is *not* backward stable
+componentwise, and reports success. One =BackwardError= step fixes it. The
+=rel= column is the point -- 4.14e-16 on bratu3d looks like a perfect solve
+and sits next to omega = 8.95e-6. A normwise test cannot see this because
+=||r||_2/||b||_2= is dominated by the rows where |b_i| ~ 1e6 and says
+nothing about the rows where |b_i| ~ 1e-6.
+
+*Cost, stated plainly: the criterion buys quality, not speed.* The fix is
+~2x on the solve (0.39x-0.61x "vs def"), factor excluded. The only speedups
+measured are (a) qap15 easy, =BackwardError(1e-10)= 1.45x by stopping at
+omega 8.755e-12 instead of 2.690e-16, and (b) qap15 hard,
+=RelativeResidual(1e-12)= 1.49x at omega 8.038e-10 vs the default's
+1.229e-10 -- faster *and worse*. Both are the caller choosing to buy less
+accuracy, which is exactly what the knob is for, but neither is a free gain.
+
+*Caveat the docs must carry:* the new knob can burn the budget the same way
+the old constant did. qap15_kkt hard with =BackwardError(1e-14)= runs 8
+steps, exits =Stagnated=, lands at omega 4.218e-11 -- 0.32x for nothing,
+because 1e-14 is below what that factorization can deliver. An unreachable
+componentwise target has the identical failure mode #190 complained about.
+=BackwardError(1e-10)= on the same system converges in 3 steps at
+essentially the same omega (4.388e-11).
+
+Conclusion against the standing bar ("rigorous, thoroughly correct, and
+result in performance gains, or we will not include it in a release"): the
+work is rigorous and correct, and it is *not* a performance gain. If it
+ships, it ships as an accuracy/observability feature with an honest note
+that the default is unchanged and the new criteria cost roughly one extra
+solve. That is a call for the human, not for me.

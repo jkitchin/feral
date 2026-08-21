@@ -7297,3 +7297,48 @@ structurally empty row — reproducing the exact defect #190 reports.
 **What this does not fix.** `ZeroPivotAction::ForceAccept` is FERAL's default
 and leaves residual on near-singular pivots, so `max_steps = 0` remains
 unusable for pounce regardless of the stopping criterion. Out of scope here.
+
+## 2026-08-20 — #190 measured: it is an accuracy feature, not a performance one
+
+The entry above was written before the corpus measurement. Recording the
+result here because it changes what the feature is *for*, and because the
+standing bar on this thread is "rigorous, thoroughly correct, and a real
+performance gain, or it does not ship."
+
+**The premise in issue #190 did not reproduce.** #190 argues the `ε·√n`
+target is unreachable on large systems so "every call runs the full budget."
+Best-of-5 over seven matrices (`probe_refine_stop_criterion`, output in the
+2026-08-20-01 journal) with a well-scaled RHS: the default converges in
+**0–2 steps on every one** — r05_kkt 0, qap15_kkt 2, dirichlet120_kkt 0,
+cont-201 0, cont5_late_kkt 1, bratu3d 0, bcsstk38 0. There is no
+wasted-iteration saving to claim. Caveat in the other direction: the
+`n = 118,276` system #190 cites is a pounce runtime KKT and is not in the
+local corpus (largest local is `c-big`, `n = 345,241`, not in this set), so
+the premise is untested at its own scale rather than refuted at it.
+
+**What the measurement did establish is a correctness gap.** With a RHS
+whose entries span `1e-6..1e6`, the default declares `Converged` at normwise
+`rel` of `1e-14..1e-17` while the componentwise backward error is up to
+eleven orders worse: r05_kkt `9.5e-5`, bratu3d `9.0e-6`, cont-201 `3.9e-7`,
+dirichlet120_kkt `4.3e-10`, bcsstk38 `1.1e-10`, qap15_kkt `1.2e-10`. One
+`BackwardError` step lands all of them at `~3e-16`. The default cannot see
+this by construction: `||r||_2/||b||_2` is dominated by the rows where
+`|b_i| ~ 1e6`.
+
+**Cost.** ~2x on the refinement wall time (0.39x–0.61x "vs def"), factor
+excluded — roughly one extra solve. The only measured speedups are the
+caller deliberately buying less accuracy: qap15 easy at
+`BackwardError(1e-10)` is 1.45x by stopping at omega `8.8e-12` instead of
+`2.7e-16`; qap15 hard at `RelativeResidual(1e-12)` is 1.49x and *worse*
+(omega `8.0e-10` vs the default's `1.2e-10`).
+
+**Decision.** The feature stays, documented as an accuracy/observability
+knob with the measured cost stated, not as a speedup. `CHANGELOG.md`,
+`README.md` and the `solve_sparse_refined` doc comment were corrected —
+all three had asserted the unreachable-target premise as fact.
+
+**Documented caveat, new.** An unreachable *componentwise* target has the
+identical failure mode the old constant had. qap15_kkt with a badly-scaled
+RHS and `BackwardError(1e-14)` runs 8 steps, exits `Stagnated` at omega
+`4.2e-11`, and costs 0.32x for nothing; `BackwardError(1e-10)` reaches
+`4.4e-11` in 3 steps. The knob does not remove the need to read `stop`.

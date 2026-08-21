@@ -7,12 +7,16 @@ All notable changes to FERAL will be documented in this file.
 ### Added - iterative refinement can be told what "converged" means (issue #190)
 
 - **The problem.** The refinement loop's only convergence test was a hardwired
-  `||r||_2 < eps * sqrt(n) * ||b||_2`. That target is not reachable on large
-  ill-conditioned systems — at `n = 118,276`, `eps * sqrt(n) = 7.6e-14` — so
-  every call ran the full `max_steps` budget and paid for iterations that
-  bought the caller nothing. The only lever was `max_steps`, a step count with
-  no principled value: the right count is problem-dependent, so tuning it is
-  guessing.
+  `||r||_2 < eps * sqrt(n) * ||b||_2` — a *normwise* target. A normwise
+  residual is dominated by the rows where `|b_i|` is largest and says nothing
+  about the rows where it is smallest, so on a badly-scaled right-hand side
+  the loop can report success at a solution that is nowhere near backward
+  stable. Measured on `bratu3d` with entries spanning `1e-6..1e6`: the loop
+  stops immediately at `||r||_2/||b||_2 = 4.1e-16`, which looks perfect,
+  while the componentwise backward error is `9.0e-6`. Six of seven IPM-scale
+  KKT matrices show the same thing. The only lever was `max_steps`, a step
+  count with no principled value: the right count is problem-dependent, so
+  tuning it is guessing.
 - **What changed.** `RefineOptions` gains a `stop: StopCriterion` field:
   - `StopCriterion::EpsSqrtN` — the historical behavior, and still the
     default. Bit-for-bit unchanged.
@@ -41,6 +45,19 @@ All notable changes to FERAL will be documented in this file.
   is not backward stable: on the worked badly-scaled 2x2 in the research
   note it reads `1.0e-36` where the componentwise error is `5.0e-13`. Prefer
   `BackwardError` unless you specifically want a normwise target.
+- **What it costs, measured.** This is an accuracy feature, not a speed
+  feature. On seven matrices (n up to 180,900) with a badly-scaled RHS, one
+  `BackwardError` step takes the componentwise error from as bad as `9.5e-5`
+  down to `~3e-16`, and costs roughly one extra solve — about 2x the
+  refinement wall time, factor excluded. With a *well-scaled* RHS the default
+  already converges in 0-2 steps on all seven, so there is no wasted-iteration
+  saving to claim.
+- **The new criteria can also overrun.** A componentwise target below what
+  the factorization can deliver has the same failure mode as an unreachable
+  normwise one: `qap15_kkt` with a badly-scaled RHS and
+  `BackwardError(1e-14)` runs 8 steps, exits `Stagnated`, and lands at
+  `4.2e-11` — while `BackwardError(1e-10)` reaches `4.4e-11` in 3. Set `t`
+  near `eps` scaled to what you expect, and read `stop`.
 - **Oracle.** The backward-error formula is LAPACK `dgerfs`'s, including its
   `safe1`/`safe2` underflow guard, with one documented deviation: a row whose
   denominator is exactly zero contributes 0 rather than LAPACK's 1, because
