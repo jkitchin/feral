@@ -233,3 +233,174 @@ numbers are pounce-side work.
 - LAPACK `dgerfs` — the `safe1`/`safe2` guarded `BERR` formula
 - Wächter & Biegler 2006, §3.10 — why the host refines a different system
 - MA57 `RINFO(6..8)`; MUMPS `ICNTL(10)`, `RINFO(7..8)`
+
+---
+
+# Addendum, 2026-08-21 — the MA57/MUMPS gap is the *criterion*, not the pivot
+
+The section above ("What this does not fix") blames the residual on
+`ZeroPivotAction::ForceAccept` and prescribes threshold pivoting "as
+MA27/MA57/MUMPS do". Both halves were measured this session and both are
+wrong. What is actually behind FERAL's bad componentwise residuals is the
+default stopping criterion, and the fix is a one-line default change.
+
+## What was ruled out
+
+**ForceAccept never fires.** `probe_forceaccept_residual` over the seven
+large corpus matrices: `inertia.zero == 0` and `n_tiny == 0` on every
+one, so no column is ever zeroed. The residual is not dropped pivots.
+
+**The pivot threshold is already at parity.** FERAL ships
+`pivot_threshold = 1e-8`. The standalone library defaults are 0.01
+(MUMPS `CNTL(1)` for SYM=2, `ref/mumps/src/dini_defaults.F:111`; SPRAL
+SSIDS `options%u`, `ref/spral/src/ssids/datatypes.f90:262`), which looks
+like a six-order gap — but Ipopt, the host pounce ports, deliberately
+overrides all of them *downward*:
+
+| Ipopt option | default | source |
+|---|---:|---|
+| `ma27_pivtol` | 1e-8 | `IpMa27TSolverInterface.cpp:97` |
+| `ma57_pivtol` | 1e-8 | `IpMa57TSolverInterface.cpp:205` |
+| `mumps_pivtol` | 1e-6 | `IpMumpsSolverInterface.cpp:131` |
+
+So FERAL's 1e-8 already matches MA27/MA57 under Ipopt exactly. The pin
+in `tests/issue_2_kkt_ls_init.rs:32` cites the right authority and was
+correct to reject a change to 0.01. Ipopt gets away with a loose pivtol
+because it *escalates*: `PdFullSpaceSolver` calls `IncreaseQuality()`
+when refinement stagnates (`IpPDFullSpaceSolver.cpp:296` and `:554`),
+raising pivtol to `min(pivtolmax, pivtol^0.75)`
+(`IpMa57TSolverInterface.cpp:832`), capped at `ma57_pivtolmax = 1e-4`.
+FERAL has that ladder (`Solver::increase_quality`) and `pounce-feral`
+wires it, so this is not a gap either.
+
+## The head-to-head that found the real gap
+
+Canonical MUMPS 5.8.2 (`external_benchmarks/mumps_oracle`, `CNTL(1)`
+0.01, `ICNTL(10) = 2`, `ICNTL(11) = 1`) against FERAL defaults, same
+seven matrices, byte-identical RHS.
+
+**Inertia matches MUMPS exactly on all seven**, including
+`qap15_kkt` 22275/28605/0 at `cond1 = 3.9e12`. The gate holds.
+
+Well-scaled RHS (`v[i] = 1 + (i%7)/8`): FERAL's refined relative
+residual beats MUMPS on five of seven and ties on the other two. No gap.
+
+Badly-scaled RHS (`v[i] = ±10^((i%13)-6)`, entries spanning 12 orders —
+the shape an IPM produces near convergence, where dual, primal and
+complementarity blocks differ by many orders):
+
+| matrix | FERAL ω, refined | MUMPS ω1 | FERAL steps |
+|---|---:|---:|---:|
+| r05_kkt | **9.520e-5** | 3.608e-16 | **0** |
+| bratu3d | **8.953e-6** | 2.844e-16 | **0** |
+| cont-201 | **3.860e-7** | 2.728e-16 | **0** |
+| qap15_kkt | 1.229e-10 | 1.023e-12 | 2 |
+| dirichlet120_kkt | 4.310e-10 | 6.175e-11 | 0 |
+| bcsstk38 | 1.098e-10 | 1.919e-11 | 0 |
+| cont5_late_kkt | 8.398e-14 | 3.848e-16 | 1 |
+
+Nine to eleven orders on the top three, and on those three FERAL took
+**zero** refinement steps and reported `Converged`.
+
+That is the whole mechanism. `StopCriterion::EpsSqrtN` tests
+`‖r‖₂/‖b‖₂ < ε·√n`. It is normwise, so it is dominated by the rows
+carrying the largest RHS entries. With entries spanning 1e-6..1e6 the
+test passes at once — `r05_kkt` reaches `‖r‖₂/‖b‖₂ = 2.674e-14` on the
+raw solve — while the rows carrying the *small* entries still have
+`ω = 9.5e-5`. FERAL then declares victory and never refines. MUMPS does
+not have this failure mode because its `ICNTL(10)` loop stops on the
+componentwise ω against `CNTL(2)`, not on a norm ratio.
+
+In an interior-point method the small RHS blocks are the complementarity
+residuals of near-active constraints — precisely the rows that set the
+step. So FERAL returns a step that is componentwise wrong exactly where
+it matters, silently, on badly-scaled systems only. That is the "works
+for the vast majority, fails on a class" signature.
+
+## Choosing the target
+
+Same seven matrices, badly-scaled RHS, `max_steps = 10`:
+
+| criterion | worst ω | max steps | outcomes |
+|---|---:|---:|---|
+| `EpsSqrtN` (shipped) | 9.5e-5 | 2 | all `Converged`, three of them wrong |
+| `BackwardError(√ε)` | 8.0e-10 | **1** | 7/7 `Converged` |
+| `BackwardError(ε)` | 4.2e-11 | **10** | 5/7 `Stagnated`/`MaxSteps` |
+
+`ε` is LAPACK `dgerfs`'s target and is unreachable here: it stagnates or
+exhausts the budget on five of seven, which is the very cost pathology
+#190 was filed about. `√ε = 1.4901161193847656e-8` is MUMPS's `CNTL(2)`
+(`ref/mumps/src/dini_defaults.F:1094`) and converges in at most one step
+on all fourteen (matrix, RHS) combinations.
+
+It is also *cheaper than what ships today* on well-scaled input:
+`qap15_kkt` goes 2 steps → 1, `cont5_late_kkt` 1 → 0, and no matrix
+takes more. So the change is strictly better on both axes — it does not
+trade speed for accuracy.
+
+## The decision
+
+A *pure* `BackwardError(√ε)` default was implemented first and rejected:
+it fixes the componentwise gap but stops earlier than `EpsSqrtN` on the
+normwise scale, and `tests/parity.rs` caught the regression —
+`ROSZMAN1_0241` went to `feral = 4.805e-14` against a MUMPS-anchored
+gate of `2.077e-14`. Shipping it would have required loosening that
+gate, which CLAUDE.md forbids without sign-off, and rightly: the gate
+was measuring something real.
+
+What shipped instead is the conjunction. `StopCriterion` gains
+`EpsSqrtNAndBackwardError(f64)`, and `RefineOptions::default().stop`
+becomes `EpsSqrtNAndBackwardError(DEFAULT_BACKWARD_ERROR_TARGET)` with
+`DEFAULT_BACKWARD_ERROR_TARGET = √ε`. Refinement stops only when
+`‖r‖₂ < ε·√n·‖b‖₂` **and** `ω ≤ √ε`. Both halves are evaluated on the
+same best-iterate (smallest `‖r‖₂`), which is what `best_omega` already
+tracked, so the returned `x` satisfies both simultaneously.
+
+Because the new criterion is strictly harder to satisfy than the old
+one, the default can only ever refine *more*, never less. No existing
+caller's accuracy regresses, no gate needs loosening, and the
+`EpsSqrtN`, `RelativeResidual` and `BackwardError` variants are all
+unchanged for callers who pin them.
+
+### Measured, seven-matrix large corpus, both RHS families
+
+Well-scaled RHS: **identical to the old default on all seven** — same
+step counts (0,0,0,0,0,1,2), same residuals. The conjunction costs
+nothing where the normwise rule was already right.
+
+Badly-scaled RHS, new default vs old:
+
+| matrix | steps | ω before | ω after | MUMPS ω1 |
+|---|---:|---:|---:|---:|
+| r05_kkt | 0 → 1 | 9.520e-5 | **2.655e-16** | 3.608e-16 |
+| bratu3d | 0 → 1 | 8.953e-6 | **3.170e-16** | 2.844e-16 |
+| cont-201 | 0 → 1 | 3.860e-7 | **2.909e-16** | 2.728e-16 |
+| qap15_kkt | 2 | 1.229e-10 | 1.229e-10 | 1.023e-12 |
+| cont5_late_kkt | 1 | 8.398e-14 | 8.398e-14 | 3.848e-16 |
+| dirichlet120_kkt | 0 | 4.310e-10 | 4.310e-10 | 6.175e-11 |
+| bcsstk38 | 0 | 1.098e-10 | 1.098e-10 | 1.919e-11 |
+
+The three that were nine to eleven orders behind MUMPS now match it, at
+a cost of one correction step each (5-14 ms). The worst-case step count
+across all fourteen combinations is still 2 — the bound `EpsSqrtN`
+already had. The four unchanged rows were already inside `√ε`.
+
+## What this leaves open
+
+`ω ≤ √ε` is MUMPS's stopping rule, not a claim of parity on the final
+number: MUMPS still reports a tighter ω on `cont5_late_kkt`,
+`dirichlet120_kkt` and `bcsstk38` because `ICNTL(10) = 2` keeps
+refining past the point FERAL stops. Those FERAL values are all inside
+`√ε` and therefore certified; closing the remaining two-order margin
+would mean refining past the criterion, which is a separate question.
+
+#190's own ask — a *reachable* target, because `ε·√n = 7.88e-14` at
+`n = 126028` is not attainable and refinement burned 48.96 s of
+backsolves — is **not** answered by this change. The conjunction keeps
+the `EpsSqrtN` half, so an unreachable normwise target still runs the
+budget out. That case is served by the opt-in
+`RefineOptions::with_target` / `with_backward_error` that shipped with
+`f547bc5`, which is the right place for it: a host that knows its own
+accuracy requirement should state it rather than have the default
+guess. The default's job is to be safe, and safety here means never
+returning less than it used to.

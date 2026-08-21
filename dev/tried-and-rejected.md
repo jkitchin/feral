@@ -5805,3 +5805,75 @@ behind a mask.
 `40/33` residual is not recoverable this way and should not be described as
 "available headroom" in future notes. Reverted in full; no code from this
 attempt was kept.
+
+## 2026-08-21 — raising `pivot_threshold` from 1e-8 to 1e-2 to "match MA57/MUMPS"
+
+**Tried.** Changed `NumericParams::default()`'s `pivot_threshold`
+(`src/numeric/factorize.rs:645`) from `1e-8` to `1e-2`, on my claim that
+feral was six orders below MA57 and MUMPS, whose library defaults are
+`CNTL(1) = 0.01`, and that this was the pounce deficiency gap.
+
+**Why it was wrong.** The premise is false. Ipopt does not use the library
+defaults — it deliberately lowers them, because in an interior-point method
+accuracy is recovered by inertia correction and iterative refinement rather
+than by pivoting hard. From `ref/Ipopt`:
+
+| Ipopt option | default | source |
+|---|---:|---|
+| `ma27_pivtol` | 1e-8 | `IpMa27TSolverInterface.cpp:97` |
+| `ma57_pivtol` | 1e-8 | `IpMa57TSolverInterface.cpp:205` |
+| `mumps_pivtol` | 1e-6 | `IpMumpsSolverInterface.cpp:131` |
+
+feral's 1e-8 already matches the MA27/MA57 configuration pounce is
+replacing. `tests/issue_2_kkt_ls_init.rs:32`
+(`numeric_params_default_uses_sparse_pivot_threshold`) pins it for exactly
+this reason and cites `ma27_pivtol`; that test is correct and was left
+untouched.
+
+Independently, the threshold was already measured not to be the cause:
+`probe_pivot_threshold_residual` sweeps it from 1e-8 to 0.5 on `qap15_kkt`
+and the unrefined relative residual does not move off ~3e-6.
+
+**Disposition.** Reverted in full (`git checkout src/numeric/factorize.rs`).
+No pivot-threshold change ships. The real gap was the refinement stopping
+criterion — see `dev/decisions.md`, 2026-08-21.
+
+## 2026-08-21 — `BackwardError(√ε)` alone as the default stopping criterion
+
+**Tried.** Replacing `RefineOptions::default()`'s `StopCriterion::EpsSqrtN`
+with `StopCriterion::BackwardError(√ε)`, to match what MUMPS's `ICNTL(10)`
+refinement stops on (`CNTL(2) = √ε`).
+
+**Failed `tests/parity.rs`:**
+
+```
+ROSZMAN1_0241 residual: feral=4.805e-14 > max(K*mumps=2.077e-14, floor=1.000e-14) = 2.077e-14
+```
+
+`ω ≤ √ε` can be satisfied while the normwise residual is looser than the old
+rule delivered, so swapping one test for the other regresses callers that
+depend on the normwise bound. Shipping it would have required loosening that
+gate — which needs human approval and is not justified when a correct
+alternative exists.
+
+**Disposition.** Replaced by the conjunction,
+`StopCriterion::EpsSqrtNAndBackwardError(√ε)`, which is strictly harder to
+satisfy than the old default and therefore cannot regress any caller.
+ROSZMAN1_0241 and the rest of `tests/parity.rs` pass unchanged under it.
+
+## 2026-08-21 — `BackwardError(f64::EPSILON)` as the componentwise target
+
+**Tried.** Using `f64::EPSILON` — LAPACK `dgerfs`'s componentwise target —
+rather than `√ε` for `DEFAULT_BACKWARD_ERROR_TARGET`. Measured with
+`OMEGA_EPS=1 HARD_RHS=1 probe_vs_mumps_residual`.
+
+**Failed on cost.** Under the badly-scaled RHS it stagnates or exhausts the
+step budget on **five of the seven** large matrices, taking up to 10
+correction steps, while `√ε` converges on the same systems in at most one.
+That is precisely the wasted-budget pathology issue #190 complained about,
+reintroduced from the other direction.
+
+**Disposition.** Rejected. `√ε` is what MUMPS itself targets
+(`ref/mumps/src/dini_defaults.F:1094`), so matching it is both the cheaper
+and the better-justified choice. Recorded in the doc comment on
+`DEFAULT_BACKWARD_ERROR_TARGET` so it is not retried.

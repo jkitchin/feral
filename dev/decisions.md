@@ -7342,3 +7342,72 @@ identical failure mode the old constant had. qap15_kkt with a badly-scaled
 RHS and `BackwardError(1e-14)` runs 8 steps, exits `Stagnated` at omega
 `4.2e-11`, and costs 0.32x for nothing; `BackwardError(1e-10)` reaches
 `4.4e-11` in 3 steps. The knob does not remove the need to read `stop`.
+
+## 2026-08-21 — refinement's default stopping criterion is now conjunctive
+
+**Context.** Ipopt/pounce reported a class of problems where feral's solve
+was materially worse than the MA57/MUMPS ports it replaces, while the vast
+majority of problems were fine. Four candidate causes were measured and
+ruled out: ForceAccept (`inertia.zero == 0`, `n_tiny == 0` on all seven
+large matrices), the pivot threshold (Ipopt sets `ma27_pivtol = 1e-8`,
+`ma57_pivtol = 1e-8`, `mumps_pivtol = 1e-6` — *below* the library defaults;
+feral's 1e-8 already matches), the escalation ladder
+(`pounce-feral/src/lib.rs:1368` does wire `increase_quality`), and the
+inertia itself (exact agreement with canonical MUMPS 5.8.2 on all seven,
+including `qap15_kkt` at `cond1 = 3.9e12`).
+
+**The cause is the stopping criterion.** `RefineOptions::default()` stopped
+on `EpsSqrtN`, `‖r‖₂ < ε·√n·‖b‖₂`, which is normwise and therefore dominated
+by the rows carrying the largest right-hand-side entries. MUMPS's `ICNTL(10)`
+refinement stops on the Arioli–Demmel–Duff *componentwise* backward error
+against `CNTL(2) = √ε` (`ref/mumps/src/dini_defaults.F:1094`). On a RHS
+spanning twelve orders — the shape an IPM produces near convergence, where
+the dual, primal and complementarity blocks differ by many orders — the two
+diverge by up to eleven orders and feral declared `Converged` without
+refining once:
+
+| matrix | feral ω, old default | MUMPS ω1 |
+|---|---:|---:|
+| `r05_kkt` | 9.520e-5 (0 steps) | 3.608e-16 |
+| `bratu3d` | 8.953e-6 (0 steps) | 2.844e-16 |
+| `cont-201` | 3.860e-7 (0 steps) | 2.728e-16 |
+
+**Decision.** The default is now
+`StopCriterion::EpsSqrtNAndBackwardError(DEFAULT_BACKWARD_ERROR_TARGET)`
+with the target set to `√ε` — MUMPS's `CNTL(2)`, the same number for the
+same purpose — so a default-configured `solve_refined` certifies at least
+what a default-configured MUMPS does.
+
+It is the **conjunction**, deliberately. Requiring both tests is strictly
+harder to satisfy than the old default, so no caller can receive a worse
+iterate than it did before, and the change ships without touching a single
+tolerance or residual gate. `EpsSqrtN` remains available and bit-for-bit
+unchanged for callers that want the historical behavior.
+
+**Cost, measured — and it is not free.** On the seven large matrices:
+well-scaled RHS identical to the old default (same steps, same iterates);
+badly-scaled RHS one extra step (5–14 ms) on the three worst, which then sit
+level with MUMPS at ~3e-16.
+
+That understates the corpus-wide cost. A controlled A/B over the 154,588
+benchmark matrices — same machine, only `Default for RefineOptions` changed —
+shows the median untouched and the tail paying: solve/MUMPS p90 0.15 → 0.20
+(+33%), p99 0.71 → 1.08 (+52%); solve/SSIDS geomean 0.94 → 1.06 (+13%), p90
+2.50 → 3.60 (+44%), p99 8.33 → 13.00 (+56%). Factor is unchanged within noise,
+which confirms the effect is the refinement loop rather than machine state.
+
+So this decision trades tail latency for componentwise correctness. It is
+recorded as such, not as a free improvement. Callers needing the old latency
+profile can pass `StopCriterion::EpsSqrtN` explicitly and accept the gap.
+
+**Rejected alternatives** (both in `dev/tried-and-rejected.md` with their
+failing cases): `BackwardError(√ε)` alone, which fails `tests/parity.rs` on
+ROSZMAN1_0241 because ω ≤ √ε can hold while the normwise residual is looser
+than the old rule delivered; and `BackwardError(f64::EPSILON)`, LAPACK
+`dgerfs`'s target, which stagnates or exhausts the step budget on five of
+seven large matrices under the badly-scaled RHS.
+
+**Regression coverage.** `tests/issue190_componentwise_default.rs`. The
+defect reproduces on the tracked parity corpus — `EpsSqrtN` leaves ω above
+√ε on 13 of 63 matrices, worst DEGENLPB_0046 at 359×√ε — and the new default
+drives all 63 to ω ≤ √ε.

@@ -1,0 +1,215 @@
+#+TITLE: Session journal 2026-08-21-01
+#+STARTUP: showeverything
+
+Continues 2026-08-20-01 across midnight. Standing instruction from the human:
+"we need to fix the deficiency gap with ma57/mumps if there is one because
+this is causing an issue on a class of problems in pounce. surprisingly, it
+works well for the vast majority of problems."
+
+* 00:40 :pivot-threshold:hypothesis:refuted:
+I had claimed feral's =pivot_threshold = 1e-8= was a six-order deficiency
+against MA57/MUMPS, whose *library* defaults are =CNTL(1) = 0.01=. I changed
+=src/numeric/factorize.rs:645= to =1e-2= on that basis.
+
+*The claim is wrong.* Ipopt does not use the library defaults. Read from
+=ref/Ipopt=:
+
+: IpMa27TSolverInterface.cpp:97    ma27_pivtol   default 1e-8
+: IpMa57TSolverInterface.cpp:205   ma57_pivtol   default 1e-8
+: IpMumpsSolverInterface.cpp:131   mumps_pivtol  default 1e-6
+
+Ipopt deliberately lowers pivtol *below* the library defaults, because in an
+IPM the accuracy is bought back by inertia correction and iterative
+refinement, not by pivoting hard. feral's 1e-8 already matches the MA27/MA57
+port that pounce is replacing, and =tests/issue_2_kkt_ls_init.rs:32=
+(=numeric_params_default_uses_sparse_pivot_threshold=) pins it for exactly
+that reason. That test is correct; I left it untouched.
+
+Reverted with =git checkout src/numeric/factorize.rs=. Recorded in
+=dev/tried-and-rejected.md=. No pivot-threshold change ships.
+
+* 01:20 :forceaccept:inertia:ruled-out:
+Two more candidate explanations for the pounce gap, both measured with
+=probe_forceaccept_residual= on the seven large matrices:
+
+- ForceAccept: =inertia.zero == 0= and =n_tiny == 0= on all seven. No pivot
+  was force-accepted, so the "we accepted a tiny pivot and ate the error"
+  story does not apply.
+- Inertia: feral's inertia matches canonical MUMPS 5.8.2 *exactly* on all
+  seven, including =qap15_kkt= at 22275/28605/0 with =cond1 = 3.9e12=.
+
+Also checked the escalation ladder: =pounce-feral/src/lib.rs:1368= does
+forward =increase_quality= into feral's =Solver::increase_quality()=, so
+Ipopt's =IncreaseQuality()= path is wired. Not the gap either.
+
+* 02:05 :measurement:artifact:correction:
+The "nine orders short on qap15_kkt" figure in
+=probe_vs_mumps_residual='s doc comment is an artifact of my own making: it
+compares feral *unrefined* against MUMPS *with* =ICNTL(10)=2= refinement on.
+
+Measured properly (feral refined vs MUMPS refined, well-scaled RHS,
+identical systems and identical =b=): feral matches or beats MUMPS on all
+seven. There is no factorization-quality gap on this corpus. Rewrote the
+probe's doc comment; the wrong number is not left standing anywhere.
+
+* 03:30 :issue-190:defect:found:
+*The gap is the stopping criterion, not the factorization.*
+
+=RefineOptions::default()= stopped on =EpsSqrtN=: =||r||_2 < eps*sqrt(n)*||b||_2=.
+That is *normwise*, so it is dominated by the rows carrying the largest
+right-hand-side entries. MUMPS's =ICNTL(10)= refinement instead stops on the
+Arioli-Demmel-Duff *componentwise* backward error against
+=CNTL(2) = sqrt(eps)= (=ref/mumps/src/dini_defaults.F:1094=).
+
+On a RHS spanning twelve orders (=v[i] = +/-10^((i%13)-6)=, the shape an IPM
+produces near convergence, where the dual / primal / complementarity blocks
+differ by many orders), feral reported =Converged= at step 0 while MUMPS,
+same matrix, same =b=, returned machine precision:
+
+: matrix    feral omega (0 steps)   MUMPS omega1
+: r05_kkt   9.520e-5                3.608e-16
+: bratu3d   8.953e-6                2.844e-16
+: cont-201  3.860e-7                2.728e-16
+
+Eleven orders, and feral never refined once because its test was already
+satisfied. This is the shape the human described: fine on the vast majority
+of problems (well-scaled RHS -> the two tests agree), broken on a class
+(badly-scaled RHS -> they diverge). In an IPM the small-|b_i| rows are the
+complementarity residuals of near-active constraints -- exactly the rows
+that set the step.
+
+* 04:15 :issue-190:design:rejected:
+First fix attempted: make =BackwardError(sqrt(eps))= the default outright.
+
+*Failed =tests/parity.rs=:*
+
+: ROSZMAN1_0241 residual: feral=4.805e-14 > max(K*mumps=2.077e-14, floor=1.000e-14) = 2.077e-14
+
+=omega <= sqrt(eps)= can be satisfied while the normwise residual is looser
+than the old rule delivered, so swapping one test for the other regresses
+callers that depend on the normwise bound. Shipping it would have required
+loosening that gate, which needs human approval and is not warranted here.
+
+Second candidate, =BackwardError(f64::EPSILON)= (LAPACK =dgerfs='s target):
+measured with =OMEGA_EPS=1 HARD_RHS=1= and rejected -- it stagnates or
+exhausts the step budget on *five of seven* large matrices (up to 10 steps),
+reproducing exactly the cost pathology #190 complained about, while
+=sqrt(eps)= converges in at most one step.
+
+Both recorded in =dev/tried-and-rejected.md=.
+
+* 05:40 :issue-190:implement:
+Shipped instead: a new =StopCriterion::EpsSqrtNAndBackwardError(f64)=, the
+*conjunction* of the two tests, as the default with
+=DEFAULT_BACKWARD_ERROR_TARGET = sqrt(eps)= (MUMPS's =CNTL(2)=, same number
+for the same purpose).
+
+The conjunction is the point. It is strictly harder to satisfy than the old
+default, so *no caller can get a worse iterate than before* -- which is why
+it ships without touching a single tolerance. Best-iterate selection is by
+smallest =||r||_2= and =best_omega= tracks the omega of that same iterate,
+so the conjunctive test is self-consistent.
+
+Four edits in =src/numeric/solve.rs=: the constant + =Default= impl, the new
+variant, an arm in both =reached= closures (single- and multi-RHS), and both
+=wants_omega= matches widened so omega is actually computed.
+
+* 06:30 :issue-190:measurement:
+Cost, seven large matrices, both RHS families:
+
+- Well-scaled RHS: *identical to the old default on all seven* -- same step
+  counts, same iterates. The extra conjunct is already satisfied.
+- Badly-scaled RHS: the three worst go to 2.655e-16 / 3.170e-16 / 2.909e-16,
+  level with MUMPS, for *one* extra step each (5-14 ms).
+- Worst-case step count across the whole corpus: still 2, the same bound
+  =EpsSqrtN= already had.
+
+So the answer to the standing bar is: this is a *correctness* fix that is
+free on the well-scaled majority and costs one solve on the class that was
+broken. Full suite green: 953 passed, 0 failed, 112 suites.
+
+* 08:30 :issue-190:test:regression:
+The seven discovery matrices are gitignored (=tests/data/large/*=), so the
+regression test has to live on the tracked parity corpus. Wrote
+=probe_omega_parity_corpus= to find out whether the defect reproduces there.
+
+*It does: =EpsSqrtN= leaves omega > sqrt(eps) on 13 of 63 tracked matrices.*
+Worst offenders, as omega/sqrt(eps):
+
+: DEGENLPB_0046  3.590e2      DEGENLPA_0065  1.270e2
+: DEGENLPB_0045  3.008e2      ACOPP14_0003   4.308e1
+: DEGENLPB_0047  1.802e2
+
+and the new default fixes every one of them -- e.g. DEGENLPB_0047
+2.685e-6 -> 2.146e-16 in 1 step, HYDCAR20_0000 4.046e-8 -> 2.166e-16 in 2,
+HIMMELBJ_0032 4.554e-8 -> 2.035e-16 in 2.
+
+*Correction to an earlier reading of this probe:* I had noted HAHN1_0004
+(1.373e-8), HS109_0009 (4.844e-9) and VESUVIOU_0030 (7.289e-9) as "still
+above sqrt(eps)" and planned to scope the assertion around them. They are
+not -- all three are below sqrt(eps) = 1.4901e-8. I had compared them
+against =eps=, not =sqrt(eps)=. No scoping needed; the blanket assertion
+holds across the corpus.
+
+New =tests/issue190_componentwise_default.rs=, three tests, 0.64 s:
+
+1. =default_certifies_backward_stability_on_badly_scaled_rhs= -- every
+   factorable parity matrix (63) comes back with omega <= sqrt(eps).
+2. =normwise_criterion_alone_is_not_enough= -- pins five named fixtures
+   where =EpsSqrtN= alone leaves omega > 10*sqrt(eps), so the fixtures
+   cannot silently stop exercising the defect.
+3. =default_is_never_weaker_than_the_historical_rule= -- the conjunction
+   never produces a worse componentwise error than =EpsSqrtN= on any
+   corpus matrix. This is the property that lets it ship without approval.
+
+External oracle for the whole thing is canonical MUMPS 5.8.2, recorded in
+=dev/research/issue-190-refine-target.md=; the omega implementation is
+LAPACK =dgerfs='s guarded formula, not something I invented alongside it.
+
+* 12:05 :bench:control:unfavorable:regression:
+Session-end bench. *The solve tail regressed, my change caused it, and the
+control proves it rather than leaving it as a hypothesis.*
+
+=src/bin/bench.rs:1985= times the sparse solve with =RefineOptions::default()=,
+so the new criterion is directly in the measured path. Ran the bench with the
+shipped default, then reverted =Default for RefineOptions= to =EpsSqrtN=,
+rebuilt, and re-ran on the same quiet machine:
+
+: ratio                control (EpsSqrtN)   shipped default    delta
+: factor/MUMPS p90     1.54                 1.56               +1.3%  (noise)
+: solve/MUMPS  geomean 0.08                 0.08               none
+: solve/MUMPS  p50     0.08                 0.08               none
+: solve/MUMPS  p90     0.15                 0.20               +33%
+: solve/MUMPS  p99     0.71                 1.08               +52%
+: solve/SSIDS  geomean 0.94                 1.06               +13%
+: solve/SSIDS  p90     2.50                 3.60               +44%
+: solve/SSIDS  p99     8.33                 13.00              +56%
+
+*The shape is exactly what the design predicts.* Geomean and p50 are
+identical to three decimals -- the well-scaled majority never needed the
+extra conjunct and does not pay for it. The tail pays, because that is where
+the matrices live whose componentwise error was above sqrt(eps) and which
+now actually refine. On the tracked parity corpus that is 13 of 63 (21%),
+which is the right order to move a p90.
+
+Factor is unchanged within noise (1.54 vs 1.56), as it must be -- the change
+is confined to the refinement loop's stopping test. That also validates the
+control: if machine state were driving the solve numbers it would have
+moved factor too, and it did not.
+
+*Conclusion, stated against the standing bar.* This is a measured
+performance *cost* at the tail, not a gain. It buys MA57/MUMPS componentwise
+parity on a class of systems where feral was returning omega up to 9.5e-5
+and reporting =Converged=. I am not going to describe a 33-56% tail
+regression as free. Whether that trade ships is the human's call; the
+alternative is to keep =EpsSqrtN= as the default and make the conjunction
+opt-in, which costs pounce the fix it asked for.
+
+Unlike 2026-08-20-02, no part of this is attributed to machine state.
+
+* 12:20 :bench:inertia:gate:
+Inertia gate holds: *154531/154590 (100.0%) match vs MUMPS*. All four Phase
+2.8.1 exit partitions PASS and sit at the bottom of the observed band --
+sparse small-frontal 1.56, sparse medium 1.56, dense small-frontal 1.58,
+dense medium 2.00, against the 08-19-05 baseline of 1.58/1.58/1.58/2.00.
+Factor/MUMPS max fell 71.94 -> 11.05, the machine-quietness signature.

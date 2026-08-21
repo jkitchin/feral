@@ -102,14 +102,37 @@ All notable changes to FERAL will be documented in this file.
 - **It cannot regress an existing caller.** The new criterion is strictly
   harder to satisfy than the old one, so the default can only refine *more*,
   never less. No accuracy gate was loosened.
-- **What it costs, measured.** Seven matrices, n up to 180,900, both RHS
-  families. With a **well-scaled** RHS: identical to the old default on all
-  seven — same step counts, same residuals, no added work. With a
+- **What it costs, measured on the seven-matrix set.** n up to 180,900, both
+  RHS families. With a **well-scaled** RHS: identical to the old default on
+  all seven — same step counts, same residuals, no added work. With a
   **badly-scaled** RHS: `r05_kkt`, `bratu3d` and `cont-201` each take one
   extra correction step (5-14 ms) and their componentwise error drops to
   `2.7e-16`, `3.2e-16` and `2.9e-16`, level with MUMPS. Worst-case step count
   across all fourteen combinations is still 2, the bound `EpsSqrtN` already
   had.
+- **What it costs on the full corpus: a real tail regression.** The
+  seven-matrix figures above understate it. A controlled A/B over the 154,588
+  benchmark matrices — same machine, same run, only `Default for
+  RefineOptions` changed — gives:
+
+  | ratio | `EpsSqrtN` | new default | delta |
+  |---|---:|---:|---:|
+  | solve/MUMPS geomean | 0.08 | 0.08 | none |
+  | solve/MUMPS p50 | 0.08 | 0.08 | none |
+  | solve/MUMPS p90 | 0.15 | 0.20 | **+33%** |
+  | solve/MUMPS p99 | 0.71 | 1.08 | **+52%** |
+  | solve/SSIDS geomean | 0.94 | 1.06 | **+13%** |
+  | solve/SSIDS p90 | 2.50 | 3.60 | **+44%** |
+  | solve/SSIDS p99 | 8.33 | 13.00 | **+56%** |
+
+  The median is untouched — the well-scaled majority never needed the extra
+  conjunct. The tail pays, because that is where the matrices sit whose
+  componentwise error was above `sqrt(eps)` and which now actually refine
+  (13 of 63 on the tracked parity corpus). Factor ratios are unchanged within
+  noise, confirming the effect is the refinement loop and not machine state.
+  **This is an accuracy-for-latency trade, not a free fix.** Callers that need
+  the old latency profile and can accept the componentwise gap can pass
+  `StopCriterion::EpsSqrtN` explicitly.
 - **Rejected on measurement.** A *pure* `BackwardError(sqrt(eps))` default was
   tried first: it fixes the componentwise gap but stops earlier than
   `EpsSqrtN` normwise, and `tests/parity.rs` caught it — `ROSZMAN1_0241` at
