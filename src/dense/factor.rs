@@ -456,15 +456,13 @@ fn multiplier_bound(params: &BunchKaufmanParams) -> f64 {
 /// This used to compare against a fixed `1e6` regardless of the
 /// threshold in force, which made it a statement about the *magnitude*
 /// of `L` rather than about growth, and therefore about the caller's
-/// scaling rather than about the factorization. Measured under pounce on
-/// a 126028-order interior-point KKT (pounce gh#710 follow-up), that
-/// fired on 91 of 108 factorizations whose actual growth factor
-/// `max|L| / max|A|` was 8.7e-8 — `L` entries eight orders *smaller*
-/// than the matrix's own — purely because the matrix carried entries
-/// around 1e13 and `1e6` is not a scale-free number. At the same
-/// caller's `u = 1e-8` the promised bound is 1e8, and the largest `|L|`
-/// observed anywhere in that run was 5.1e7: inside the contract, every
-/// time. The flag now says so.
+/// scaling rather than about the factorization. A matrix carrying
+/// entries around `1e13` trips a fixed `1e6` on factorizations whose
+/// actual growth factor `max|L| / max|A|` is orders of magnitude *below*
+/// one — `L` entries smaller than the matrix's own — purely because
+/// `1e6` is not a scale-free number. At a caller's `u = 1e-8` the
+/// promised bound is `1e8`, so such an `|L|` is inside the contract and
+/// should not flag. The flag now says so.
 fn flag_growth_for_refinement(l: &[f64], params: &BunchKaufmanParams, needs_refinement: &mut bool) {
     if *needs_refinement {
         return;
@@ -5860,10 +5858,9 @@ mod growth_flag_tests {
     }
 
     /// The bound tracks the threshold rather than a constant. At
-    /// `u = 1e-8` the promise is `|L| <= 1e8`, so an `|L|` of 5.1e7 —
-    /// the largest observed across 108 factorizations of pounce's
-    /// 126028-order KKT — is inside the contract and must not flag,
-    /// even though it is fifty times the old fixed `1e6`.
+    /// `u = 1e-8` the promise is `|L| <= 1e8`, so an `|L|` of 5.1e7 is
+    /// inside the contract and must not flag, even though it is fifty
+    /// times the old fixed `1e6`.
     #[test]
     fn the_bound_follows_the_pivot_threshold() {
         let inside = vec![1.0, 5.07e7, -2.46e6];
@@ -5872,17 +5869,17 @@ mod growth_flag_tests {
         assert!(!flag, "|L| = 5.07e7 is inside the 1/u = 1e8 promise");
 
         // The same L against the old constant: this is the regression
-        // being fixed, and it is why 84% of that run was flagged.
+        // being fixed: a scale-free bound and a fixed one disagree
+        // here, and the fixed one is wrong.
         let mut flag = false;
         flag_growth_for_refinement(&inside, &no_threshold(), &mut flag);
         assert!(flag, "the fallback still uses the absolute constant");
     }
 
-    /// ...and a genuine violation still flags. `deb7` (pounce's fixture
-    /// corpus, exact-Hessian leg) reaches `max|L| = 4.2e13` at the same
-    /// `u = 1e-8`, five orders past the promise: the pivoting did not
-    /// deliver its own contract there, which is precisely the condition
-    /// the flag exists to report.
+    /// ...and a genuine violation still flags. A `max|L|` of `4.2e13` at
+    /// `u = 1e-8` is five orders past the promise: the pivoting did not
+    /// deliver its own contract, which is precisely the condition the
+    /// flag exists to report.
     #[test]
     fn a_multiplier_past_the_promise_still_flags() {
         let violating = vec![1.0, 4.24e13];
