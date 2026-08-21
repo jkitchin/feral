@@ -36,9 +36,36 @@ All notable changes to FERAL will be documented in this file.
   computes a Hager-Higham condition estimate costing 3-5 extra solves, which
   would multiply exactly the cost this change exists to cut. Ask for it
   explicitly via `solve_sparse_refined_with_diagnostics` when you want it.
-- **Migration.** `RefineOptions::default()` is unchanged and existing callers
-  compile unchanged — the new return value is not `#[must_use]`. Build a
-  criterion with `RefineOptions::with_target(t)`,
+- **Migration — BREAKING. An earlier version of this entry said the opposite
+  and was wrong.** It claimed "existing callers compile unchanged — the new
+  return value is not `#[must_use]`." That is false, and a downstream build
+  (pounce) disproved it. `#[must_use]` governs only whether *discarding* a
+  value warns at statement position; it does nothing for the value's type.
+  Three `Solver` methods now return `Result<RefineOutcome, FeralError>` where
+  they returned `Result<(), FeralError>`:
+  - `Solver::solve_refined_into`
+  - `Solver::solve_many_refined_into`
+  - the parallel refined entry point reached from `solve_refined_into`
+
+  Any caller that uses the result in *expression* position — a `match` arm, a
+  tail expression in a function returning `Result<(), _>`, a `let () =`
+  binding — fails to compile with `E0308: mismatched types`. Reported
+  downstream as incompatible `match` arms at `pounce-feral/src/lib.rs:1257`.
+
+  The fix at a call site that does not want the outcome is `.map(|_| ())`:
+
+  ```rust
+  // before
+  self.solver.solve_refined_into(m, rhs, x_out, opts)
+  // after, when the outcome is not wanted
+  self.solver.solve_refined_into(m, rhs, x_out, opts).map(|_| ())
+  ```
+
+  Adding `stop` to `RefineOptions` *is* source-compatible for callers that
+  build options through `with_max_steps` / the constructors, so the return
+  type is the only break. Under 0.x semver this makes the next release
+  **0.18.0**, not 0.17.1.
+- **Building a criterion.** `RefineOptions::with_target(t)`,
   `RefineOptions::with_backward_error(t)`, or `.and_stop(...)` /
   `.and_max_steps(...)` on an existing value.
 - **Note on scale.** `||r||_2 / ||b||_2` can look perfect while the solution
@@ -133,6 +160,24 @@ All notable changes to FERAL will be documented in this file.
   **This is an accuracy-for-latency trade, not a free fix.** Callers that need
   the old latency profile and can accept the componentwise gap can pass
   `StopCriterion::EpsSqrtN` explicitly.
+- **On one real workload it is not a tail effect at all — it is the whole
+  run.** Measured downstream in pounce on `laptime` (58,014 variables, L-BFGS,
+  126,028-dimension KKT, 60 IPM iterations), one binary, arms differing only
+  in the `StopCriterion` handed to `RefineOptions`:
+
+  | stop criterion | overall | factor | back-solve | vs `EpsSqrtN` |
+  |---|---:|---:|---:|---:|
+  | `EpsSqrtN` (0.17.0's default) | 58.6 s | 9.27 s | 46.7 s | — |
+  | refinement off | 13.9 s | 5.85 s | 5.44 s | -76% |
+  | `RelativeResidual(1e-10)` | 22.8 s | 6.48 s | 13.77 s | -61% |
+  | **this default** | 69.4 s | 10.39 s | 56.4 s | **+18%** |
+
+  +18% overall and +21% on back-solve against 0.17.0, on every iteration —
+  not a p99 effect. A second model (`dirichlet120`, exact Hessian) is
+  factorization-dominated and does not discriminate: all four arms reach
+  `Optimal` in 56 iterations at the same objective. Anyone whose profile
+  resembles `laptime` should set `StopCriterion` explicitly rather than
+  inherit this default.
 - **Rejected on measurement.** A *pure* `BackwardError(sqrt(eps))` default was
   tried first: it fixes the componentwise gap but stops earlier than
   `EpsSqrtN` normwise, and `tests/parity.rs` caught it — `ROSZMAN1_0241` at
