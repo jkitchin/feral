@@ -1,84 +1,84 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-20T17:40:42Z
+Generated: 2026-08-21T03:54:19Z
 
 ## Latest Session
-File: dev/sessions/2026-08-20-02.md
+File: dev/sessions/2026-08-20-03.md
 ```
-# Session 2026-08-20-02
+# Session 2026-08-20-03
 
-## Unfavorable comparison, reported first (per CLAUDE.md)
+## Unfavorable result, reported first (per CLAUDE.md)
 
-The session-end bench is at or slightly above the top of the previously
-observed band on the factor partitions:
+**Issue #190's stated premise does not reproduce on this corpus, and the
+feature built for it is not a performance gain.**
 
-| bucket | baseline 08-19-05 | 08-20-01 runs | this run |
-|---|---:|---:|---:|
-| sparse small-frontal p90 | 1.58 | 1.54 / 1.61 | **1.65** |
-| sparse medium p90 | 1.58 | 1.54 / 1.61 | **1.65** |
-| dense small-frontal p90 | 1.58 | 1.59 / 1.64 | **1.66** |
-| dense medium p90 | 2.00 | 1.96 / 1.98 | **2.04** |
+#190 argues the hardwired `ε·√n` convergence target is unreachable on large
+ill-conditioned systems, so every refined solve runs the full 10-step budget
+and pays for iterations that buy nothing. Measured (`probe_refine_stop_criterion`,
+best-of-5 wall, seven matrices, well-scaled RHS):
 
-All four still PASS their targets, and `solve/MUMPS` geomean and p50 held at
-0.08 exactly. But this is the worst of the four runs recorded across the two
-sessions, and it is +4.4% on the sparse buckets against the 08-19-05 baseline.
+| matrix | n | default steps | stop | ω |
+|---|---:|---:|---|---:|
+| r05_kkt | 14,842 | 0 | Converged | 4.546e-13 |
+| qap15_kkt | 50,880 | 2 | Converged | 2.690e-16 |
+| dirichlet120_kkt | 54,363 | 0 | Converged | 1.679e-14 |
+| cont-201 | 80,595 | 0 | Converged | 8.720e-14 |
+| cont5_late_kkt | 180,900 | 1 | Converged | 1.711e-16 |
+| bratu3d | 27,792 | 0 | Converged | 2.467e-15 |
+| bcsstk38 | 8,032 | 0 | Converged | 1.324e-15 |
 
-**This session's change cannot mechanically account for it.** The bench times
-factorization and a *single-RHS* solve; the change is confined to
-`solve_sparse_core_many_into` and the panel GEMM reached only from
-`fwd_blas3`/`back_blas3`, which the multi-RHS path alone calls. The
-single-RHS core (`solve_sparse_core_into`) and the whole factorization are
-untouched.
+Zero to two steps, never at the cap. There is no wasted-iteration saving to
+claim, and the feature must not be described as one.
 
-The likely cause is machine state — the box had been under sustained compile
-and benchmark load for hours before this run. That is a hypothesis, not a
-result: I did not run a control on stashed code to test it, as was done on
-08-20-01 to refute a similar attribution.
+Stated in the other direction so the limit is on the record: the `n = 118,276`
+system #190 cites is a pounce *runtime* KKT and is not in the local corpus
+(largest local matrix is `c-big`, `n = 345,241`, not in this set). The premise
+is **untested at its own scale**, not refuted at it.
 
-> **RESOLVED, same day.** The cold re-run (built cold, 180 s settle, machine
-> quiet) put all four buckets at the *bottom* of the band: sparse
-> small-frontal **1.54**, sparse medium **1.54**, dense small-frontal
-> **1.59**, dense medium **1.97**. Two independent machine-state signatures
-> confirm the hot run rather than the change: `factor/MUMPS` max fell
-> **71.94 -> 9.10** and the worst-offender list changed identity entirely
-> (GAUSS2/CRESC100 cold vs HAIFAM/HAHN1 hot); `factor/SSIDS` p99 fell
-> 1.11 -> 0.95. `a0b4d64` did not regress the factor path.
+The measured *cost* of the new criteria is ~2x on the refinement wall
+(0.39x–0.61x "vs def"), roughly one extra solve, factor excluded. The only
+speedups measured are the caller deliberately buying less accuracy: qap15 easy
+at `BackwardError(1e-10)` is 1.45x by stopping at ω 8.755e-12 instead of
+2.690e-16; qap15 hard at `RelativeResidual(1e-12)` is 1.49x and *worse*
+(ω 8.038e-10 vs the default's 1.229e-10).
+
+Against the standing bar for this thread — "rigorous, thoroughly correct, and
+result in performance gains, or we will not include it in a release" — #190
+clears the first two and **fails the third**. Ship-or-not is a human call; see
+"Next Session Should".
 
 ## Goal
 
-Answer issue #189 item 4: is `BLAS3_NRHS_THRESHOLD = 32` costing pounce
-anything? Under the standing bar for this work — rigorous, thoroughly
-correct, and a real performance gain, or it does not ship.
+Act on issue #190: the `ε·√n` refinement target is a hardwired constant with
+no principled value; let the caller say what "converged" means.
 
 ## Accomplished
 
-### The threshold is fine. There was a defect underneath it.
-
-`BLAS3_NRHS_THRESHOLD` is unchanged at 32. What the investigation found
+### `StopCriterion`: the caller says what converged means (`f547bc5`)
 ```
 
 ## Git Status
 ```
+65f488c docs(refine): correct #190's premise against the corpus measurement
+f547bc5 feat(refine): let the caller say what "converged" means (issue #190)
+849caea fix(dense): flag L-growth against the pivot threshold's own promise
+7de1a93 docs: cold bench resolves the drift; masked-tile follow-up rejected as slower
 2637964 docs: state which pounce call sites the padded stride actually reaches
-ffb5862 docs: session checkpoint 2026-08-20-02 (multi-RHS stride alignment)
-a0b4d64 perf(solve): align the multi-RHS row stride to a cache line
-c34475e docs: session checkpoint 2026-08-20-01 (measurement corrections, #189 Step 1)
-c09da70 bench: time the solve core hosts actually run (#189 item 1)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
@@ -86,66 +86,90 @@ test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 445 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.65s
+test result: ok. 456 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.66s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-20-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-20-03.md)
 
+
+=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
 
 ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.46       0.33       1.65       4.13      71.94
-solve/MUMPS        153560       0.08       0.08       0.16       0.88      25.59
-factor/SSIDS       154500       0.04       0.03       0.34       1.11      23.34
-solve/SSIDS        154500       0.96       1.00       2.83      10.25     583.65
+factor/MUMPS       153560       0.44       0.30       1.56       3.25       9.20
+solve/MUMPS        153560       0.08       0.08       0.15       0.73       2.60
+factor/SSIDS       154500       0.04       0.03       0.32       0.94       1.96
+solve/SSIDS        154500       0.94       1.00       2.50       8.67      29.00
 nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
 nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.66     <= 2.0     PASS
-medium (<500)            152145     2.04     <= 3.0     PASS
+small-frontal (<200)     147982     1.58     <= 2.0     PASS
+medium (<500)            152145     2.00     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.65     <= 2.0     PASS
-medium (<500)            153560     1.65     <= 3.0     PASS
+small-frontal (<200)     153455     1.56     <= 2.0     PASS
+medium (<500)            153560     1.56     <= 3.0     PASS
+
+Quiet machine, nothing else running. This is the best of the recent runs and
+sits at the bottom of the observed band — better than 08-20-02's hot run on
+every bucket and level with its cold re-run:
+
+| bucket | 08-19-05 baseline | 08-20-02 hot | 08-20-02 cold | this run |
+|---|---:|---:|---:|---:|
+| sparse small-frontal p90 | 1.58 | 1.65 | 1.54 | **1.56** |
+| sparse medium p90 | 1.58 | 1.65 | 1.54 | **1.56** |
+| dense small-frontal p90 | 1.58 | 1.66 | 1.59 | **1.58** |
+| dense medium p90 | 2.00 | 2.04 | 1.97 | **2.00** |
+
+All four PASS. `solve/MUMPS` geomean 0.08 and p50 0.08 unchanged. The
+machine-state signature the previous session identified is visible again in
+the right direction: `factor/MUMPS` max is **9.20** here against 71.94 on the
+hot run, and `factor/SSIDS` p99 is 0.94 against 1.11.
+
+Neither of this session's commits should touch the bench path — the bench
+times factorization and a single-RHS solve, `849caea` changes only which
+matrices set an advisory `needs_refinement` flag (read by nobody in the bench),
+and `f547bc5` adds a criterion whose default is bit-for-bit the old behavior.
+The numbers are consistent with that.
 
 ```
 
 ## Recent Decisions
-Appended rather than editing the entry above, per the append-only rule. The
-preceding entry states the padded-stride decision correctly but says nothing
-about how much of a real host it reaches; a reader could take "1.36x on the
-multi-RHS solve" for "1.36x on pounce". It is much narrower than that.
+`n = 118,276` system #190 cites is a pounce runtime KKT and is not in the
+local corpus (largest local is `c-big`, `n = 345,241`, not in this set), so
+the premise is untested at its own scale rather than refuted at it.
 
-Prompted by pounce issue #698, comment 5359027510, which named a multi-RHS
-call site the 2026-08-20-02 checkpoint had not enumerated.
+**What the measurement did establish is a correctness gap.** With a RHS
+whose entries span `1e-6..1e6`, the default declares `Converged` at normwise
+`rel` of `1e-14..1e-17` while the componentwise backward error is up to
+eleven orders worse: r05_kkt `9.5e-5`, bratu3d `9.0e-6`, cont-201 `3.9e-7`,
+dirichlet120_kkt `4.3e-10`, bcsstk38 `1.1e-10`, qap15_kkt `1.2e-10`. One
+`BackwardError` step lands all of them at `~3e-16`. The default cannot see
+this by construction: `||r||_2/||b||_2` is dominated by the rows where
+`|b_i| ~ 1e6`.
 
-pounce has three multi-RHS-capable call sites. The padded stride reaches one:
+**Cost.** ~2x on the refinement wall time (0.39x–0.61x "vs def"), factor
+excluded — roughly one extra solve. The only measured speedups are the
+caller deliberately buying less accuracy: qap15 easy at
+`BackwardError(1e-10)` is 1.45x by stopping at omega `8.8e-12` instead of
+`2.7e-16`; qap15 hard at `RelativeResidual(1e-12)` is 1.49x and *worse*
+(omega `8.0e-10` vs the default's `1.2e-10`).
 
-| pounce call site | nrhs | reached? |
-|---|---|---|
-| `std_aug_system_solver.rs:497,625` (IPM) | 1, hardcoded | no |
-| `pounce-feral/src/lib.rs:1004,1006` (batched backsolve) | 6 | no — below the threshold |
-| `pounce-feral/src/schur.rs:303,304` | `n_s` | yes, when `n_s >= 32` |
+**Decision.** The feature stays, documented as an accuracy/observability
+knob with the measured cost stated, not as a speedup. `CHANGELOG.md`,
+`README.md` and the `solve_sparse_refined` doc comment were corrected —
+all three had asserted the unreachable-target premise as fact.
 
-The batched backsolve's width is `limited_memory_max_history`, which defaults
-to 6 (`alg_builder.rs:1037`, `:1508`). Below `BLAS3_NRHS_THRESHOLD = 32`, so
-it takes the rank-1 kernel, which the change does not touch. That dispatch is
-already correct — measured rank1/blas3 at `nrhs = 6` is 0.68-0.86 across all
-seven probe matrices, i.e. rank-1 wins — so there is no unclaimed gain there
-and no argument for lowering the threshold to capture it.
-
-The Schur path is the one that benefits, and it can be wide:
-`schur_aug_system_solver.rs:36` sets `DEFAULT_MAX_SCHUR_FRAC = 0.5`, so `n_s`
-reaches half the KKT dimension before the backend refuses the partition.
-
-**Consequence for release decisions:** the 1.36x figure is a property of the
-multi-RHS solve at `nrhs >= 32` and not a multiple of 8. It is not a pounce
-end-to-end number and must not be quoted as one.
+**Documented caveat, new.** An unreachable *componentwise* target has the
+identical failure mode the old constant had. qap15_kkt with a badly-scaled
+RHS and `BackwardError(1e-14)` runs 8 steps, exits `Stagnated` at omega
+`4.2e-11`, and costs 0.32x for nothing; `BackwardError(1e-10)` reaches
+`4.4e-11` in 3 steps. The knob does not remove the need to read `stop`.
 
 ## Recent Tried-and-Rejected
 **Why, as far as the measurement shows.** Pre-mask, cost was a pure function
@@ -274,6 +298,7 @@ tests/issue128_supernode_nrow.rs
 tests/issue177_parallel_entry_point_core.rs
 tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
+tests/issue190_refine_target.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
@@ -323,7 +348,5 @@ tests/sqd_fast_path.rs
 tests/static_assembly_maps.rs
 tests/stress_tests.rs
 tests/symbolic_profiler.rs
-tests/task_plan_parity.rs
-tests/threshold_consistency.rs
-tests/tiny_fast_path.rs
-```
+
+(truncated from      354 lines to 350 line budget)
