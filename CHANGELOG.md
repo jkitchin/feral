@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed - `needs_refinement` now measures growth against the pivot threshold, not a fixed 1e6
+
+- **What changed.** `Factors::needs_refinement` was set whenever any
+  `|L_ij| > 1e6`. That is a statement about the *magnitude* of `L`, which is
+  a property of the caller's scaling, not about growth, which is a property
+  of the factorization. It now compares against `1/u`, the multiplier bound
+  that threshold partial pivoting with `pivot_threshold = u` actually
+  promises. With no threshold in force (`u = 0`) the factorization makes no
+  such promise and the old absolute `1e6` remains as the fallback.
+- **Why it is the right bound.** TPP accepts a candidate only within a factor
+  `u` of its column maximum, so `|L_ij| <= 1/u` is the contract. Exceeding it
+  means the pivoting did not deliver its own guarantee on this matrix, which
+  is exactly when plain forward/back substitution is untrustworthy. The bound
+  also moves with the threshold, so `Solver::increase_quality` walking `u`
+  from 1e-8 towards `pivtol_max = 0.5` tightens the signal as it tightens the
+  promise.
+- **Who is affected.** Callers reading `factors.needs_refinement` on
+  badly-scaled systems will see far fewer spurious `true`s. A genuine
+  violation still flags: at `u = 1e-8` a `max|L|` of 4.2e13 is five orders
+  past the promise and sets the flag as before.
+- Covered by four new cases in `growth_flag_tests`, including that the same
+  `L` is accepted at `u = 1e-8` and rejected at `u = 0.5`.
+
 ### Fixed - multi-RHS solve was up to 1.6x slower when `nrhs` was not a multiple of 8
 
 - **What changed.** The row-major multi-RHS work buffers (`y`, `w`) used a
