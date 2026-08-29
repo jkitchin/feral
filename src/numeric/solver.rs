@@ -113,6 +113,21 @@ pub enum QualityLevel {
     Exhausted,
 }
 
+/// Factory snapshot of the two parameters `increase_quality`
+/// mutates, taken on the transition out of `QualityLevel::Baseline`
+/// so `reset_quality` can restore them exactly (issue #192).
+///
+/// Snapshotted at the start of the ladder rather than at
+/// construction: the `with_*` builders are consuming and run *after*
+/// `with_params`, so a construction-time snapshot would record
+/// pre-builder values and a reset would silently discard the
+/// caller's configuration.
+#[derive(Debug, Clone)]
+struct QualityBaseline {
+    scaling: ScalingStrategy,
+    pivot_threshold: f64,
+}
+
 /// Structural fingerprint used to detect when the cached
 /// `SymbolicFactorization` is stale. Two genuinely identical
 /// patterns produce the same fingerprint by construction; the
@@ -189,6 +204,10 @@ pub struct Solver {
     snode_params: SupernodeParams,
     pivtol_max: f64,
     quality_level: QualityLevel,
+    /// Parameters to restore in `reset_quality`. `None` while at
+    /// `QualityLevel::Baseline`; `Some` for the duration of an
+    /// escalation. See `QualityBaseline`.
+    quality_baseline: Option<QualityBaseline>,
     last_symbolic: Option<SymbolicFactorization>,
     last_factors: Option<SparseFactors>,
     last_inertia: Option<Inertia>,
@@ -423,6 +442,7 @@ impl Solver {
             snode_params: sn,
             pivtol_max: 0.5,
             quality_level: QualityLevel::Baseline,
+            quality_baseline: None,
             last_symbolic: None,
             last_factors: None,
             last_inertia: None,
@@ -1876,7 +1896,8 @@ impl Solver {
     }
 
     /// Two-stage quality escalation. Persistent across `factor()`
-    /// calls. Returns `false` when both stages are exhausted.
+    /// calls until [`Solver::reset_quality`] reverts it. Returns
+    /// `false` when both stages are exhausted.
     /// Mirrors `IpTSymLinearSolver::IncreaseQuality`.
     ///
     /// Stage 1 (`Baseline → ScalingEnabled`): if scaling strategy
@@ -1903,6 +1924,13 @@ impl Solver {
         match self.quality_level {
             QualityLevel::Exhausted => false,
             QualityLevel::Baseline => {
+                // Leaving Baseline: snapshot what the caller
+                // configured so `reset_quality` can restore it
+                // exactly (issue #192).
+                self.quality_baseline = Some(QualityBaseline {
+                    scaling: self.numeric_params.scaling.clone(),
+                    pivot_threshold: self.numeric_params.bk.pivot_threshold,
+                });
                 // Stage 1: flip Identity → InfNorm if applicable.
                 if matches!(self.numeric_params.scaling, ScalingStrategy::Identity) {
                     self.numeric_params.scaling = ScalingStrategy::InfNorm;
@@ -1936,6 +1964,47 @@ impl Solver {
         } else {
             QualityLevel::PivotRaised
         };
+    }
+
+    /// Revert every escalation applied by [`Solver::increase_quality`]
+    /// and return to `QualityLevel::Baseline`. Returns `true` if an
+    /// escalation was undone, `false` if the solver was already at
+    /// `Baseline` (a no-op).
+    ///
+    /// Restores the scaling strategy and `bk.pivot_threshold` the
+    /// caller had configured when the ladder started, so
+    /// `reset_quality` followed by `increase_quality` retraces the
+    /// same rungs a freshly constructed `Solver` would. Valid from
+    /// any level, `Exhausted` included.
+    ///
+    /// Issue #192. Ipopt has no counterpart, because MA57 answers
+    /// `IncreaseQuality` by raising `pivtol` toward `pivtolmax` —
+    /// monotone in robustness, so leaving it raised for the rest of a
+    /// solve can only make later factorizations safer. FERAL's rungs
+    /// (`Identity → InfNorm`, then `pivot_threshold^0.75`) change
+    /// *which pivots are taken*: the factorization is different, not
+    /// uniformly better, and persisting it changes the caller's whole
+    /// remaining trajectory. An escalation that rescues one hard
+    /// system can cost a later one its verdict. This lets a caller
+    /// bound the escalation's lifetime — re-baselining at a major
+    /// iteration, or on entering a restoration sub-problem — without
+    /// FERAL having to know anything about the caller's algorithm.
+    ///
+    /// Touches nothing but the escalated parameters and the level.
+    /// In particular the cached symbolic factorization survives (it is
+    /// scaling-invariant since scaling moved to the numeric phase), so
+    /// re-baselining costs no re-analysis, exactly as escalating costs
+    /// none.
+    pub fn reset_quality(&mut self) -> bool {
+        match self.quality_baseline.take() {
+            Some(baseline) => {
+                self.numeric_params.scaling = baseline.scaling;
+                self.numeric_params.bk.pivot_threshold = baseline.pivot_threshold;
+                self.quality_level = QualityLevel::Baseline;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Test/diagnostic accessor for the current pivot threshold.
@@ -2914,6 +2983,128 @@ mod tests {
             assert!(steps < 20, "did not exhaust within 20 steps");
         }
         assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+    }
+
+    /// R1 — `reset_quality` at `Baseline` is a no-op and says so.
+    ///
+    /// Issue #192. A caller that re-baselines unconditionally at a
+    /// loop boundary must be able to do so without first reading
+    /// `quality_level()`, and must be able to tell from the return
+    /// value whether anything was actually undone.
+    #[test]
+    fn r1_reset_quality_at_baseline_is_noop() {
+        let mut s = solver_with_scaling(ScalingStrategy::Identity);
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+
+        assert!(!s.reset_quality(), "nothing to undo at Baseline");
+
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::Identity));
+        assert_eq!(s.pivot_threshold(), 0.0);
+    }
+
+    /// R2 — reset undoes the stage-1 `Identity → InfNorm` flip.
+    #[test]
+    fn r2_reset_quality_undoes_stage_one_scaling_flip() {
+        let mut s = solver_with_scaling(ScalingStrategy::Identity);
+        assert!(s.increase_quality());
+        assert_eq!(s.quality_level(), QualityLevel::ScalingEnabled);
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
+
+        assert!(s.reset_quality(), "an escalation was undone");
+
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::Identity));
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+        assert_eq!(s.pivot_threshold(), 0.0, "stage 1 never moved the pivot");
+    }
+
+    /// R3 — reset undoes an arbitrarily deep stage-2 pivot ladder.
+    #[test]
+    fn r3_reset_quality_undoes_pivot_ladder() {
+        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
+        for _ in 0..3 {
+            assert!(s.increase_quality());
+        }
+        assert_ne!(s.pivot_threshold(), 0.0, "ladder actually moved");
+
+        assert!(s.reset_quality());
+
+        assert_eq!(
+            s.pivot_threshold(),
+            0.0,
+            "restores the constructed threshold, not a rung of the ladder"
+        );
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+    }
+
+    /// R4 — reset from `Exhausted` restarts the identical ladder.
+    ///
+    /// Pins the property downstream needs (issue #192): after a reset,
+    /// re-escalating is indistinguishable from escalating a fresh
+    /// `Solver` built with the same parameters. The oracle is the
+    /// first traversal, recorded before any reset exists in the state.
+    #[test]
+    fn r4_reset_quality_from_exhausted_restarts_identical_ladder() {
+        fn walk(s: &mut Solver) -> Vec<(QualityLevel, f64)> {
+            let mut seen = Vec::new();
+            while s.increase_quality() {
+                seen.push((s.quality_level(), s.pivot_threshold()));
+                assert!(seen.len() < 20, "did not exhaust within 20 steps");
+            }
+            seen
+        }
+
+        let mut s = solver_with_scaling(ScalingStrategy::Identity);
+        let first = walk(&mut s);
+        assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+
+        assert!(s.reset_quality(), "reset is valid from Exhausted");
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::Identity));
+        assert_eq!(s.pivot_threshold(), 0.0);
+
+        let second = walk(&mut s);
+        assert_eq!(second, first, "re-escalation must retrace the same rungs");
+    }
+
+    /// R5 — reset restores the *caller's* parameters, not
+    /// `NumericParams::default()`.
+    #[test]
+    fn r5_reset_quality_restores_caller_params_not_defaults() {
+        const CALLER_PIVTOL: f64 = 0.25;
+        assert_ne!(
+            NumericParams::default().bk.pivot_threshold,
+            CALLER_PIVTOL,
+            "oracle is only meaningful if it differs from the default"
+        );
+
+        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
+        s.numeric_params.bk.pivot_threshold = CALLER_PIVTOL;
+
+        assert!(s.increase_quality());
+        assert_ne!(s.pivot_threshold(), CALLER_PIVTOL);
+
+        assert!(s.reset_quality());
+        assert_eq!(s.pivot_threshold(), CALLER_PIVTOL);
+    }
+
+    /// R6 — the snapshot is taken when the ladder starts, not at
+    /// construction, so a builder applied after `with_params` is the
+    /// baseline that gets restored.
+    #[test]
+    fn r6_reset_quality_preserves_builder_configured_scaling() {
+        let mut s =
+            solver_with_scaling(ScalingStrategy::InfNorm).with_scaling(ScalingStrategy::Identity);
+
+        assert!(s.increase_quality());
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
+
+        assert!(s.reset_quality());
+        assert!(
+            matches!(s.scaling_strategy(), ScalingStrategy::Identity),
+            "must restore the builder-configured strategy, not the \
+             one `with_params` was constructed with"
+        );
     }
 
     /// F1 — same pattern fingerprints equal, structural hash stable

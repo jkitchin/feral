@@ -1,0 +1,106 @@
+#+TITLE: Session 2026-08-29-01 journal
+#+STARTUP: showall
+
+* 22:15 :issue-192:quality-escalation:orient:
+Issue #192 (filed from pounce): =Solver::increase_quality= escalation is
+permanent and unscopable. =quality_level= only ratchets Baseline ->
+ScalingEnabled -> PivotRaised -> Exhausted; there is no way back. An
+escalation chosen for one hard factorization governs every subsequent
+factorization for the life of the =Solver=.
+
+Evidence supplied in the issue (pounce gh#850, =square_flowsheet_resto=):
+
+| leg             | with escalation        | without      |
+| exact Hessian   | RestorationFailed, 131 | Optimal, 99  |
+| limited-memory  | 3000 iters (at cap)    | Optimal, 178 |
+
+and three measured facts that rule out the obvious workarounds: scoping
+the rung out of restoration still loses the leg; a firing count does not
+separate good from bad (=deb7= and =square_flowsheet_resto= both fire
+exactly twice, one gains 16% of its iterations, the other loses its
+verdict); and simply not escalating loses a 12-variable watchdog model
+(obj 3.7e-6 with, 3.42 against f*=0 without) plus 15-25% of iterations on
+five other models.
+
+Conclusion: the escalation is both useful and destructive, and the
+distinguishing factor is duration, not occurrence.
+
+* 22:20 :issue-192:code-inspection:
+Read =src/numeric/solver.rs=. Escalation mutates exactly two fields:
+- stage 1: =numeric_params.scaling= (Identity -> InfNorm), line 1908
+- stage 2: =numeric_params.bk.pivot_threshold=, in =bump_pivot_threshold=
+
+Nothing else. It does not touch =last_symbolic=, =mc64_scaling_cache=,
+=last_factors=, or any of the separate latches (=ordering_escalated=,
+=auto_arm_latched=, =mc64_retry_not_adopted=). So an exact inverse is
+two field restores plus the level.
+
+Found the prior decision in =dev/research/pounce-integration-interface.md:314=,
+under "What this does NOT decide":
+
+#+begin_quote
+Whether to expose a =reset_quality()= method. Ipopt does NOT have one --
+the consumer creates a new solver per problem if they want a reset. FERAL
+should match (no reset method) until there is evidence to add it.
+#+end_quote
+
+Issue #192 is that evidence. This is the deferral being taken up, not a
+reversal.
+
+* 22:35 :issue-192:design:
+Design settled and written to =dev/research/issue-192-quality-reset.md= +
+=dev/plans/issue-192-quality-reset.md=.
+
+Key decision: snapshot the baseline **lazily, on the transition out of
+=Baseline=**, not at construction. The =with_*= builders are consuming and
+run after =with_params=, so a construction-time snapshot would record
+pre-builder values and a reset would silently discard the caller's
+configuration. Test R6 pins this: build =with_params(InfNorm)= then
+=.with_scaling(Identity)=, escalate, reset -> must come back Identity.
+
+Deferred the scoped-guard form the issue also lists. A guard fixes the
+scope at one =factor()=, but the Ipopt contract loop escalates repeatedly
+until the factorization delivers, so the natural scope is the caller's
+own retry loop -- a shape FERAL does not know. The guard is expressible
+in terms of the reset, so shipping the reset first costs nothing.
+
+* 22:40 :issue-192:tests:red:
+Wrote 6 unit tests (R1-R6) + 1 integration test (I9) + 1 Python test
+before implementing. Confirmed RED:
+
+: error[E0599]: no method named `reset_quality` found for struct `solver::Solver`
+: error: could not compile `feral` (lib test) due to 6 previous errors
+
+Oracle discipline: every assertion is against a parameter value the
+*caller* supplied, never against implementation output. R5 sets
+=pivot_threshold = 0.25= and asserts the reset returns 0.25 -- it fails
+if the reset restores =NumericParams::default()= instead. R4's oracle is
+the ladder traversal recorded *before* any reset happens.
+
+* 22:50 :issue-192:implement:green:
+Implemented: =QualityBaseline { scaling, pivot_threshold }=, a
+=quality_baseline: Option<QualityBaseline>= field, a 4-line snapshot in
+the =Baseline= arm of =increase_quality=, and =reset_quality()=.
+
+All green:
+
+: cargo test --lib quality -> 11 passed (R1-R6, U1-U5)
+: cargo test --test pounce_interface -> 21 passed (incl. i9)
+: cargo test -> 448 passed; 0 failed; 7 ignored (lib) + all integration suites green
+
+Note U1-U5 still pass unchanged: the forward ladder is untouched, and a
+caller that never calls =reset_quality= sees byte-identical behaviour.
+
+* 22:55 :issue-192:python:
+Added the =reset_quality= binding in =python/src/solver.rs= and a test.
+Built and ran it locally rather than deferring to CI:
+
+: maturin develop -> Installed feral-solver-0.17.0
+: pytest tests/test_basic.py -q -> 16 passed
+
+* 23:00 :tooling:pre-commit:
+=pre-commit= was not on PATH in this container, so the hooks were not
+installed and CLAUDE.md's "treat a missing hook as a bug to fix" applies.
+=pip install pre-commit= then =pre-commit install= -> "pre-commit installed
+at .git/hooks/pre-commit". Verified the hook file exists. Not a
+repo change, but worth recording: a fresh container starts without it.

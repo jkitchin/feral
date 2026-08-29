@@ -337,10 +337,26 @@ impl Solver {
             .map_err(map_feral_err)
     }
 
-    /// Two-stage quality escalation. Returns `False` if both stages
-    /// are exhausted.
+    /// Two-stage quality escalation. Persists across `factor` calls
+    /// until `reset_quality` reverts it. Returns `False` if both
+    /// stages are exhausted.
     fn increase_quality(&mut self) -> bool {
         self.inner.increase_quality()
+    }
+
+    /// Revert every escalation applied by `increase_quality`, putting
+    /// the solver back at `QualityLevel.BASELINE` with the scaling
+    /// strategy and pivot threshold it was configured with. Returns
+    /// `True` if an escalation was undone, `False` if the solver was
+    /// already at baseline.
+    ///
+    /// Lets a caller bound the escalation's lifetime -- re-baselining
+    /// at a major iteration, or on entering a restoration
+    /// sub-problem -- instead of letting one hard factorization govern
+    /// the rest of the solve (issue #192). The cached symbolic
+    /// factorization is preserved.
+    fn reset_quality(&mut self) -> bool {
+        self.inner.reset_quality()
     }
 
     // ---- properties ----

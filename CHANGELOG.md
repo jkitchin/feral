@@ -2,6 +2,42 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Added — `Solver::reset_quality()` bounds the lifetime of a quality escalation (issue #192)
+
+- **What changed.** New `Solver::reset_quality() -> bool` (and the Python
+  binding `Solver.reset_quality()`). It reverts every escalation
+  `increase_quality` applied — the `Identity → InfNorm` scaling flip and the
+  raised `bk.pivot_threshold` — restoring the parameters the caller had
+  configured and returning `quality_level()` to `Baseline`. Returns `true` if
+  an escalation was undone, `false` if the solver was already at baseline.
+  Valid from any level, `Exhausted` included.
+- **Why.** `increase_quality` was a one-way ratchet with no way back, so an
+  escalation chosen for *one* hard factorization governed **every** later
+  factorization for the life of the `Solver`. Ipopt exposes no reset because
+  MA57 answers `IncreaseQuality` by raising `pivtol` toward `pivtolmax` —
+  monotone in robustness, so leaving it raised can only make later
+  factorizations safer. FERAL's rungs change *which pivots are taken*: the
+  factorization is different, not uniformly better, and persisting it changes
+  the caller's whole remaining trajectory.
+- **Evidence (pounce gh#850).** On `square_flowsheet_resto` the rung fires
+  twice and costs both solve arms: the exact-Hessian leg goes from `Optimal`
+  in 99 iterations to `RestorationFailed` in 131, and the limited-memory leg
+  from `Optimal` in 178 to 3000 iterations at the cap. Declining to escalate
+  is not the fix either — a 12-variable watchdog model ends at `obj = 3.7e-6`
+  with the escalation and at `obj = 3.42` against `f* = 0` without it, and the
+  rung buys 15–25% of the iterations on five other models. The distinguishing
+  variable is how long the escalation lasts, not whether it fires.
+- **Nothing else changes.** The escalation ladder — its rungs, the `0.75`
+  exponent, `pivtol_max` — is untouched, and a solver that never calls
+  `reset_quality` behaves exactly as before. The reset touches only the two
+  escalated parameters and the level: the cached symbolic factorization
+  survives (it is scaling-invariant since scaling moved to the numeric phase),
+  so re-baselining costs no re-analysis, exactly as escalating costs none.
+  `reset_quality` followed by `increase_quality` retraces the same rungs a
+  freshly constructed `Solver` would.
+
 ## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)
