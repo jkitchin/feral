@@ -7096,3 +7096,78 @@ uncovered while being covered locally. The coverage job prints the skip
 list to the run summary — the same step ci.yml has — so a low number in
 those modules can be checked against it before being treated as a real
 gap.
+
+## 2026-08-29 — `Solver::reset_quality()`: the escalation's lifetime is the caller's to bound (issue #192)
+
+**Decision.** Add `Solver::reset_quality() -> bool`, reverting every
+escalation `increase_quality` applied and returning `quality_level()` to
+`Baseline`. This takes up a deferral rather than reversing a decision:
+`dev/research/pounce-integration-interface.md` recorded, under "What
+this does NOT decide", that "FERAL should match [Ipopt, which has no
+reset method] until there is evidence to add it." Issue #192 is that
+evidence.
+
+**Why Ipopt's shape does not transfer.** Ipopt exposes no reset because
+MA57 answers `IncreaseQuality` by raising `pivtol` toward `pivtolmax`
+(`IpMa57TSolverInterface.cpp:832`) — strictly more conservative each
+time. That is monotone in *robustness*, so keeping it raised for the
+remainder of a solve can only make later factorizations safer, and never
+reverting is harmless. FERAL's ladder (`Identity → InfNorm`, then
+`pivot_threshold^0.75`) changes *which pivots are taken*. That is a
+lateral move: the factorization is different, not uniformly better, and
+because it persists the whole remaining trajectory is different too,
+including any restoration sub-problem's factorizations.
+
+**The evidence.** Measured downstream in pounce gh#850. On
+`square_flowsheet_resto` the rung fires exactly twice and costs both
+solve arms: exact-Hessian goes from `Optimal` in 99 iterations to
+`RestorationFailed` in 131, limited-memory from `Optimal` in 178 to 3000
+at the cap. Three measured facts rule out the cheaper answers: scoping
+the rung out of restoration still loses the leg; a firing count does not
+discriminate (`deb7` and `square_flowsheet_resto` each fire exactly
+twice, one gains 16% of its iterations, the other loses its verdict);
+and simply not escalating loses a 12-variable watchdog model
+(`obj = 3.7e-6` with, `obj = 3.42` against `f* = 0` without) plus 15–25%
+of the iterations on five other models. The escalation is genuinely
+useful *and* genuinely destructive; the distinguishing variable is
+duration, not occurrence.
+
+**Why the reset and not a scoped guard.** The issue lists both. A guard
+(`QualityGuard<'a>(&'a mut Solver)` with a restoring `Drop`) fixes the
+scope at one `factor()`, but the Ipopt contract loop escalates
+repeatedly until the factorization delivers, so the natural scope is the
+caller's own retry loop — a shape FERAL does not know and should not
+assume. The reset lets downstream re-baseline at whatever boundary makes
+sense (a new major iteration, entering restoration) with FERAL knowing
+nothing about the caller's algorithm, and the guard stays expressible in
+terms of it if evidence for it later arrives.
+
+**Scope of the change.** The escalation ladder is untouched — its rungs,
+the `0.75` exponent, `pivtol_max` — and unit tests U1–U5 pass unchanged,
+so a caller that never calls `reset_quality` sees byte-identical
+behaviour. The reset touches only the two escalated parameters and the
+level, mirroring what `increase_quality` leaves alone: the cached
+symbolic factorization survives (scaling-invariant since the β refactor
+moved scaling to the numeric phase), so re-baselining costs no
+re-analysis exactly as escalating costs none. Pinned by integration test
+`i9_reset_quality_rebaselines_without_invalidating_symbolic`.
+
+## 2026-08-29 — the escalation baseline is snapshotted lazily, not at construction (issue #192)
+
+**Decision.** `reset_quality` restores a `QualityBaseline { scaling,
+pivot_threshold }` captured on the transition *out of*
+`QualityLevel::Baseline` — i.e. at the instant the ladder starts — held
+in `Option<QualityBaseline>` and cleared by every reset. Not captured in
+`with_params`.
+
+**Why.** The `with_*` builders are consuming and run *after*
+`with_params`, so `Solver::with_params(np, sn).with_scaling(Identity)`
+would have a construction-time snapshot recording `np`'s strategy, and a
+reset would silently discard the caller's builder configuration. The
+lazy snapshot also makes the round trip exact by construction: it
+records a state the solver demonstrably occupied, so `reset` →
+`increase` retraces the same rungs a freshly constructed `Solver` would
+— the property downstream needs when re-baselining at a loop boundary.
+Pinned by `r6_reset_quality_preserves_builder_configured_scaling` (would
+fail under a construction-time snapshot) and
+`r4_reset_quality_from_exhausted_restarts_identical_ladder`.

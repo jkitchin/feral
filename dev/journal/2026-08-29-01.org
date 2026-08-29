@@ -104,3 +104,29 @@ installed and CLAUDE.md's "treat a missing hook as a bug to fix" applies.
 =pip install pre-commit= then =pre-commit install= -> "pre-commit installed
 at .git/hooks/pre-commit". Verified the hook file exists. Not a
 repo change, but worth recording: a fresh container starts without it.
+
+* 23:10 :benchmark:environment:
+Ran =cargo run --bin bench --release= per the session-end protocol. The
+153k-matrix corpus is **not present in this container**, so both exit
+partitions report =N/A= rather than a number:
+
+: --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+: bucket                    count      p90     target  verdict
+: small-frontal (<200)          0        -     <= 2.0      N/A
+: medium (<500)                 0        -     <= 3.0      N/A
+
+This is an environment limitation, not a regression, and it is **not** a
+"no regression" result -- there is no comparison against session
+2026-08-19-05's 1.58 / 1.58 to be had here. What did run is clean on the
+2 synthetic KKT matrices the bench generates:
+
+: Sparse solver: 2/2 total
+:   Inertia match vs MUMPS: 2/2 (100.0%)
+:   Residual pass: 2/2 (100.0%)
+:   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+The change is a pure API addition on a code path that runs only when a
+caller calls =reset_quality()=; no numeric kernel, ordering, scaling or
+pivoting code was touched, and the forward ladder tests U1-U5 pass
+unchanged. So a perf regression is not a mechanism this diff has. That
+is an argument, not a measurement, and it is recorded as such.
