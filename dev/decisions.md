@@ -7097,6 +7097,320 @@ list to the run summary — the same step ci.yml has — so a low number in
 those modules can be checked against it before being treated as a real
 gap.
 
+## 2026-08-20 — The bench times the `Auto` core, serially (issue #189 item 1)
+
+`src/bin/bench.rs` timed the sparse KKT solve through the free
+`solve_sparse_refined`, which hardcodes `SolveCore::SharedVector`
+(`src/numeric/solve.rs:2077`). Every `Solver` entry point dispatches
+through `SolveCore::Auto` (`src/numeric/solver.rs:1690-1722`), and `Auto`
+selects `ContribBlock` on most of the KKT corpus above n ≈ 10⁴. The
+published solve column therefore described a configuration no host runs.
+
+Measured with `crates/feral-diagnostics/src/bin/probe_solve_reconcile.rs`
+(11 reps, three configurations interleaved within each repetition,
+medians, one process), over seven matrices spanning n = 8,032 … 180,900:
+
+| ratio | `steps=1` | default depth |
+|---|---:|---:|
+| core, `SharedVector → Auto`, serial | **1.37×** | **1.30×** |
+| schedule, `Auto` serial → parallel | 1.01× | 0.98× |
+| bench → shipped | 1.38× | 1.27× |
+
+Up to 1.90× on `r05_kkt` and `cont5_late_kkt`.
+
+**Decision: time `solve_sparse_refined_auto_into(.., parallel = false, ..)`.**
+
+Two parts, both deliberate.
+
+*`Auto` rather than `SharedVector`* — the benchmark should measure the
+arithmetic hosts get. A gate built on the shared-vector core cannot see a
+regression in the `ContribBlock` traversal, which is the traversal the
+corpus's large matrices actually take.
+
+*Serial rather than pooled* — per #177 the pool changes only the
+schedule, never the arithmetic, and the same probe measures that schedule
+at geomean 1.01/0.98, i.e. nothing. Installing a pool would import
+thread-count variance into a CI-visible number in exchange for no
+measurable signal. `parallel = false` measures the host's core without
+the host's scheduler.
+
+The aggregate barely moves — `solve/MUMPS` geomean and p50 both stay at
+0.08 — because the corpus is ~154k matrices dominated by small ones where
+`Auto` picks `SharedVector` anyway. That is the expected outcome and was
+recorded in the journal before the run landed. The change makes the
+column describe the right core; it is not a speedup.
+
+### The regression this exposed, and why it is a harness defect
+
+The first run of the change failed the sparse small-frontal exit
+partition — p90 2.03 against a ≤ 2.0 target, from 1.58. A control run on
+stashed, unmodified code in the same session reproduced 1.58 PASS, so the
+cause was the change, not machine state.
+
+The mechanism is that `resample_or_fallback` (`src/bin/bench.rs:1060`)
+runs factor **and** solve interleaved inside one closure,
+`RESAMPLE_COLD_REPS = 5` times, and reduces `factor_us` by **min** across
+those replicates. Whatever the solve does to cache and allocator state is
+the state the next replicate's factor is measured in. And
+`should_resample` (`:1042`) fires on `mumps_timing.factor_us < 200` — the
+same small matrices the `small-frontal (<200)` bucket gates.
+
+The change had allocated its solve buffer inside the closure: an n-double
+alloc-and-zero per replicate at n < 1000. Hoisting it to one allocation
+per matrix, reused across replicates, restored the partition to 1.54 PASS
+(dense 1.59 / 1.96 PASS) and dropped the worst sparse factor ratio from
+68.79 to 9.29.
+
+**The coupling itself is left in place, deliberately.** It is
+pre-existing: any solve-side change can perturb the small-matrix factor
+reading through it. Fixing it means giving factor and solve separate
+timing passes, which changes every small-matrix number in the corpus and
+needs its own commit with its own before/after — not a drive-by inside a
+different change. Recorded as a Step 1 item in
+`dev/plans/large-n-solve-gate.md`.
+
+*Spread, added after a third confirming run:* the sparse small-frontal
+p90 reads 1.54 and 1.61 on the two post-fix runs against a 1.58 baseline
+— the change is indistinguishable from baseline on the factor partition,
+which is the correct outcome for a solve-only change. The 1.54 above is a
+single draw, not an improvement. Run-to-run spread on this machine is
+~±2.5%; the `factor/MUMPS` **max** column is not stable at all (9.71 here,
+68.79 on the failing run, with the offender list changing identity) and
+should not be quoted as a result.
+
+## 2026-08-20 — The multi-RHS panel path pads its row stride to a cache line
+
+The row-major multi-RHS work buffers (`y`, `w`, `acc` in
+`SolveManyWorkspace`) used a leading dimension of exactly `nrhs`. On the
+BLAS-3 panel path that makes every row of every supernode panel straddle a
+cache line whenever `nrhs % 8 != 0`, and the cost compounds across the
+gather, both kernels, and the scatter. Measured within a single process, so
+immune to cross-process drift: `t(31)/t(32)` read 1.41–1.80 across seven
+large KKTs when it should read ~0.97 (`nrhs = 31` is 3% *less* work).
+
+**Decision:** the panel path allocates and indexes at
+`padded_ldw(nrhs) = nrhs.div_ceil(NR) * NR`, i.e. a multiple of 64 bytes.
+The rank-1 path keeps the raw `nrhs` stride — it is row-major but not
+tiled, and it carries the bit-identity band contract that
+`tests/multi_rhs.rs:227,256` assert and pounce's `schur.rs:303` consumes.
+
+The padding is paid for in flops: the kernels solve `padded_ldw(nrhs)`
+columns, of which up to 7 are zero padding. That is 21% extra arithmetic at
+`nrhs = 33`, 7% at 100, under 1% at 1000 — and it is still a net 1.36×
+geomean win in the shipped regime (`nrhs >= 32`, not a multiple of 8),
+because the alignment is worth more than the wasted lanes. After the fix
+`t(33)/t(32) ≈ 1.21`, which is exactly `40/33`: the residual is entirely
+the padding columns, with no misalignment left.
+
+**Alternative not taken:** pad the *allocation* for alignment but iterate
+only the `nrhs` live columns, masking the final tile. `gemm_tile` already
+takes a `live` argument, so the kernel side is ready. It recovers roughly
+the remaining 18% at `nrhs = 33`. It is not part of this decision because
+it requires distinguishing stride from live width through five kernels, and
+that belongs in its own commit with its own before/after.
+
+**Bit-neutral**, verified three independent ways: an 800-shape `to_bits()`
+test against a scalar left-fold reference (`gemm_tail_tests`); the probe's
+`max |rank1 - blas3|` column unchanged at all 105 measured (matrix, `nrhs`)
+points; and all 13 `tests/multi_rhs.rs` green including both
+`assert_eq!(max_diff, 0.0)` band contracts. No tolerance was touched.
+
+`BLAS3_NRHS_THRESHOLD` stays at 32 — the crossover constant was the
+suspect, but the defect was underneath it, and the threshold is load-bearing
+for the bit-identity contract.
+
+## 2026-08-20 — Scope correction: which pounce call sites the padded stride reaches
+
+Appended rather than editing the entry above, per the append-only rule. The
+preceding entry states the padded-stride decision correctly but says nothing
+about how much of a real host it reaches; a reader could take "1.36x on the
+multi-RHS solve" for "1.36x on pounce". It is much narrower than that.
+
+Prompted by pounce issue #698, comment 5359027510, which named a multi-RHS
+call site the 2026-08-20-02 checkpoint had not enumerated.
+
+pounce has three multi-RHS-capable call sites. The padded stride reaches one:
+
+| pounce call site | nrhs | reached? |
+|---|---|---|
+| `std_aug_system_solver.rs:497,625` (IPM) | 1, hardcoded | no |
+| `pounce-feral/src/lib.rs:1004,1006` (batched backsolve) | 6 | no — below the threshold |
+| `pounce-feral/src/schur.rs:303,304` | `n_s` | yes, when `n_s >= 32` |
+
+The batched backsolve's width is `limited_memory_max_history`, which defaults
+to 6 (`alg_builder.rs:1037`, `:1508`). Below `BLAS3_NRHS_THRESHOLD = 32`, so
+it takes the rank-1 kernel, which the change does not touch. That dispatch is
+already correct — measured rank1/blas3 at `nrhs = 6` is 0.68-0.86 across all
+seven probe matrices, i.e. rank-1 wins — so there is no unclaimed gain there
+and no argument for lowering the threshold to capture it.
+
+The Schur path is the one that benefits, and it can be wide:
+`schur_aug_system_solver.rs:36` sets `DEFAULT_MAX_SCHUR_FRAC = 0.5`, so `n_s`
+reaches half the KKT dimension before the backend refuses the partition.
+
+**Consequence for release decisions:** the 1.36x figure is a property of the
+multi-RHS solve at `nrhs >= 32` and not a multiple of 8. It is not a pounce
+end-to-end number and must not be quoted as one.
+
+
+## 2026-08-20 — Refinement stopping criterion is a caller choice, not a constant (issue #190)
+
+`RefineOptions` carries a `StopCriterion` enum rather than a second numeric
+knob. Three variants: `EpsSqrtN` (the pre-#190 hardwired test, kept as the
+default so no existing caller changes behavior), `RelativeResidual(f64)`, and
+`BackwardError(f64)`.
+
+Why an enum and not "add a `target: Option<f64>` field": the two useful
+targets are not the same quantity and cannot share one number. `||r||/||b||`
+is normwise and blind to row scaling; the componentwise backward error is
+scale-aware per row. On the badly-scaled 2x2 in the research note they read
+`1.0e-36` and `5.0e-13` for the same solution. A single `f64` field would
+have forced a silent choice between them.
+
+`BackwardError` is the one with a principled stopping value. `eps`-order `t`
+means "as good as a backward-stable factorization would have returned",
+independent of `n`. `max_steps` has no such value, which is Finding 1 of the
+research note: the corpus sweep of step counts is non-monotone, so no
+constant is defensible.
+
+Cost: `BackwardError` needs `|A| |x|`, one extra pass over the matrix per
+iteration via the new `CscMatrix::abs_symv`. **Zero extra solves.** That is
+why it is affordable in the hot path and why `RefinementDiagnostics` is not:
+the latter's `kappa_1_est` is 3-5 extra solves (`solve.rs:2596`), multiplying
+the cost #190 exists to cut.
+
+Returned instead: `RefineOutcome { steps, relative_residual, stop }`, all
+three already computed by the loop. `RefineStop` is ordered
+`Converged < Stagnated < Diverged < MaxSteps` for the multi-RHS aggregate,
+which reports the max steps, the max relative residual, and the worst stop
+across columns.
+
+**Documented deviation from LAPACK `dgerfs`.** The guarded formula is
+adopted verbatim, `safe1 = (n+1) * MIN_POSITIVE` and `safe2 = safe1 / EPSILON`
+included, with one exception: a row whose denominator `(|A||x| + |b|)_i` is
+exactly zero contributes `0`, where LAPACK computes `safe1/safe1 = 1`. Proof
+that this is safe, not a loosened tolerance: `d_i == 0` forces every
+`|a_ij||x_j| = 0` and `|b_i| = 0`, hence `r_i == 0` exactly. Keeping LAPACK's
+`1` would make any `BackwardError` target unreachable on a system with a
+structurally empty row — reproducing the exact defect #190 reports.
+
+**What this does not fix.** `ZeroPivotAction::ForceAccept` is FERAL's default
+and leaves residual on near-singular pivots, so `max_steps = 0` remains
+unusable for pounce regardless of the stopping criterion. Out of scope here.
+
+## 2026-08-20 — #190 measured: it is an accuracy feature, not a performance one
+
+The entry above was written before the corpus measurement. Recording the
+result here because it changes what the feature is *for*, and because the
+standing bar on this thread is "rigorous, thoroughly correct, and a real
+performance gain, or it does not ship."
+
+**The premise in issue #190 did not reproduce.** #190 argues the `ε·√n`
+target is unreachable on large systems so "every call runs the full budget."
+Best-of-5 over seven matrices (`probe_refine_stop_criterion`, output in the
+2026-08-20-01 journal) with a well-scaled RHS: the default converges in
+**0–2 steps on every one** — r05_kkt 0, qap15_kkt 2, dirichlet120_kkt 0,
+cont-201 0, cont5_late_kkt 1, bratu3d 0, bcsstk38 0. There is no
+wasted-iteration saving to claim. Caveat in the other direction: the
+`n = 118,276` system #190 cites is a pounce runtime KKT and is not in the
+local corpus (largest local is `c-big`, `n = 345,241`, not in this set), so
+the premise is untested at its own scale rather than refuted at it.
+
+**What the measurement did establish is a correctness gap.** With a RHS
+whose entries span `1e-6..1e6`, the default declares `Converged` at normwise
+`rel` of `1e-14..1e-17` while the componentwise backward error is up to
+eleven orders worse: r05_kkt `9.5e-5`, bratu3d `9.0e-6`, cont-201 `3.9e-7`,
+dirichlet120_kkt `4.3e-10`, bcsstk38 `1.1e-10`, qap15_kkt `1.2e-10`. One
+`BackwardError` step lands all of them at `~3e-16`. The default cannot see
+this by construction: `||r||_2/||b||_2` is dominated by the rows where
+`|b_i| ~ 1e6`.
+
+**Cost.** ~2x on the refinement wall time (0.39x–0.61x "vs def"), factor
+excluded — roughly one extra solve. The only measured speedups are the
+caller deliberately buying less accuracy: qap15 easy at
+`BackwardError(1e-10)` is 1.45x by stopping at omega `8.8e-12` instead of
+`2.7e-16`; qap15 hard at `RelativeResidual(1e-12)` is 1.49x and *worse*
+(omega `8.0e-10` vs the default's `1.2e-10`).
+
+**Decision.** The feature stays, documented as an accuracy/observability
+knob with the measured cost stated, not as a speedup. `CHANGELOG.md`,
+`README.md` and the `solve_sparse_refined` doc comment were corrected —
+all three had asserted the unreachable-target premise as fact.
+
+**Documented caveat, new.** An unreachable *componentwise* target has the
+identical failure mode the old constant had. qap15_kkt with a badly-scaled
+RHS and `BackwardError(1e-14)` runs 8 steps, exits `Stagnated` at omega
+`4.2e-11`, and costs 0.32x for nothing; `BackwardError(1e-10)` reaches
+`4.4e-11` in 3 steps. The knob does not remove the need to read `stop`.
+
+## 2026-08-21 — refinement's default stopping criterion is now conjunctive
+
+**Context.** Ipopt/pounce reported a class of problems where feral's solve
+was materially worse than the MA57/MUMPS ports it replaces, while the vast
+majority of problems were fine. Four candidate causes were measured and
+ruled out: ForceAccept (`inertia.zero == 0`, `n_tiny == 0` on all seven
+large matrices), the pivot threshold (Ipopt sets `ma27_pivtol = 1e-8`,
+`ma57_pivtol = 1e-8`, `mumps_pivtol = 1e-6` — *below* the library defaults;
+feral's 1e-8 already matches), the escalation ladder
+(`pounce-feral/src/lib.rs:1368` does wire `increase_quality`), and the
+inertia itself (exact agreement with canonical MUMPS 5.8.2 on all seven,
+including `qap15_kkt` at `cond1 = 3.9e12`).
+
+**The cause is the stopping criterion.** `RefineOptions::default()` stopped
+on `EpsSqrtN`, `‖r‖₂ < ε·√n·‖b‖₂`, which is normwise and therefore dominated
+by the rows carrying the largest right-hand-side entries. MUMPS's `ICNTL(10)`
+refinement stops on the Arioli–Demmel–Duff *componentwise* backward error
+against `CNTL(2) = √ε` (`ref/mumps/src/dini_defaults.F:1094`). On a RHS
+spanning twelve orders — the shape an IPM produces near convergence, where
+the dual, primal and complementarity blocks differ by many orders — the two
+diverge by up to eleven orders and feral declared `Converged` without
+refining once:
+
+| matrix | feral ω, old default | MUMPS ω1 |
+|---|---:|---:|
+| `r05_kkt` | 9.520e-5 (0 steps) | 3.608e-16 |
+| `bratu3d` | 8.953e-6 (0 steps) | 2.844e-16 |
+| `cont-201` | 3.860e-7 (0 steps) | 2.728e-16 |
+
+**Decision.** The default is now
+`StopCriterion::EpsSqrtNAndBackwardError(DEFAULT_BACKWARD_ERROR_TARGET)`
+with the target set to `√ε` — MUMPS's `CNTL(2)`, the same number for the
+same purpose — so a default-configured `solve_refined` certifies at least
+what a default-configured MUMPS does.
+
+It is the **conjunction**, deliberately. Requiring both tests is strictly
+harder to satisfy than the old default, so no caller can receive a worse
+iterate than it did before, and the change ships without touching a single
+tolerance or residual gate. `EpsSqrtN` remains available and bit-for-bit
+unchanged for callers that want the historical behavior.
+
+**Cost, measured — and it is not free.** On the seven large matrices:
+well-scaled RHS identical to the old default (same steps, same iterates);
+badly-scaled RHS one extra step (5–14 ms) on the three worst, which then sit
+level with MUMPS at ~3e-16.
+
+That understates the corpus-wide cost. A controlled A/B over the 154,588
+benchmark matrices — same machine, only `Default for RefineOptions` changed —
+shows the median untouched and the tail paying: solve/MUMPS p90 0.15 → 0.20
+(+33%), p99 0.71 → 1.08 (+52%); solve/SSIDS geomean 0.94 → 1.06 (+13%), p90
+2.50 → 3.60 (+44%), p99 8.33 → 13.00 (+56%). Factor is unchanged within noise,
+which confirms the effect is the refinement loop rather than machine state.
+
+So this decision trades tail latency for componentwise correctness. It is
+recorded as such, not as a free improvement. Callers needing the old latency
+profile can pass `StopCriterion::EpsSqrtN` explicitly and accept the gap.
+
+**Rejected alternatives** (both in `dev/tried-and-rejected.md` with their
+failing cases): `BackwardError(√ε)` alone, which fails `tests/parity.rs` on
+ROSZMAN1_0241 because ω ≤ √ε can hold while the normwise residual is looser
+than the old rule delivered; and `BackwardError(f64::EPSILON)`, LAPACK
+`dgerfs`'s target, which stagnates or exhausts the step budget on five of
+seven large matrices under the badly-scaled RHS.
+
+**Regression coverage.** `tests/issue190_componentwise_default.rs`. The
+defect reproduces on the tracked parity corpus — `EpsSqrtN` leaves ω above
+√ε on 13 of 63 matrices, worst DEGENLPB_0046 at 359×√ε — and the new default
+drives all 63 to ω ≤ √ε.
 ## 2026-08-29 — `Solver::reset_quality()`: the escalation's lifetime is the caller's to bound (issue #192)
 
 **Decision.** Add `Solver::reset_quality() -> bool`, reverting every

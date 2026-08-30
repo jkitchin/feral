@@ -19,8 +19,8 @@ use crate::numeric::factorize::{
 };
 use crate::numeric::solve::{
     solve_sparse, solve_sparse_into, solve_sparse_many, solve_sparse_many_into,
-    solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions,
-    SolveManyWorkspace, BLAS3_REFINE_THRESHOLD,
+    solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions, RefineOutcome,
+    RefineStop, SolveManyWorkspace, BLAS3_REFINE_THRESHOLD,
 };
 use crate::scaling::{
     mc64_value_bound_passes, pick_scaling_strategy, precompute_mc64_validity, Mc64CacheValidity,
@@ -1709,7 +1709,7 @@ impl Solver {
         rhs: &[f64],
         x_out: &mut [f64],
         opts: RefineOptions,
-    ) -> Result<(), FeralError> {
+    ) -> Result<RefineOutcome, FeralError> {
         let f = match &self.last_factors {
             Some(f) => f,
             None => return Err(FeralError::NoFactor),
@@ -1726,7 +1726,7 @@ impl Solver {
         rhs: &[f64],
         x_out: &mut [f64],
         opts: RefineOptions,
-    ) -> Result<(), FeralError> {
+    ) -> Result<RefineOutcome, FeralError> {
         // Issue #131 Gap A: when parallelism is on, refine through the
         // contribution-block solve core (pooled across the initial +
         // correction solves). Install on this solver's pool (built during
@@ -1858,7 +1858,7 @@ impl Solver {
         nrhs: usize,
         x_out: &mut [f64],
         opts: RefineOptions,
-    ) -> Result<(), FeralError> {
+    ) -> Result<RefineOutcome, FeralError> {
         let factors = match &self.last_factors {
             Some(f) => f,
             None => return Err(FeralError::NoFactor),
@@ -1871,7 +1871,12 @@ impl Solver {
             });
         }
         if nrhs == 0 {
-            return Ok(());
+            return Ok(RefineOutcome {
+                steps: 0,
+                relative_residual: 0.0,
+                backward_error: 0.0,
+                stop: RefineStop::Converged,
+            });
         }
         if rhs.len() != n * nrhs {
             return Err(FeralError::DimensionMismatch {
@@ -1885,12 +1890,46 @@ impl Solver {
         if nrhs >= BLAS3_REFINE_THRESHOLD {
             return solve_sparse_many_refined_into(matrix, factors, rhs, nrhs, x_out, opts);
         }
+        // Aggregate the per-column outcomes the same way the batched
+        // refiner does, so the two dispatch paths report identically
+        // (issue #190). `relative_residual` and `backward_error` are NaN
+        // under `max_steps = 0`, and `NaN > x` is false, so the max fold
+        // leaves them at 0.0 — handled explicitly rather than silently.
+        // `backward_error` is additionally NaN whenever ω is not the
+        // criterion, which is a per-*call* property, so in practice
+        // either every column reports NaN or none does.
+        let mut agg = RefineOutcome {
+            steps: 0,
+            relative_residual: 0.0,
+            backward_error: 0.0,
+            stop: RefineStop::Converged,
+        };
+        let mut any_nan = false;
+        let mut any_om_nan = false;
         for c in 0..nrhs {
             let src = &rhs[c * n..(c + 1) * n];
             let dst = &mut x_out[c * n..(c + 1) * n];
-            self.refine_into(matrix, factors, src, dst, opts)?;
+            let o = self.refine_into(matrix, factors, src, dst, opts)?;
+            agg.steps = agg.steps.max(o.steps);
+            agg.stop = agg.stop.worst(o.stop);
+            if o.relative_residual.is_nan() {
+                any_nan = true;
+            } else if o.relative_residual > agg.relative_residual {
+                agg.relative_residual = o.relative_residual;
+            }
+            if o.backward_error.is_nan() {
+                any_om_nan = true;
+            } else if o.backward_error > agg.backward_error {
+                agg.backward_error = o.backward_error;
+            }
         }
-        Ok(())
+        if any_nan {
+            agg.relative_residual = f64::NAN;
+        }
+        if any_om_nan {
+            agg.backward_error = f64::NAN;
+        }
+        Ok(agg)
     }
 
     /// Estimate `kappa_1(A) = ||A||_1 * ||A^{-1}||_1` via the

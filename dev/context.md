@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-29T22:25:22Z
+Generated: 2026-08-30T02:51:11Z
 
 ## Latest Session
 File: dev/sessions/2026-08-29-01.md
@@ -59,34 +59,34 @@ New `Solver::reset_quality() -> bool` and its Python binding. Reverts
 
 ## Git Status
 ```
-0952f99 feat: add Solver::reset_quality() to bound escalation lifetime (#192)
-9b9e882 Merge pull request #188 from jkitchin/ci/codecov-coverage
-1292984 ci: measure coverage with cargo-llvm-cov and report it to Codecov
-ad0d96d Merge pull request #187 from jkitchin/docs/session-2026-08-19-05
-b224ed1 docs: session checkpoint 2026-08-19-05 (pre-release review, 0.17.0 tagged)
+be1e234 feat(refine): report the achieved componentwise omega in RefineOutcome
+9c64660 test(refine): stop two #190 tests from claiming more than they prove
+429dfca docs: describe the refinement default that actually ships
+9b5323c perf(solve): size the multi-RHS workspace on the dispatch threshold
+47f332e fix(refine): a non-finite iterate must not certify as backward stable
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 448 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.35s
+test result: ok. 466 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.90s
 
 ```
 
@@ -163,26 +163,26 @@ fail under a construction-time snapshot) and
 `r4_reset_quality_from_exhausted_restarts_identical_ladder`.
 
 ## Recent Tried-and-Rejected
-total factor time** on a matrix whose paying bucket is 91% of that time. Moving
-three quarters of the panel share into BLAS-3 buys 1.3%: the two kernels cost
-nearly the same per flop at this front shape, so the 53.5% panel share is not
-recoverable time.
+semantically identical, and giving the compiler `&[[f64; 4]]` instead of
+`&[f64]` may well be neutral or better for codegen. That is a
+*hypothesis*. This is the hottest loop in the factorization; its unroll
+depth and `into_remainder()` cleanup are a measured design
+(`dev/research/dense-kernel-*.md`), and the container this was found in
+has no corpus, so the change could not be benchmarked — the exit
+partition reports N/A here. Landing an unmeasured edit to that loop to
+satisfy a style lint inverts the project's order of operations.
 
-It also does not generalize. `bs = 48` and `bs = 64` are identical for any front
-with `ncol ≤ 48`, and that is every other matrix sampled — `ncol` p90 is 1-19
-across clnlbeam, dtoc2, marine_1600, rocket, steering, gasoil_3200, pinene_3200,
-robot_1600, svanberg, nql180, qcqp1500-1c, cont5_2_4_l; only dtoc1nd is at 63. On
-the two with any wide fronts at all the paired sweep finds nothing: nql180 0.990
-(5/12 wins, tied with the default), qcqp1500-1c 0.994 (3/12). A 1.3% win on one
-corpus matrix and a no-op elsewhere is below the bar for changing a global default.
+**What was done instead.** A file-scoped
+`#![allow(clippy::chunks_exact_to_as_chunks)]` in `schur_kernel.rs` with
+the reasoning in a comment beside it. The three other sites the lint
+flagged — `diag_schur_parity.rs` (x2) and `diag_acopr14.rs` — are
+byte-decoding loops in diagnostic binaries, not hot paths, so those took
+the real rewrite (and lost a `copy_from_slice` each).
 
-**Kept from this attempt:** `block_size` is bit-neutral on all three matrices
-swept — identical inertia, zero delayed pivots, identical residual, and an
-identical hash over every `L`/`D` bit in storage order across
-`bs ∈ {8,16,24,32,48,62,64}` (`dtoc1nd_0010` 9cb93f568423e6c0, `nql180_0000`
-4f588093d6bac8c7, `qcqp1500-1c_0000` cfec17df1a4f8d38). So future retuning of it
-is a performance-only change. Not yet established on a matrix that actually
-delays a pivot — all three report `d0`.
+**Still open.** Whether `as_chunks` in the kernel is neutral, a win, or
+a loss is unmeasured and unclaimed. A session with corpus access should
+sweep it and either land the rewrite with numbers or record the
+regression here. Until then the `allow` is a deferral, not a verdict.
 
 ## Source Files
 ```
@@ -255,8 +255,8 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -272,6 +272,14 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -281,36 +289,30 @@ tests/issue128_supernode_nrow.rs
 tests/issue177_parallel_entry_point_core.rs
 tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
+tests/issue190_componentwise_default.rs
+tests/issue190_refine_target.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
-tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
+tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_scaling.rs
-tests/lu_sparse.rs
 tests/lu_sparse_rhs.rs
+tests/lu_sparse.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -323,13 +325,13 @@ tests/n4_mc64_retry_latch.rs
 tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
-tests/pounce710_refine_cap_nrhs2.rs
 tests/pounce_interface.rs
+tests/pounce710_refine_cap_nrhs2.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
 tests/refined_solve_core_stability.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs

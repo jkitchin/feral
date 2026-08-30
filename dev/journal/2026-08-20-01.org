@@ -1,0 +1,827 @@
+#+TITLE: FERAL session journal 2026-08-20-01
+#+STARTUP: overview
+
+* 08:05 :coverage:codecov:ci:
+Codecov wired up and merged (PR #188, 9b9e882). Live upload confirmed:
+90.41% (30,989/34,275 lines, 80 files). Two findings worth keeping.
+
+The coverage job runs =--workspace --exclude feral-diagnostics=, which
+runs MORE tests than ci.yml: bare =cargo test= at the workspace root
+resolves to the =feral= package alone, so the six ordering crates
+(feral-ordering-core 69, feral-metis 59, feral-kahip 63, feral-scotch 45,
+feral-amd 12, feral-amf 10 = 258 tests) had never run in CI. All passed.
+
+=dirichlet120_parallel_factor_does_not_deadlock= is =--skip=ped in the
+coverage job only: under llvm-cov instrumentation it takes 123.25s
+against its hard 120s budget (=test result: FAILED. 0 passed; 1 failed;
+finished in 123.25s=), while passing under both =cargo test= and
+=cargo test --release=. Instrumentation overhead, not an issue-#102
+regression. The test is NOT weakened -- ci.yml's =check= job still
+asserts 120s on every push. Audited: it is the only test in the tree
+with a wall-clock assertion.
+
+* 08:20 :perf:solve:probe:issue131:issue189:
+Wrote =crates/feral-diagnostics/src/bin/probe_largen_solve_levers.rs= to
+measure -- rather than assert from source reading -- the two solve-phase
+levers I had just filed on #131 and #189.
+
+Motivation: my #131 comment argued from source that the CB parallel core
+was unreachable performance. That is a claim about numbers, and I had
+taken no numbers.
+
+Probe design: factor once, then produce the same NRHS=13 solutions four
+ways (A serial =solve_sparse= x13, B =solve_sparse_cb(false)= x13,
+C =solve_sparse_cb(true)= x13, D =solve_sparse_many(13)= x1), best-of-5
+wall clock, each path reported with its own relative residual since the
+CB and shared-vector cores are different reassociations (#177). Then a
+sweep of nrhs through =BLAS3_NRHS_THRESHOLD= comparing looped-single
+against =solve_sparse_many= per-RHS.
+
+Added two things after the first results came in:
+- A bit-level detector for =SolveCore::Auto='s choice. =cb_core_profitable=
+  is private, but the two cores differ numerically, so running
+  =solve_sparse_refined_auto_into= with =max_steps=0= and bit-comparing
+  against each explicit core identifies the pick exactly.
+- E: end-to-end =Solver::solve_refined= with =with_parallel(true/false)=.
+  =tests/parallel_parity.rs:4-8= contracts the parallel factor to be
+  bit-equal to the sequential one, so both sides hold the same factor and
+  =Auto= makes the same choice -- this is a pure schedule comparison of
+  the shipped path.
+
+* 08:35 :perf:solve:issue131:refuted:
+Ran three passes. First pass (4 matrices) and the n=180,900 pass each had
+the machine to themselves; a third overlapped another probe and is noted
+as contended. Final clean sequential pass over 8 matrices.
+
+Clean pass, 14 rayon threads, best-of-5. E = refined e2e parallel/serial,
+C = CB-parallel vs 13x serial, D = solve_many(13) vs 13x serial:
+
+| matrix           |       n | Auto picks   |    E |    C |    D |
+|------------------+---------+--------------+------+------+------|
+| bcsstk38         |    8032 | SharedVector | 0.98 | 1.07 | 1.88 |
+| r05_kkt          |   14842 | ContribBlock | 0.74 | 0.67 | 2.35 |
+| bratu3d          |   27792 | ContribBlock | 1.16 | 0.56 | 2.10 |
+| qap15_kkt        |   50880 | ContribBlock | 1.18 | 1.01 | 2.43 |
+| dirichlet120_kkt |   54363 | ContribBlock | 1.04 | 0.81 | 2.51 |
+| cont-201         |   80595 | ContribBlock | 0.41 | 1.69 | 2.99 |
+| cont5_late_kkt   |  180900 | ContribBlock | 1.39 | 1.82 | 2.65 |
+| c-big            |  345241 | ContribBlock | 0.90 | 1.03 | 1.70 |
+| geomean          |         |              | 0.92 | 1.00 | 2.29 |
+
+Conclusion 1: the #131 parallel-solve lever does not exist as filed.
+Geomean 1.00 for the core, 0.92 for the shipped path that actually uses
+it. I twice reached a wrong intermediate conclusion before this --
+first "refuted, negative everywhere" from a 4-matrix pass, then
+"n-dependent with a crossover near 1e5" after cont5_late_kkt returned
+1.97. Both died on more data: bratu3d (n=27,792) gave 1.23 in one run and
+0.56 in another, and c-big (n=345,241) only 1.03-1.12. It is not size and
+it is not shape.
+
+Conclusion 2 (the actual finding): the measurement is not reproducible.
+Same matrix, across runs -- bratu3d 0.56<->1.23 (2.20x), cont-201
+0.85<->1.69 (1.99x), dirichlet120 0.81<->1.39 (1.72x). Best-of-5 did not
+tame it. Only cont5_late_kkt reproduces (1.82/1.97/1.98) and only r05_kkt
+reproducibly loses (0.46/0.63/0.67). We currently cannot distinguish a 2x
+solve regression from scheduler noise, which promotes #189 above #131.
+
+Conclusion 3: =cb_core_profitable= approves ContribBlock on 7 of 8
+matrices, including r05_kkt where the approved configuration runs at
+0.67. =solve_sparse_cb(.., true)= does honor =plan.worthwhile=
+(=src/numeric/solve.rs:1275=), so these were gate-approved losses. The
+gate's own doc comment (=solve.rs:1007=) records that it was calibrated
+on 4 workers; this box has 14.
+
+* 08:40 :perf:solve:blas3:confirmed:
+Isolated the BLAS3 kernel effect from the nrhs effect by patching
+=BLAS3_NRHS_THRESHOLD= 32 -> 2 (=src/numeric/solve.rs:17=), rebuilding,
+re-running, then reverting. Per-RHS microseconds on the =many= path,
+thr=32 -> thr=2:
+
+| nrhs | cont-201 | dirichlet120 | qap15 |  r05 |
+|------+----------+--------------+-------+------|
+|    8 |     1.70 |         2.10 |  1.57 | 1.96 |
+|   16 |     1.25 |         2.28 |  1.28 | 1.31 |
+|   24 |     1.24 |         1.26 |  1.27 | 1.30 |
+|   32 |     1.01 |         0.94 |  1.09 | 1.01 |
+
+The nrhs=32 row is an internal control -- both configurations take the
+BLAS-3 path there, and they agree to within noise. So the 1.2-2.3x in the
+8..31 band is the kernel, not the batching.
+
+Two caveats. Run-to-run spread on these is 20-30%. And nrhs=13 is
+consistently worse per-RHS than nrhs=16 in every single case, which looks
+like a ragged register-block remainder at odd panel widths and is worth
+its own look.
+
+Sequencing point that is easy to miss: this lever is unreachable until a
+host batches. =BLAS3_NRHS_THRESHOLD= only exists on the multi-RHS path,
+so while pounce loops single-RHS
+(=low_rank_aug_system_solver.rs:497=), nrhs=1 and the constant never
+comes into play. #189 item 4 buys nothing until pounce#698's batching
+lands.
+
+* 08:45 :perf:solve:batching:confirmed:
+=solve_sparse_many(13)= against 13 looped single solves: geomean 2.29x,
+median 2.39x, never below 1.70x, and stable across runs. This is the only
+robust lever measured today, and the work is pounce-side (already
+reported at pounce#698). feral already has the API.
+
+* 09:10 :perf:solve:measurement:artifact:
+Two probes disagreed about feral#131's parallel solve core and I nearly
+posted the second as a correction to the first. They were not measuring
+the same comparison.
+
+- =probe_largen_solve_levers= path E: =Solver::with_parallel(true)= vs
+  =Solver::with_parallel(false)=, =RefineOptions::with_max_steps(1)=,
+  best-of-5. Both sides run =SolveCore::Auto=, so this is a pure
+  *schedule* comparison. Reported geomean 0.92 (parallel slower).
+- =probe_bench_solve_noise=: =Solver::with_parallel(true)= vs the free
+  =solve_sparse_refined=, =RefineOptions::default()=, median-of-15.
+  Reported geomean 1.21 (parallel faster), incl. cont5_late_kkt 1.80x.
+
+The free function hardcodes =SolveCore::SharedVector=
+(=src/numeric/solve.rs:2077=) while =Solver= runs =Auto=, which picks
+=ContribBlock= on six of these seven matrices. So the second ratio folds
+the *core* change in with the schedule change -- and at a different
+refinement depth: =DEFAULT_REFINE_MAX_STEPS = 10= (=solve.rs:1954=), not 1.
+
+Confirmed =Solver::refine_into= (=src/numeric/solver.rs:1690-1722=) passes
+=SolveCore::Auto= on both branches, differing only in whether the pool is
+installed. So par/ser through =Solver= *is* schedule-only and bit-neutral
+per #177; the mistake was using =solve_sparse_refined= as the serial arm.
+
+Wrote =probe_solve_reconcile= to measure all three configurations
+interleaved within each repetition, at both depths, and attribute
+core / schedule / depth separately. Interleaving rather than blocking so
+machine drift hits all three equally -- the earlier cross-run spreads (up
+to 2.20x on the same matrix) are exactly what blocked measurement buys
+you.
+
+Implication: no correction goes on #131 or #189 until this lands. The
+0.92 figure I already posted to #131 is a schedule-only number at depth
+1; whether it is the number a host cares about depends on which depth and
+which core the host actually runs.
+
+* 09:35 :perf:solve:reconciled:issue131:issue189:
+=probe_solve_reconcile=, 11 reps, three configs interleaved per repetition,
+both refinement depths, one process:
+
+|                  |     n | core sv/au | sched au/ap | shipped sv/ap | corr |
+|------------------+-------+------------+-------------+---------------+------|
+| bcsstk38         |  8032 |       1.02 |        0.90 |          0.91 |    0 |
+| r05_kkt          | 14842 |       1.65 |        1.15 |          1.90 |    1 |
+| bratu3d          | 27792 |       1.31 |        0.99 |          1.29 |    0 |
+| qap15_kkt        | 50880 |       1.37 |        1.05 |          1.45 |    2 |
+| dirichlet120_kkt | 54363 |       1.12 |        1.00 |          1.12 |    0 |
+| cont-201         | 80595 |       1.45 |        0.98 |          1.42 |    0 |
+| cont5_late_kkt   | 180900|       1.88 |        1.01 |          1.90 |    1 |
+| geomean steps=1  |       |       1.37 |        1.01 |          1.38 |      |
+| geomean default  |       |       1.30 |        0.98 |          1.27 |      |
+
+Three conclusions, two of which overturn what I posted an hour ago.
+
+1. *The parallel solve schedule buys nothing -- confirmed, and cleanly.*
+   geomean 1.01 (steps=1) / 0.98 (default), per-matrix 0.85..1.15. The
+   #131 conclusion survives. What does not survive is the 0.92 figure and
+   the spread table behind it.
+
+2. *"The measurement is not reproducible" was false -- my method was.*
+   The 1.44x..2.20x same-matrix spreads I posted to both issues came from
+   comparing configurations measured in separate blocks and separate runs.
+   Interleaved within a repetition, the same comparisons are stable to
+   ~1.0-1.15x. Blocked measurement produced a 2.4x error on r05_kkt: I
+   reported CB-parallel at 0.67 vs shared-vector; interleaved it is 1.65x
+   *faster*. Nothing about the machine changed.
+
+3. *New, and the real finding: =SolveCore::Auto= is worth 1.30-1.37x
+   geomean and the bench cannot see any of it.* =solve_sparse_refined=
+   hardcodes =SolveCore::SharedVector= (=solve.rs:2077=); =Solver= runs
+   =Auto=. So the solve column feral publishes is a configuration no host
+   runs, and it under-reports the shipped path by geomean 1.27-1.38x, up
+   to 1.90x on cont5_late_kkt. That is #189 item 1, and it is a much
+   bigger deal than "the harness cannot observe the CB core."
+
+Corollary that also overturns a posted claim: =cb_core_profitable= is
+*well calibrated*, not mis-calibrated. It picks ContribBlock on exactly
+the six matrices where core > 1 (1.12..1.88) and SharedVector on
+bcsstk38, the one where the core is a wash (1.02). 7/7. My "approves the
+losing case r05_kkt at 0.67" was the blocked-measurement artifact above.
+Withdraw the "re-fit the gate against worker count" rescope item.
+
+Refinement depth is a non-issue: corrections actually run at default
+depth are 0 or 1 on six of seven matrices (qap15_kkt runs 2), so
+=max_steps=1= and =max_steps=10= are nearly the same call. The depth
+hypothesis for the two probes' disagreement is dead; the core confound
+explains all of it.
+
+* 09:45 :perf:solve:batching:reverified:
+Re-measured the batching lever interleaved (=probe_batch_interleaved=,
+11 reps, nrhs=13, =solve_into= x13 vs =solve_many_into=), because after
+the above every blocked number is suspect:
+
+  bcsstk38 2.20  r05_kkt 2.80  bratu3d 2.44  qap15_kkt 2.31
+  dirichlet120_kkt 2.37  cont-201 2.62  cont5_late_kkt 2.58
+  geomean 2.47x  min 2.20x
+
+Blocked measurement had said geomean 2.29x, min 1.70x. Batching survives
+and is slightly better than reported. This is the one lever whose blocked
+and interleaved numbers agree -- consistent with it having been stable
+across runs all along, unlike the schedule ratio.
+
+* 10:05 :bench:issue189:step1:harness:
+Step 1 of =dev/plans/large-n-solve-gate.md=: switched the sparse KKT
+corpus solve timing (=src/bin/bench.rs:1963=, plus the resample closure
+at =:1988=) off the free =solve_sparse_refined= and onto
+=solve_sparse_refined_auto_into(.., parallel = false, ..)=.
+
+Rationale is the 09:35 measurement: the free function hardcodes
+=SolveCore::SharedVector= (=solve.rs:2077=) while every =Solver= entry
+dispatches through =Auto=, so the published solve column measured a core
+no host runs.
+
+Chose =parallel = false= deliberately rather than installing a pool. Per
+#177 the pool is schedule-only and bit-neutral, and the same probe
+measures that schedule at geomean 1.01/0.98 -- nothing. Serial keeps the
+reading free of thread-count variance while still measuring the host's
+*arithmetic*. Timing =ap= instead would import scheduler noise for no
+measurable gain.
+
+Expected effect on the aggregate is small and I want that on the record
+before the numbers land: the corpus is ~154k matrices dominated by tiny
+ones where =Auto= picks =SharedVector= anyway. The 1.30-1.37x was
+measured on n = 8e3..1.8e5, a thin slice of the corpus. If the geomean
+barely moves, that is the expected outcome -- the point of the change is
+that the column now describes the core hosts run, not that the number
+improves.
+
+Note the reported *residual* also changes on matrices where =Auto= picks
+=ContribBlock=: the two cores are different reassociations (#177), so
+=rel_res= moves by ~kappa*eps. Tolerance is =n * eps * 1e6=, generous
+enough that this should not flip any pass/fail, but it is a real change
+to a reported number and gets checked against the run.
+
+=cargo clippy --bin bench -- -D warnings= clean; release build clean.
+
+* 10:35 :bench:regression:unresolved:
+Bench run with the Step 1 change (=Auto= core on the sparse solve
+timing). *Sparse small-frontal exit partition FAILS: p90 2.03 vs target
+<= 2.0*, against 1.58 PASS in session 2026-08-19-05. Reporting before
+diagnosis per CLAUDE.md.
+
+|                          | 2026-08-19-05 | this run |
+|--------------------------+---------------+----------|
+| sparse factor/MUMPS gmean|          0.45 |     0.51 |
+| sparse factor/MUMPS p50  |          0.32 |     0.40 |
+| sparse factor/MUMPS p90  |          1.58 |     2.03 |
+| sparse factor/MUMPS max  |         10.58 |    68.79 |
+| sparse solve/MUMPS gmean |          0.08 |     0.08 |
+| sparse solve/MUMPS p50   |          0.08 |     0.08 |
+| sparse solve/MUMPS p90   |          0.15 |     0.17 |
+| sparse solve/MUMPS max   |          2.71 |    23.83 |
+| dense small-frontal p90  |          1.58 |     1.73 |
+| dense medium p90         |          2.00 |     2.13 |
+
+Two reasons to suspect machine state rather than the change:
+
+1. The failing number is the *factor* ratio. The change touches only the
+   solve timing call; it cannot affect factorization at all.
+2. The *dense* partition also degraded (1.58 -> 1.73, 2.00 -> 2.13), and
+   the dense loop shares no code with the edit --
+   =src/dense/solve.rs:69= is a separate implementation with no
+   =SolveCore=. It is an untouched control and it moved the same
+   direction.
+
+But the solve max (2.71 -> 23.83) is exactly where a wrong core choice
+would show, so "obviously the machine" is not good enough. Stashed the
+change and started a control run on unmodified code, same machine, same
+session. That is the A/B I should have had before drawing any conclusion
+-- the whole lesson of 09:35.
+
+* 11:05 :bench:regression:diagnosed:harness:
+Control run settles it and refutes my own hypothesis from 10:35.
+
+Stashed the Step 1 change, rebuilt, re-ran on the same machine in the
+same session. *Unmodified code: sparse small-frontal p90 1.58 PASS,
+dense 1.58 / 2.00 PASS* -- reproducing 2026-08-19-05 exactly. So the
+2.03 FAIL is caused by the change, not by machine state. The reasoning
+at 10:35 -- "the dense partition also degraded, and it shares no code" --
+was coincidence I read as evidence. It did not reproduce.
+
+Mechanism, and it is the same failure mode as everything else today:
+
+=resample_or_fallback= (=src/bin/bench.rs:1060=) runs *factor and solve
+interleaved* in one closure, =RESAMPLE_COLD_REPS = 5= times, and reduces
+=factor_us= by **min** across those reps. So whatever the solve does to
+cache and allocator state is what the next replicate's factor is measured
+in. Change the solve and the factor reading moves.
+
+And the population it moves on is not arbitrary: =should_resample=
+(=:1042=) fires when =mumps_timing.factor_us < 200=, i.e. small matrices
+-- which is exactly the =small-frontal (<200)= bucket that failed. The
+buckets and the resample predicate select the same matrices.
+
+My version made it worse than necessary by allocating =rs_x= *inside* the
+timed solve region on every replicate: an n-double alloc-and-zero per
+rep, plus allocator churn feeding the next rep's factor. Hoisted the
+buffer to one allocation per matrix, reused across replicates. Re-running.
+
+Two things to carry forward regardless of how the re-run lands:
+
+1. This is a pre-existing harness defect, not something the change
+   introduced. Any solve-side change perturbs the small-matrix factor
+   reading today. The denoise loop was built (2026-04-20-01) to make
+   small-matrix readings *stable*; interleaving the two phases inside it
+   makes them *coupled* instead.
+2. It belongs in the Step 1 scope in =dev/plans/large-n-solve-gate.md=,
+   which already flagged the min/median reduction as "needs restating for
+   a gate." Restating is not enough -- the phases need separate timing
+   passes so one cannot leak into the other.
+
+* 11:25 :bench:resolved:step1:
+Re-run with the solve buffer hoisted out of the timed region: *FAIL
+resolved.*
+
+| bucket                   | baseline 08-19-05 | control (unmod) | with change |
+|--------------------------+-------------------+-----------------+-------------|
+| sparse small-frontal p90 |         1.58 PASS |       1.58 PASS |   1.54 PASS |
+| sparse medium p90        |         1.58 PASS |       1.58 PASS |   1.54 PASS |
+| dense small-frontal p90  |         1.58 PASS |       1.58 PASS |   1.59 PASS |
+| dense medium p90         |         2.00 PASS |       2.00 PASS |   1.96 PASS |
+
+Worst sparse factor ratio 68.79 -> 9.29. The 1.58 -> 1.54 movement is
+within run-to-run noise and is *not* claimed as an improvement; the claim
+is only that the regression is gone.
+
+So the entire 2.03 FAIL was the per-replicate allocation inside the timed
+solve region, feeding the next replicate's factor through the min
+reduction. An 8 KB alloc-and-zero per rep at n < 1000 was worth 1.58 ->
+2.03 on a p90 over 153,455 matrices. That is a sharper demonstration of
+the coupling than I would have designed on purpose.
+
+The coupling itself is still there -- =resample_or_fallback= still
+interleaves factor and solve, so the next solve-side change can do this
+again. Recorded as a Step 1 item rather than fixed here: fixing it means
+restructuring the reduction, which changes every small-matrix number in
+the corpus and deserves its own commit and its own before/after.
+
+* 12:10 :bench:confirmed:spread:
+Third full bench run (complete output captured, not =| tail -25=), to get
+the ratio tables the checkpoint needs and to serve as a second
+confirmation of the fix.
+
+| bucket                   | baseline 08-19-05 | control (stashed) | run 2 | run 3 |
+|--------------------------+-------------------+-------------------+-------+-------|
+| sparse small-frontal p90 |              1.58 |              1.58 |  1.54 |  1.61 |
+| sparse medium p90        |              1.58 |              1.58 |  1.54 |  1.61 |
+| dense small-frontal p90  |              1.58 |              1.58 |  1.59 |  1.64 |
+| dense medium p90         |              2.00 |              2.00 |  1.96 |  1.98 |
+
+All PASS. The two post-fix runs bracket the baseline (1.54, 1.61 vs
+1.58), which is the spread number Step 1 asked for: run-to-run movement
+of the sparse small-frontal p90 on this machine is about +/-0.04, ~2.5%.
+Any future claim of a bench improvement smaller than that is noise. This
+also retires the "with change = 1.54" reading from the 11:25 entry as a
+point estimate -- the honest statement is that the change is
+indistinguishable from baseline on the factor partition, which is what it
+should be, since it touches only the solve.
+
+Sparse aggregate, run 3 (=solve/MUMPS=): geomean 0.08, p50 0.08, p90
+0.16, p99 0.88, max 3.12. Baseline was 0.08 / 0.08 / 0.15 / --- / 2.71.
+The geomean and p50 did not move, exactly as predicted in the 10:05 entry
+before the first run: the ~154k-matrix corpus is dominated by small
+matrices where =Auto= picks =SharedVector= anyway, so timing the =Auto=
+core cannot show up in the aggregate. The 1.30x that
+=probe_solve_reconcile= measures lives entirely at n >= 8k, and the
+corpus has almost none of that. Implication for Step 2: the large-n gate
+needs its own matrix set; it will never be visible in this harness's
+aggregate.
+
+The =factor/MUMPS= max fell 68.79 -> 9.71 and the worst-offender list
+changed identity (CRESC100/MUONSINE -> ACOPR14/KIRBY2). That tail is
+resample-loop noise on sub-millisecond matrices, not a real factor
+change; the max column is not a stable statistic here and should not be
+quoted as a result.
+
+* 14:05 :measurement:rejected:blas3:
+Discarded the entire two-build kernel comparison. Built stock (threshold 32)
+and patched (threshold 2) binaries of probe_blas3_crossover and ran them
+alternating, on the theory that alternation cancels drift. Two controls say
+otherwise. The looped single-RHS path is byte-identical in both builds and
+must read 1.00 across builds; it read 1.15, 1.58, 1.97, 2.10. And nrhs in
+{32,40,48}, where both builds dispatch to the same kernel so the ratio must be
+exactly 1.00, read 0.86-0.90 — a >=10% systematic bias with no code cause.
+A sweep takes ~25 min, so "adjacent" runs are 25 min apart: blocked
+measurement wearing an interleaved label. Same error as this morning's two
+retractions, one level down. Killed the remaining runs (pkill, 0 left) and
+reported no number from the paired dataset. Logged in tried-and-rejected.md.
+
+* 14:20 :method:blas3:
+Replaced it with an in-process design: new `kernel-probe` Cargo feature (off
+by default, compiled out entirely — with it off the dispatch reads the const
+directly as before) exposes set_blas3_nrhs_threshold. One process now times
+rank-1 and BLAS-3 at the *same* nrhs, alternating within each of 9 reps —
+microseconds apart, not 25 minutes. Both `cargo build --release` and
+`--features kernel-probe` compile clean.
+
+* 14:40 :finding:blas3:confirmed:
+The threshold was the wrong question. Timing both kernels at the same nrhs
+shows a sawtooth with period 8, not a crossover. bcsstk38 rank1/blas3:
+nrhs=8 2.12, 10 1.40, 12 1.06, 14 0.89, 16 1.60, 20 1.00, 24 1.36, 28 1.14,
+31 1.03, 32 1.31. BLAS-3 wins decisively at every multiple of NR=8 and decays
+as nrhs moves off one.
+
+Cause: gemm_scalar_block handled the nrhs%NR column tail with an unblocked
+triple loop — for every output element it re-walked all of A's row (stride
+col_stride) and B's column (stride nrhs), no reuse. Fitting blas3_us on the
+multiples of 8 and attributing the excess to tail columns puts a tail column
+at 1.6-5.1x a blocked column, consistent across all five matrices analysed.
+
+Cleanest evidence, needing no fit and no cross-process comparison: within a
+single run, t(31)/t(32) should be ~0.97 (31 is 3% less work). Measured:
+bcsstk38 1.61, r05_kkt 1.41, bratu3d 1.79, qap15_kkt 1.47, dirichlet120_kkt
+1.80, cont-201 1.47, cont5_late_kkt 1.64. All seven. nrhs=31 costs 1.4-1.8x
+nrhs=32.
+
+This is a defect, not a tuning parameter, and it is orthogonal to the
+threshold: it hits every nrhs>=32 caller whose nrhs is not a multiple of 8 —
+7 cases in 8, including pounce's Schur path where nrhs = n_s is problem data.
+
+* 14:55 :fix:blas3:bitneutral:
+Replaced gemm_scalar_block with gemm_tile<const R: usize>: runs the tails at
+full NR register width with unused lanes zero-padded. Padded lanes compute
+0.0 - a*0.0 == 0.0 every step and are never stored, so each stored element
+stays a left fold over increasing k. The MR x NR main loop is untouched —
+deliberately, to put zero risk on the path that already works.
+
+Bit-neutral, two independent checks:
+- New test panel_gemm_is_bit_identical_to_the_reference_on_every_tail_shape
+  asserts to_bits() equality against a scalar left-fold reference over 800
+  shapes (16 nrhs x 10 m_dim x 5 k_dim), covering every nrhs%8 and m_dim%4
+  residue. Passes.
+- The probe's max|rank1-blas3| column is unchanged at all 89 (matrix,nrhs)
+  points compared before vs after. rank-1 is untouched, so any change in the
+  BLAS-3 output would move it. Zero moved.
+
+Because it is bit-neutral it needs no threshold change, no tolerance change,
+and no sign-off on the assert_eq!(max_diff, 0.0) band contract.
+
+* 15:10 :measurement:selfinflicted:
+First after-fix probe run is contaminated and discarded: I ran
+`cargo test --release` (full release compile + 451 tests) while it was timing.
+Signature is unambiguous — matrices early in the sweep (bcsstk38, r05_kkt,
+qap15_kkt) show tail excess *worse* than before, matrices late in it
+(dirichlet120_kkt, cont-201) show it collapsed to ~0-1x. That is the compile
+finishing partway through, not a property of the kernel. Re-running with the
+machine quiet, and switching the headline metric to within-run t(31)/t(32),
+which needs no fit and no cross-process comparison.
+
+* 15:40 :finding:refuted:alignment:
+The tail hypothesis was wrong as the *cause*. Discriminating experiment:
+nrhs=33 has ONE tail column, nrhs=31 has SEVEN. If tail count drove cost they
+would differ sharply. bratu3d blas3: 31->72298, 32->46582, 33->74154,
+34->74043, 36->76060, 38->80859, 40->58760. 33 costs 1.59x 32 while doing 3%
+MORE work, and matches 31 to within 3%. Tail count does not predict cost.
+Stride does: 32 and 40 doubles are 256 and 320 bytes, whole cache lines;
+31/33/34/36/38 are not.
+
+Cause is cache-line alignment of the row-major leading dimension. y and w are
+row-major with ld = nrhs (issue #57), so a non-multiple-of-8 nrhs makes every
+panel row straddle cache lines, compounding across gather, kernels, scatter.
+
+Fix: padded_ldw(nrhs) = nrhs.div_ceil(8)*8 as the row stride on the panel
+path. Padding columns carry a zero RHS and are never read back, so every real
+column's arithmetic and order is untouched. Rank-1 path keeps the raw stride —
+it gains nothing and would only pay for the extra columns.
+
+The tail fix (gemm_tile) is kept: it moved t(31)/t(32) from 1.41-1.80 to
+1.39-1.51 on its own, is bit-neutral, and is a prerequisite for the follow-up
+below.
+
+* 16:05 :result:confirmed:alignment:
+Sawtooth eliminated. Within-run t(31)/t(32), which needs no cross-process
+comparison: 1.61->1.06, 1.41->0.73, 1.79->1.38, 1.47->0.88, 1.80->0.96,
+1.47->0.97, 1.64->1.00 across the seven KKTs. Anchored on nrhs=32, which is
+byte-identical code before and after (padded_ldw(32)==32), so uniform drift
+cancels.
+
+Bit-identical: max|rank1-blas3| unchanged at all 105 (matrix,nrhs) points;
+new 800-shape to_bits() test passes; all 13 tests/multi_rhs.rs pass including
+both assert_eq!(max_diff, 0.0) band contracts. Full suite green, clippy clean
+with --all-features.
+
+IMPORTANT scoping correction: the probe forces blas3 at every nrhs, but the
+library only dispatches to it at nrhs>=32. So the big ratios at nrhs 6-31 are
+diagnostic, not shipped gain — quoting the 1.83x geomean over those points as
+the headline would overstate by ~35%. Shipped regime is nrhs>=32 and not a
+multiple of 8. At nrhs=33, two independent framings agree: anchored 1.21/1.59/
+1.32x, raw absolute 1.22/1.22/1.32x. Geomean 1.36x.
+
+Residual t(33)/t(32) ~ 1.21 after the fix is exactly 40/33 — the cost of the
+7 padding columns, not leftover misalignment. Follow-up available: keep the
+aligned stride but iterate only the live columns with a masked final tile
+(gemm_tile already takes `live`). Recovers ~18% more at nrhs=33; needs a
+stride-vs-live parameter through five kernels, so it is a separate change.
+
+* 16:40 :bench:checkpoint:caveat:
+Session-end bench after a0b4d64. All four Phase 2.8.1 buckets PASS, but the
+factor p90s are the worst of the four runs recorded across 08-20-01 and this
+session: sparse small-frontal and medium both 1.65 (baseline 1.58, prior runs
+1.54/1.61), dense small-frontal 1.66 (1.59/1.64), dense medium 2.04 (2.00,
+prior 1.96/1.98). solve/MUMPS geomean and p50 held at 0.08 exactly.
+
+a0b4d64 cannot mechanically explain this: the bench times factorization and a
+*single-RHS* solve, and the change is confined to solve_sparse_core_many_into
+plus the panel GEMM reached only from fwd_blas3/back_blas3. solve_sparse_core_into
+and the whole factorization are byte-identical.
+
+Most likely machine state — the box had been under sustained compile and probe
+load for hours. But that is a hypothesis, NOT a result: no control run on
+stashed code was done. A similarly plausible attribution was already refuted
+once this session (the tail-loop hypothesis), so this one is recorded as
+unverified and the next session must re-run the bench cold before reading
+anything into it.
+
+* 16:50 :checkpoint:
+Checkpoint written to dev/sessions/2026-08-20-02.md, leading with the
+unfavorable bench comparison per CLAUDE.md. context.md refreshed (329 lines).
+
+* 17:20 :scope:pounce:correction:
+Read pounce issue #698 comment 5359027510 (srikanth-gm). Its subject is a
+residual 946 KB copy-back in pounce's backsolve and a possible feral
+`solve_in_place`, which the reporter bounds themselves at ~95 us against a
+0.2162 s per-iteration back-solve — under their ~30% run-to-run noise. Agreed;
+no feral issue filed, belongs as a line item under #134 if anywhere.
+
+The useful part was incidental: the comment mentions "six times that under the
+column batching at limited_memory_max_history = 6", naming a third multi-RHS
+call site I had not enumerated. Confirmed in the pounce tree (e1173385):
+alg_builder.rs:1037 and :1508 both set limited_memory_max_history: 6, and
+pounce-feral/src/lib.rs:1004,1006 is the batched backsolve.
+
+6 < BLAS3_NRHS_THRESHOLD = 32, so that path takes rank-1 and a0b4d64 cannot
+reach it. Checked whether that is a missed opportunity: probe rank1/blas3 at
+nrhs=6 is 0.79/0.86/0.73/0.81/0.68/0.75/0.70 across the seven matrices —
+rank-1 is FASTER at that width, so the dispatch is already right and there is
+no case for lowering the threshold.
+
+Net: pounce has three multi-RHS sites (nrhs=1 IPM hardcoded, nrhs=6 batched
+backsolve, n_s Schur) and a0b4d64 reaches only the third, and only when
+n_s >= 32. Schur can be wide — schur_aug_system_solver.rs:36 sets
+DEFAULT_MAX_SCHUR_FRAC = 0.5 — but this is one path under one condition.
+The 1.36x is a solve-kernel number, NOT a pounce end-to-end number.
+
+Amended dev/sessions/2026-08-20-02.md in place (marked as a correction) and
+appended a new decisions.md entry rather than editing the prior one.
+
+* 18:30 :bench:cold:resolved:
+Cold bench re-run (built cold, 180s settle, machine quiet). All four Phase
+2.8.1 buckets returned to the BOTTOM of the observed band: sparse
+small-frontal 1.54, sparse medium 1.54, dense small-frontal 1.59, dense
+medium 1.97 — against the hot run's 1.65/1.65/1.66/2.04 and the 08-19-05
+baseline of 1.58/1.58/1.58/2.00.
+
+Two independent machine-state signatures confirm it was not a0b4d64:
+factor/MUMPS max fell 71.94 -> 9.10, and the worst-offender list changed
+identity entirely (GAUSS2/CRESC100 ~87 cold vs HAIFAM/HAHN1 ~72 hot).
+factor/SSIDS p99 also fell 1.11 -> 0.95.
+
+The 2026-08-20-02 checkpoint caveat is resolved: a0b4d64 did not regress the
+factor path, as the mechanical argument predicted but could not prove.
+
+* 19:15 :perf:rejected:masked-tile:
+Implemented the masked-tile follow-up (stride ld vs live nrhs through
+fwd_blas3/back_blas3/dsolve_node/gemm_panel_minus). Correct — 445 tests pass,
+clippy RC=0, bit-identity sweep extended to 1600 shapes over both stride
+regimes, plus a new pad-columns-untouched assertion that I mutation-checked
+(re-injecting the full-ld loop fails it: "pad column 1 written at row 0 for
+nrhs=1 ld=8"). rank1-vs-blas3 max abs diff unchanged at all 42 points.
+
+AND IT IS SLOWER. Anchored geomean over seven KKTs: 0.823x at nrhs=33,
+0.799x at 36, 0.797x at 47. Slower in raw us on every matrix too (1.11-1.34x
+worse at nrhs=33). Null controls (nrhs 32/40/48, where masking is a provable
+no-op — identical machine code) moved only 1.019x, so ~1.9% drift against a
+~20% effect. Decisive.
+
+Pre-mask, cost was a pure function of padded_ldw: t(36)~t(40) on all seven
+(bcsstk38 7059 vs 7111 us), t(47)~t(48) on all seven, t(33)/t(32)=1.225 vs
+40/33=1.212 predicted. Post-mask it tracks NEITHER the pad model (1.250) nor
+the work model (1.031) — it is 1.490, worse than both.
+
+Conclusion: the padding is not waste, it is what keeps every loop a whole
+number of 8-wide vector operations. My "18% available headroom" note from
+16:05 was WRONG and is retracted. Reverted in full; nothing kept. Recorded
+in tried-and-rejected.md.
+
+* 20:10 :issue-190:refinement:verify:
+Read feral#190 in full and checked all five of its code claims against
+the tree at 7de1a93. All confirmed. The issue cites solve.rs:2574 and
+:2749; those predate a0b4d64 (+~250 lines), so located by content:
+threshold is at :2693 (single-RHS) and :2872 (multi-RHS), RefineOptions
+at :2118, the ForceAccept comment at :2146 (quoted verbatim in the
+issue), and both Solver::*_refined_into sites at solver.rs:1676 / :1824
+do discard diagnostics. Arithmetic checks too: eps*sqrt(118276) =
+7.636e-14, so the target really is out of reach on that KKT and the
+"always runs to the cap" mechanism follows.
+
+* 20:25 :issue-190:design:cost:
+Two design findings before writing anything.
+
+(1) Returning RefinementDiagnostics from the hot path would be a serious
+cost regression. solve.rs:2596 gates kappa_1_est on with_diagnostics,
+and kappa comes from estimate_inverse_norm_1 (Hager-Higham) which the
+struct's own doc puts at 3-5 extra solves per run. #190's benchmark
+already spends 48.962 s in back-solve at max_steps=10 -- routing the
+host's normal call through diagnostics multiplies exactly the cost the
+issue exists to cut. The issue allows "even just usize". Everything a
+host needs (steps taken, relative residual, which exit fired) is already
+computed in the loop and discarded, so a small Copy struct is free.
+
+(2) ||r||_2/||b||_2 is a weaker measure than #190's own stated goal.
+The issue says the host wants "what a stable LDL^T would have returned
+-- a backward-stable solve of the system it factorized". The direct
+measure of that is the componentwise backward error of Arioli-Demmel-Duff
+1989, omega = max_i |r_i| / (|A||x| + |b|)_i, which is what MA57
+(RINFO(6..8)) and MUMPS (RINFO(7..8)) actually report. It has a
+principled stopping point (omega <~ u = "the solve is honest", no guessed
+number) and it is scale-aware per row, which matters because #190's
+corpus includes a badly-scaled LP at data scale 1e11. Cost is one extra
+pass over A per step and ZERO extra solves -- unlike anything derived
+from kappa.
+
+Naive omega is fragile: a row whose denominator underflows gives a
+spuriously huge ratio that refinement cannot reduce, so the criterion
+would never fire -- the same failure mode #190 reports for eps*sqrt(n).
+Adopting LAPACK dgerfs' guarded form (safe1 = (n+1)*MIN_POSITIVE,
+safe2 = safe1/EPSILON) instead. Side benefit: a published formula is an
+external oracle, which CLAUDE.md requires when implementation and test
+would otherwise be written in the same session.
+
+Asked the user; they chose both criteria via a StopCriterion enum, and
+deferred the release-shape decision until #190 is measured. Research
+note at dev/research/issue-190-refine-target.md, plan at
+dev/plans/issue-190-refine-target.md.
+
+* 21:40 :issue-190:implement:
+Implemented the full #190 design. `CscMatrix::abs_symv` (4 tests),
+`backward_error` in solve.rs against the LAPACK dgerfs formula (4 oracle
+tests, expected values from an independent Python script written before the
+Rust), `StopCriterion`/`RefineOptions.stop`, `RefineOutcome`/`RefineStop`,
+wired through the single-RHS core, the batched multi-RHS path, and both
+`Solver` entry points. New integration suite `tests/issue190_refine_target.rs`
+(15 tests) including a bit-identity check that the default criterion
+reproduces pre-#190 behavior and that the batched path matches the
+per-column loop.
+
+Three compile errors surfaced and fixed along the way:
+- `probe_largen_solve_levers.rs:150` matched `Ok(())` against what is now
+  `Result<RefineOutcome, _>` (E0308) -> `Ok(_)`.
+- the new test used `Solver::factor(..).is_ok()`, but `factor` returns
+  `FactorStatus`, not `Result` (E0599).
+- `FactorStatus` derives only `Debug`, no `PartialEq`, so `assert_eq!` on it
+  does not compile either. Used `matches!` rather than widening the public
+  derive set for a test's convenience.
+
+Docs done: CHANGELOG `[Unreleased]` entry and a `dev/decisions.md` append
+recording why an enum rather than a numeric field, why `RefineOutcome` and
+not `RefinementDiagnostics` (kappa_1_est = 3-5 extra solves), and the
+documented `d_i == 0` deviation from dgerfs with its proof.
+
+* 22:05 :issue-190:test:measurement:
+First full run of `tests/issue190_refine_target.rs` failed 3 of 15. All three
+were my test constants, not the implementation: I had guessed target values
+instead of measuring what the fixture can reach.
+
+  a_backward_error_target_stops_early_too      berr 1e-8  -> MaxSteps
+  a_tighter_relative_target_costs_more_steps   rel  1e-10 -> MaxSteps
+  the_multi_rhs_path_honors_each_criterion     rel  1e-6  -> MaxSteps
+
+Wrote a throwaway probe (`tests/tmp_probe190.rs`, deleted after) to get the
+actual ladder for `full_budget_case()`, single RHS, per correction step:
+
+  k     1        2        3        4        5
+  rel 2.37e-3  7.74e-4  2.55e-4  8.38e-5  2.76e-5
+  ome 1.21e-3  4.85e-4  1.66e-4  5.53e-5  1.82e-5
+  k     6        7        8        9       10
+  rel 9.07e-6  2.99e-6  9.82e-7  3.23e-7  1.06e-7
+  ome 6.01e-6  1.98e-6  6.51e-7  2.14e-7  7.05e-8
+
+Contraction is 3.0x per step and the 10-step floor is rel 1.06e-7 /
+omega 7.05e-8. So 1e-10 and 1e-8 were below the floor; the loop was
+correctly reporting MaxSteps. Retargeted to 1e-4 (4 steps) and 1e-6
+(8 steps), both measured, and put the ladder in the module comment so the
+constants are not magic. 15/15 pass.
+
+** Unplanned finding: omega is far more uniform across columns than ||r||/||b||
+On the 20-column `many_rhs` fixture at the cap:
+
+  criterion  best column   worst column   spread
+  rel        1.06e-7       4.46e-6        42x
+  omega      2.86e-8       7.65e-8        2.7x
+
+The columns differ only by an additive offset in b, so ||b|| varies and the
+normwise ratio inherits that variation; the componentwise measure does not.
+Consequence at a fixed numeric target on the batched path:
+
+  t      rel steps        berr steps
+  1e-3   6  Converged     2  Converged
+  1e-4   8  Converged     4  Converged
+  1e-5  10  Converged     6  Converged
+  1e-6  10  MaxSteps      8  Converged
+  1e-7  10  MaxSteps     10  Converged
+
+A batched normwise target is hostage to its worst-scaled column: at 1e-5 it
+costs 10 steps where the componentwise target costs 6 for a solution of
+equivalent backward quality. This was not an argument I had for the design
+beforehand -- the research note justified omega on scale-awareness within a
+single system. It is a stronger argument on the multi-RHS path, which is
+exactly the path pounce's Schur solver uses.
+
+* 22:20 :needs-refinement:provenance:caveat:
+Found an uncommitted change to =src/dense/factor.rs= in the working tree
+while staging #190: =flag_growth_for_refinement= now compares =|L_ij|=
+against =1/pivot_threshold= (the multiplier bound TPP actually promises)
+instead of a fixed =1e6=, with the constant kept only as the =u = 0=
+fallback. Four new =growth_flag_tests= cases; suite green, clippy clean.
+
+The change stands on its own: =|L_ij| <= 1/u= is the contract of threshold
+partial pivoting, so it is the right thing to check the factor against, and
+unlike =1e6= it is scale-free and moves with =increase_quality=.
+
+**Provenance caveat, stated because it matters.** The doc comment cites a
+pounce measurement -- a 126028-order KKT where the old test fired on 91 of
+108 factorizations whose actual growth =max|L|/max|A|= was 8.7e-8, and where
+the largest =|L|= anywhere was 5.1e7 against a promised 1e8 -- and I cannot
+reproduce that measurement from anything in this session's record. Grepping
+the transcript finds those numbers only inside the diff itself, and there is
+no probe output, research note, or journal entry behind them. Committing it
+separately from #190 for exactly that reason: the mathematical argument is
+sound and self-contained, the cited numbers are not independently checkable
+here and should be re-derived before they are quoted anywhere else.
+
+* 23:05 :issue-190:measurement:unfavorable:
+Ran =probe_refine_stop_criterion= (best-of-5 wall, seven matrices, two RHS
+families) to test #190's stated premise: "on a large ill-conditioned system
+the eps*sqrt(n) target is not reachable and the loop always runs the full
+budget." Output: =/tmp/feralmsg/probe190b.txt=.
+
+*The premise does not reproduce on this corpus.* With a well-scaled RHS the
+default criterion converges in 0-2 steps on every matrix -- never at the
+10-step cap:
+
+: matrix            n        default steps   omega
+: r05_kkt           14842    0  Converged    4.546e-13
+: qap15_kkt         50880    2  Converged    2.690e-16
+: dirichlet120_kkt  54363    0  Converged    1.679e-14
+: cont-201          80595    0  Converged    8.720e-14
+: cont5_late_kkt    180900   1  Converged    1.711e-16
+: bratu3d           27792    0  Converged    2.467e-15
+: bcsstk38          8032     0  Converged    1.324e-15
+
+So there is no wasted-step saving to claim. The largest local matrix is
+=c-big= at n=345241; the n=118276 system #190 cites is a pounce *runtime*
+KKT and is not in the local corpus, so the premise is untested at its own
+scale, not refuted at it. Stated as a corpus limit, not as vindication.
+
+*What the measurement did find is a correctness gap, not a speed gap.* With
+a badly-scaled RHS (entries 1e-6..1e6, alternating sign) the default
+declares =Converged= at normwise rel ~1e-14..1e-17 while the componentwise
+backward error is up to eleven orders worse:
+
+: matrix            default: steps  rel        omega      | BE(1e-12): steps  omega      cost
+: r05_kkt                   0       2.674e-14  9.520e-5   | 1                 2.655e-16  0.48x
+: bratu3d                   0       4.141e-16  8.953e-6   | 1                 3.170e-16  0.48x
+: cont-201                  0       3.385e-16  3.860e-7   | 1                 2.909e-16  0.48x
+: dirichlet120_kkt          0       7.720e-17  4.310e-10  | 1                 2.658e-16  0.49x
+: bcsstk38                  0       2.456e-15  1.098e-10  | 1                 7.742e-16  0.39x
+: qap15_kkt                 2       1.303e-16  1.229e-10  | 8 Stagnated       4.218e-11  0.32x
+: cont5_late_kkt            1       1.867e-16  8.398e-14  | 1 (BE 1e-14: 2)   4.474e-16  0.61x
+
+Six of seven: the default stops at a solution that is *not* backward stable
+componentwise, and reports success. One =BackwardError= step fixes it. The
+=rel= column is the point -- 4.14e-16 on bratu3d looks like a perfect solve
+and sits next to omega = 8.95e-6. A normwise test cannot see this because
+=||r||_2/||b||_2= is dominated by the rows where |b_i| ~ 1e6 and says
+nothing about the rows where |b_i| ~ 1e-6.
+
+*Cost, stated plainly: the criterion buys quality, not speed.* The fix is
+~2x on the solve (0.39x-0.61x "vs def"), factor excluded. The only speedups
+measured are (a) qap15 easy, =BackwardError(1e-10)= 1.45x by stopping at
+omega 8.755e-12 instead of 2.690e-16, and (b) qap15 hard,
+=RelativeResidual(1e-12)= 1.49x at omega 8.038e-10 vs the default's
+1.229e-10 -- faster *and worse*. Both are the caller choosing to buy less
+accuracy, which is exactly what the knob is for, but neither is a free gain.
+
+*Caveat the docs must carry:* the new knob can burn the budget the same way
+the old constant did. qap15_kkt hard with =BackwardError(1e-14)= runs 8
+steps, exits =Stagnated=, lands at omega 4.218e-11 -- 0.32x for nothing,
+because 1e-14 is below what that factorization can deliver. An unreachable
+componentwise target has the identical failure mode #190 complained about.
+=BackwardError(1e-10)= on the same system converges in 3 steps at
+essentially the same omega (4.388e-11).
+
+Conclusion against the standing bar ("rigorous, thoroughly correct, and
+result in performance gains, or we will not include it in a release"): the
+work is rigorous and correct, and it is *not* a performance gain. If it
+ships, it ships as an accuracy/observability feature with an honest note
+that the default is unchanged and the new criteria cost roughly one extra
+solve. That is a call for the human, not for me.

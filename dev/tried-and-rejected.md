@@ -5710,6 +5710,173 @@ identical hash over every `L`/`D` bit in storage order across
 is a performance-only change. Not yet established on a matrix that actually
 delays a pivot — all three report `d0`.
 
+## 2026-08-20 — Two-build cross-process comparison of the multi-RHS kernels (rejected: contaminated)
+
+To find where the rank-1 and BLAS-3 multi-RHS kernels actually cross over, I
+built two release binaries of `probe_blas3_crossover` — one stock
+(`BLAS3_NRHS_THRESHOLD = 32`) and one patched to 2 — and ran them alternating,
+on the theory that alternation cancels machine drift. It does not, and the data
+had to be thrown away.
+
+**Symptoms.** Two independent controls failed:
+
+1. *Anchor drift.* The probe also timed the looped single-RHS path, which is
+   byte-identical in both builds. Its cross-build ratio must read 1.00. Across
+   four run pairs it read **1.15, 1.58, 1.97, 2.10**.
+2. *Null control.* At `nrhs ∈ {32, 40, 48}` both builds dispatch to the *same*
+   BLAS-3 kernel, so the batched ratio must be exactly 1.00. It read
+   **0.86–0.90** — a ≥10% systematic bias with no possible code cause.
+
+**Why.** A full sweep is ~25 minutes, so two "adjacent" runs are 25 minutes
+apart. That is blocked measurement with an interleaved label on it — the same
+error behind the two claim retractions earlier the same day, one level up the
+stack. Cross-process A/B of a few-millisecond kernel does not work on this
+machine at this cadence.
+
+The remaining runs were killed (`pkill -f probe_blas3_crossover`, 0 left) and
+no number from the paired dataset was reported as a result.
+
+**Replaced by** an in-process design: the `kernel-probe` feature (off by
+default, compiled out entirely) exposes
+`set_blas3_nrhs_threshold`, so one process can time rank-1 and BLAS-3 at the
+*same* `nrhs`, alternating within each repetition — microseconds apart instead
+of 25 minutes. See `dev/research/blas3-threshold-refit.md`.
+
+**Kept from this attempt:** the single-build, single-process runs are valid,
+because looped-vs-batched was measured within one process. Two findings survive
+and are recorded in the research note: the 31→32 dispatch discontinuity (3% more
+work, batched time *drops* 1.36–1.77×), and that at `nrhs ∈ {2, 4}` batching is
+**21–27% slower** than looping single-RHS solves.
+
+## 2026-08-20 — Masked-tile iteration over only the live multi-RHS columns (rejected: 1.22x SLOWER)
+
+**What was tried.** After `a0b4d64` padded the multi-RHS row stride to a
+cache line, the residual cost at `nrhs = 33` was exactly `40/33` — the
+arithmetic on the 7 zero pad columns. The obvious follow-up: keep the padded
+*stride* for alignment, but iterate only the `nrhs` live columns, with a
+masked final tile. `gemm_tile` already took a `live` argument, so the kernel
+side was ready. Implemented by threading a stride-vs-live distinction (`ld`
+vs `nrhs`) through `fwd_blas3`, `back_blas3`, `dsolve_node` and
+`gemm_panel_minus`, leaving the main `MR x NR` register loop byte-identical.
+
+**It was correct.** Full suite green (445 passed, 0 failed), clippy
+`--all-targets --all-features -D warnings` RC=0, and the bit-identity sweep
+extended to 1600 shapes covering both stride regimes plus a new assertion
+that the pad columns come back bit-for-bit unwritten. That assertion was
+mutation-checked: re-injecting the full-`ld` column loop fails it with
+`pad column 1 written at row 0 for nrhs=1 ld=8`. The rank1-vs-blas3 max abs
+diff was unchanged at all 42 measured points.
+
+**It was slower.** Anchored on `nrhs = 32` (identical machine code in both
+builds), geomean across seven large KKT matrices:
+
+| nrhs | pad cols | before `t(n)/t(32)` | after | masking speedup |
+|---:|---:|---:|---:|---:|
+| 33 | 7 | 1.225 | 1.490 | **0.823x** |
+| 36 | 4 | 1.254 | 1.570 | **0.799x** |
+| 47 | 1 | 1.486 | 1.865 | **0.797x** |
+
+Slower in raw microseconds too, on every matrix, at `nrhs = 33`: 7081->8859,
+10553->12916, 49446->66054, 98328->109038, 103250->138675, 57546->66620,
+193056->243217 (1.11x to 1.34x worse).
+
+**The A/B is trustworthy.** `nrhs` in {32, 40, 48} are multiples of 8, where
+`padded_ldw(n) == n` makes the masking a provable no-op — identical machine
+code in both builds. Those null controls moved 1.019x (range 0.973-1.046),
+so the drift term is ~1.9% against a ~20% effect.
+
+**Why, as far as the measurement shows.** Pre-mask, cost was a pure function
+of `padded_ldw(nrhs)`, confirmed three ways: `t(36) ~ t(40)` on all seven
+matrices (7059 vs 7111 us on bcsstk38; 104460 vs 104470 on dirichlet120),
+`t(47) ~ t(48)` on all seven, and `t(33)/t(32) = 1.225` against `40/33 =
+1.212` predicted. Post-mask, cost tracks neither model — 1.490 at `nrhs = 33`
+is worse than the 1.250 pad model *and* far worse than the 1.031 work model.
+
+Mechanism is inference, not measurement: iterating a non-multiple-of-8 column
+count appears to cost more than the arithmetic it saves, presumably because
+the fixed-width `NR = 8` tile is what lets the loops compile to whole
+vector operations, and a variable-length `live` tail reintroduces exactly the
+per-row irregularity the padding was added to remove. **The pad columns are
+not waste — they are what keeps every loop a whole number of 8-wide
+operations.** 8 extra multiply-adds on aligned lanes beat 7 skipped ones
+behind a mask.
+
+**Consequence.** `a0b4d64`'s padded stride stands as the final form. The
+`40/33` residual is not recoverable this way and should not be described as
+"available headroom" in future notes. Reverted in full; no code from this
+attempt was kept.
+
+## 2026-08-21 — raising `pivot_threshold` from 1e-8 to 1e-2 to "match MA57/MUMPS"
+
+**Tried.** Changed `NumericParams::default()`'s `pivot_threshold`
+(`src/numeric/factorize.rs:645`) from `1e-8` to `1e-2`, on my claim that
+feral was six orders below MA57 and MUMPS, whose library defaults are
+`CNTL(1) = 0.01`, and that this was the pounce deficiency gap.
+
+**Why it was wrong.** The premise is false. Ipopt does not use the library
+defaults — it deliberately lowers them, because in an interior-point method
+accuracy is recovered by inertia correction and iterative refinement rather
+than by pivoting hard. From `ref/Ipopt`:
+
+| Ipopt option | default | source |
+|---|---:|---|
+| `ma27_pivtol` | 1e-8 | `IpMa27TSolverInterface.cpp:97` |
+| `ma57_pivtol` | 1e-8 | `IpMa57TSolverInterface.cpp:205` |
+| `mumps_pivtol` | 1e-6 | `IpMumpsSolverInterface.cpp:131` |
+
+feral's 1e-8 already matches the MA27/MA57 configuration pounce is
+replacing. `tests/issue_2_kkt_ls_init.rs:32`
+(`numeric_params_default_uses_sparse_pivot_threshold`) pins it for exactly
+this reason and cites `ma27_pivtol`; that test is correct and was left
+untouched.
+
+Independently, the threshold was already measured not to be the cause:
+`probe_pivot_threshold_residual` sweeps it from 1e-8 to 0.5 on `qap15_kkt`
+and the unrefined relative residual does not move off ~3e-6.
+
+**Disposition.** Reverted in full (`git checkout src/numeric/factorize.rs`).
+No pivot-threshold change ships. The real gap was the refinement stopping
+criterion — see `dev/decisions.md`, 2026-08-21.
+
+## 2026-08-21 — `BackwardError(√ε)` alone as the default stopping criterion
+
+**Tried.** Replacing `RefineOptions::default()`'s `StopCriterion::EpsSqrtN`
+with `StopCriterion::BackwardError(√ε)`, to match what MUMPS's `ICNTL(10)`
+refinement stops on (`CNTL(2) = √ε`).
+
+**Failed `tests/parity.rs`:**
+
+```
+ROSZMAN1_0241 residual: feral=4.805e-14 > max(K*mumps=2.077e-14, floor=1.000e-14) = 2.077e-14
+```
+
+`ω ≤ √ε` can be satisfied while the normwise residual is looser than the old
+rule delivered, so swapping one test for the other regresses callers that
+depend on the normwise bound. Shipping it would have required loosening that
+gate — which needs human approval and is not justified when a correct
+alternative exists.
+
+**Disposition.** Replaced by the conjunction,
+`StopCriterion::EpsSqrtNAndBackwardError(√ε)`, which is strictly harder to
+satisfy than the old default and therefore cannot regress any caller.
+ROSZMAN1_0241 and the rest of `tests/parity.rs` pass unchanged under it.
+
+## 2026-08-21 — `BackwardError(f64::EPSILON)` as the componentwise target
+
+**Tried.** Using `f64::EPSILON` — LAPACK `dgerfs`'s componentwise target —
+rather than `√ε` for `DEFAULT_BACKWARD_ERROR_TARGET`. Measured with
+`OMEGA_EPS=1 HARD_RHS=1 probe_vs_mumps_residual`.
+
+**Failed on cost.** Under the badly-scaled RHS it stagnates or exhausts the
+step budget on **five of the seven** large matrices, taking up to 10
+correction steps, while `√ε` converges on the same systems in at most one.
+That is precisely the wasted-budget pathology issue #190 complained about,
+reintroduced from the other direction.
+
+**Disposition.** Rejected. `√ε` is what MUMPS itself targets
+(`ref/mumps/src/dini_defaults.F:1094`), so matching it is both the cheaper
+and the better-justified choice. Recorded in the doc comment on
+`DEFAULT_BACKWARD_ERROR_TARGET` so it is not retried.
 ## 2026-08-29 — `as_chunks::<4>()` in the Schur SIMD kernel: deferred, not measured
 
 **Context.** The stable toolchain moved to 1.98.0 (rustc `88d9e12ae`,
