@@ -45,12 +45,35 @@ All notable changes to FERAL will be documented in this file.
   returned at 25.5 ms. A paired A/B against the previous release found no
   measurable cost when unarmed — every poll site short-circuits on an
   `Option::is_some` branch and touches no atomic.
-- **Additive.** An unarmed `Solver` is unaffected in behaviour and in
-  performance. `FactorStatus` and `FeralError` each gain one variant, so
-  exhaustive `match`es over them need a new arm. The C ABI defines
-  `FERAL_INTERRUPTED = 4` and the Python bindings define
-  `FactorStatus.INTERRUPTED`; neither surface can arm the flag yet, so on both
-  the code is reserved rather than reachable.
+- **BREAKING for exhaustive `match`es; additive at runtime.** An unarmed
+  `Solver` is unaffected in behaviour and in performance — nothing that
+  already worked changes what it does. But `FactorStatus` and `FeralError`
+  each gain one variant and neither is `#[non_exhaustive]`, so every
+  downstream `match` over them that lists all arms stops compiling until a
+  new arm is added. In-tree this broke 4 integration tests, 10
+  `feral-diagnostics` probe binaries, and the Python bindings; a downstream
+  crate will see the same. Each was given an explicit arm rather than a
+  wildcard, deliberately: the next variant should break the same builds
+  rather than be silently absorbed. The C ABI defines `FERAL_INTERRUPTED = 4`
+  and the Python bindings define `FactorStatus.INTERRUPTED`; neither surface
+  can arm the flag yet, so on both the code is reserved rather than
+  reachable.
+- **One defect found in review and fixed before merge.** The issue-#65 MC64
+  rescue re-factors with `Mc64Symmetric` when the first factorization reports
+  the singular signature, and its non-adoption arm was a bare `_` that also
+  caught `Err(_)`. An interrupt observed during that *retry* was therefore
+  swallowed: `factor` returned `Success` rather than `Interrupted`, and
+  `mc64_retry_not_adopted` latched. Because that latch is keyed on the
+  pattern and cleared only on a pattern change, a single cancellation would
+  have suppressed the MC64 rescue for every later factor of the same pattern
+  — for an interior-point host, the rest of the solve — reporting unrescued
+  inertia where it would otherwise have recovered. The window was not narrow:
+  it was the entire duration of a second full factorization. Fixed by
+  propagating `Err(FeralError::Interrupted)` explicitly and leaving the latch
+  disarmed, since a cancellation is not evidence about MC64 — the retry never
+  finished. Regression test: `tests/issue194_interrupt_during_mc64_retry.rs`,
+  verified to fail before the fix (observed `Success` on a cancelled call).
+
 ### Added - iterative refinement can be told what "converged" means (issue #190)
 
 - **The problem.** The refinement loop's only convergence test was a hardwired

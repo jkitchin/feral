@@ -1460,6 +1460,25 @@ impl Solver {
                         mc64_fallback_adopted = true;
                         Ok((rf, ri))
                     }
+                    // Issue #194: a cancellation is not evidence about
+                    // MC64. The retry never got to finish, so nothing was
+                    // learned about whether the Hungarian matching would
+                    // have improved the zero count. Propagate the
+                    // interrupt (the caller asked to stop, and the
+                    // published contract says the first observation of the
+                    // flag aborts the factorization) and leave
+                    // `mc64_retry_not_adopted` DISARMED.
+                    //
+                    // Arming it here would be a correctness bug, not just
+                    // a lost optimization: the latch is keyed on the
+                    // pattern and cleared only on a pattern change, so in
+                    // an IPM — fixed pattern for the whole solve — one
+                    // cancellation would suppress the issue-#65 rescue for
+                    // every remaining iterate, reporting unrescued inertia
+                    // where it would otherwise have recovered. See the
+                    // `mc64_retry_not_adopted` field doc on exactly that
+                    // interaction with the inertia hard rule.
+                    Err(FeralError::Interrupted) => Err(FeralError::Interrupted),
                     // MC64 did not improve the zero count (e.g. the matrix
                     // is genuinely singular) or it errored — keep the
                     // original factor. N4: latch so subsequent same-pattern
