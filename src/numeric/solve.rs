@@ -2233,11 +2233,14 @@ impl RefineOptions {
 /// See `dev/research/issue-190-refine-target.md`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StopCriterion {
-    /// `‖r‖₂ < ε·√n·‖b‖₂` — FERAL's historical rule, and the default.
+    /// `‖r‖₂ < ε·√n·‖b‖₂` — FERAL's historical rule, and the default
+    /// through 0.17.0. As of 0.18.0 the default is
+    /// [`Self::EpsSqrtNAndBackwardError`]; this variant is what a caller
+    /// opts into to get the pre-0.18.0 behaviour back.
     ///
-    /// Kept bit-for-bit, including the strict `<`, so every call that
-    /// does not opt into a target performs exactly the arithmetic it
-    /// did before #190.
+    /// Kept bit-for-bit, including the strict `<`, so a call that opts
+    /// into this variant performs exactly the arithmetic it did before
+    /// #190.
     EpsSqrtN,
     /// `‖r‖₂/‖b‖₂ ≤ target` — normwise relative residual.
     ///
