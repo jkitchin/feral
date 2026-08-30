@@ -86,6 +86,11 @@ fn check_iter(iter: usize) {
         }
         FactorStatus::Singular => panic!("iter {iter}: factor Singular"),
         FactorStatus::FatalError(e) => panic!("iter {iter}: factor FatalError: {e:?}"),
+        // Issue #194: unreachable — this Solver is never armed with an
+        // interrupt flag. Matched explicitly rather than by wildcard.
+        FactorStatus::Interrupted => {
+            panic!("iter {iter}: unexpected Interrupted on an unarmed Solver")
+        }
     }
 }
 

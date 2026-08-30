@@ -2219,6 +2219,20 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     let prologue_us = t_prologue.map(|t| t.elapsed().as_micros() as u64);
 
     while snode_idx < n_snodes {
+        // Issue #194: cooperative cancellation poll at the supernode
+        // boundary. Unarmed, this is an `Option::is_some` branch that
+        // predicts perfectly; armed, a relaxed load of an uncontended
+        // cache line, once per supernode. The dense frontal factor polls
+        // again at its panel boundaries so a single very wide front
+        // (issue #8's delayed-pivot cascade) is interruptible too.
+        //
+        // Returning here leaves `contrib_blocks` and the partial
+        // `node_factors` to drop, and `ws` in the same state any other
+        // `?` exit from this loop leaves it: the next call's prologue
+        // re-establishes the `row_map` invariant unconditionally.
+        if params.bk.interrupt_requested() {
+            return Err(FeralError::Interrupted);
+        }
         if use_small_leaf {
             if let Some(gid) = symbolic.snode_group[snode_idx] {
                 let group = &symbolic.small_leaf_groups[gid];
@@ -3760,6 +3774,17 @@ fn run_parallel_task<'a>(
                 .iter()
                 .chain(std::iter::once(&task_idx))
             {
+                // Issue #194: cooperative cancellation poll at the
+                // supernode boundary, mirroring the sequential driver.
+                // Raising `Interrupted` as an ordinary task error reuses
+                // the existing unwind: it lands in `first_error`, and
+                // every task still queued takes the fast-exit at the top
+                // of `run_parallel_task`, so the scope drains without
+                // starting further work.
+                if params.bk.interrupt_requested() {
+                    task_res = Err(FeralError::Interrupted);
+                    break;
+                }
                 let snode = &symbolic.supernodes[snode_idx];
                 // Stage child contributions: shared lock held only for
                 // the drain, not across the factor body.

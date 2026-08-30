@@ -31,6 +31,14 @@ extern "C" {
 #define FERAL_SINGULAR       1
 #define FERAL_WRONG_INERTIA  2
 #define FERAL_FATAL          3
+/* Issue #194: the factorization stopped because a cooperative interrupt
+ * flag was set. Not reachable through this ABI today -- there is no
+ * feral_set_interrupt entry point, so the Solver behind the handle is
+ * always unarmed -- but defined so a shim can switch on it exhaustively
+ * rather than treating an unknown code as fatal. Like FERAL_FATAL this is
+ * NOT an Ipopt ESymSolverStatus value: 4 is SYMSOLVER_FATAL_ERROR there,
+ * so a shim must translate, never cast. */
+#define FERAL_INTERRUPTED    4
 
 /* Opaque handle. */
 typedef struct FeralSolver FeralSolver;

@@ -1,26 +1,40 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-30T02:51:11Z
+Generated: 2026-08-30T03:31:20Z
 
 ## Latest Session
-File: dev/sessions/2026-08-29-01.md
+File: dev/sessions/2026-08-30-01.md
 ```
-# Session 2026-08-29-01
+# Session 2026-08-30-01
 
 ## Goal
 
-Fix issue #192: `Solver::increase_quality`'s escalation is permanent and
-unscopable, so an escalation chosen for one hard factorization governs
-every factorization for the remaining life of the `Solver`.
+Fix issue #194: `Solver::factor` cannot be cancelled once running, and
+offers no surface through which a caller could ask, which makes a host's
+wall-clock budget unenforceable whenever a single factorization is larger
+than the whole budget.
 
 ## Benchmark Results
 
-**The exit partition was not measured this session.** The 153k-matrix
-corpus is not present in this container, so both partitions report
-`N/A` and there is no comparison against session 2026-08-19-05's
-1.58 / 1.58 to report — favourable or otherwise.
+**No comparison against the previous session's numbers is possible in
+this container, and that is a gap in this checkpoint rather than a pass.**
+The corpus (154k matrices with oracle timings) is not present here, so
+`cargo run --bin bench --release` ran only the 8 synthetic matrices and
+both exit-partition tables read `N/A`:
 
 ```
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
+
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
 small-frontal (<200)          0        -     <= 2.0      N/A
@@ -30,46 +44,37 @@ medium (<500)                 0        -     <= 3.0      N/A
 bucket                    count      p90     target  verdict
 small-frontal (<200)          0        -     <= 2.0      N/A
 medium (<500)                 0        -     <= 3.0      N/A
-
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
 ```
 
-What did run is clean, and the diff has no mechanism by which it could
-regress performance: it is a pure API addition whose new code path runs
-only when a caller calls `reset_quality()`. No numeric kernel, ordering,
-scaling, or pivoting code was touched, and the forward-ladder tests
-U1–U5 pass unchanged. That is an argument, not a measurement, and the
-next session with corpus access should confirm it.
+Session 2026-08-19-05's p90s (dense 1.58 / 2.00, sparse 1.58 / 1.58)
+therefore stand unchallenged and unconfirmed. A session with the corpus
+mounted should re-run before this is treated as regression-free on the
+corpus.
 
-## Accomplished
-
-### `Solver::reset_quality()` (issue #192, commit `0952f99`)
-
-New `Solver::reset_quality() -> bool` and its Python binding. Reverts
+In place of that, the poll overhead was measured directly: a paired A/B
+probe (same source, built against this branch and against a worktree at
+`origin/main`, best-of-10 warm refactors), alternated to control for
+container drift.
 ```
 
 ## Git Status
 ```
-be1e234 feat(refine): report the achieved componentwise omega in RefineOutcome
-9c64660 test(refine): stop two #190 tests from claiming more than they prove
-429dfca docs: describe the refinement default that actually ships
-9b5323c perf(solve): size the multi-RHS workspace on the dispatch threshold
-47f332e fix(refine): a non-finite iterate must not certify as backward stable
+70ee241 docs: session checkpoint 2026-08-30-01 (issue #194 factor cancellation)
+4c7691a feat: cooperative cancellation for Solver::factor (#194)
+9edce95 docs: research note for issue #194 cooperative factor cancellation
+9b9e882 Merge pull request #188 from jkitchin/ci/codecov-coverage
+1292984 ci: measure coverage with cargo-llvm-cov and report it to Codecov
 ```
 
 ## Test Status
 ```
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::is_arrow_bordered_rejects_low_nnz_share_border ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
@@ -77,28 +82,36 @@ test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... 
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 466 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.90s
+test result: ok. 466 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.83s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-29-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-30-01.md)
 
 
-**The exit partition was not measured this session.** The 153k-matrix
-corpus is not present in this container, so both partitions report
-`N/A` and there is no comparison against session 2026-08-19-05's
-1.58 / 1.58 to report — favourable or otherwise.
+**No comparison against the previous session's numbers is possible in
+this container, and that is a gap in this checkpoint rather than a pass.**
+The corpus (154k matrices with oracle timings) is not present here, so
+`cargo run --bin bench --release` ran only the 8 synthetic matrices and
+both exit-partition tables read `N/A`:
+
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
@@ -110,23 +123,28 @@ bucket                    count      p90     target  verdict
 small-frontal (<200)          0        -     <= 2.0      N/A
 medium (<500)                 0        -     <= 3.0      N/A
 
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+Session 2026-08-19-05's p90s (dense 1.58 / 2.00, sparse 1.58 / 1.58)
+therefore stand unchallenged and unconfirmed. A session with the corpus
+mounted should re-run before this is treated as regression-free on the
+corpus.
 
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+In place of that, the poll overhead was measured directly: a paired A/B
+probe (same source, built against this branch and against a worktree at
+`origin/main`, best-of-10 warm refactors), alternated to control for
+container drift.
 
-What did run is clean, and the diff has no mechanism by which it could
-regress performance: it is a pure API addition whose new code path runs
-only when a caller calls `reset_quality()`. No numeric kernel, ordering,
-scaling, or pivoting code was touched, and the forward-ladder tests
-U1–U5 pass unchanged. That is an argument, not a measurement, and the
-next session with corpus access should confirm it.
+                     branch (this PR)      main (9b9e882)
+grid_laplacian_350   203.8 / 197.8 ms      222.8 / 203.5 ms   sequential
+grid_laplacian_350    94.2 /  92.3 ms       94.4 /  92.2 ms   parallel
+tridiag_200k          57.7 /  57.3 ms       59.4 /  59.2 ms   sequential
+tridiag_200k          56.3 /  56.9 ms       56.8 /  54.6 ms   parallel
+
+No measurable overhead; every difference is inside this host's noise
+floor. That floor is wide — see the artifact recorded under *Abandoned*
+below — so the honest claim is "no regression detectable here", not "zero
+cost proven". A regression would in any case be surprising: every poll
+site short-circuits on an `Option::is_some` branch and touches no atomic
+when unarmed.
 
 ```
 
@@ -291,6 +309,7 @@ tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
 tests/issue190_componentwise_default.rs
 tests/issue190_refine_target.rs
+tests/issue194_factor_interrupt.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
@@ -329,18 +348,5 @@ tests/pounce_interface.rs
 tests/pounce710_refine_cap_nrhs2.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/refined_solve_core_stability.rs
-tests/rook_rescue_kkt.rs
-tests/rook_rescue.rs
-tests/small_leaf_parity.rs
-tests/solver_with_ordering.rs
-tests/sparse_postorder.rs
-tests/sparse_refined.rs
-tests/sqd_fast_path.rs
-tests/static_assembly_maps.rs
-tests/stress_tests.rs
-tests/symbolic_profiler.rs
-tests/task_plan_parity.rs
-tests/threshold_consistency.rs
-tests/tiny_fast_path.rs
-```
+
+(truncated from      365 lines to 350 line budget)

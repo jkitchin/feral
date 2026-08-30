@@ -64,6 +64,14 @@ pub(crate) fn map_feral_err(e: RustFeralError) -> PyErr {
         RustFeralError::NeedsRefactor => NeedsRefactorError::new_err(
             "LU basis update requires a refactor (update or stability budget reached)",
         ),
+        // Issue #194: unreachable from Python — these bindings expose no
+        // way to arm the Rust core's cooperative interrupt flag, so no
+        // factorization started here can be cancelled. Mapped to the
+        // FactorError root rather than wildcarded so the exhaustiveness
+        // check keeps guarding this function.
+        RustFeralError::Interrupted => {
+            FactorError::new_err("factorization interrupted by the caller's interrupt flag")
+        }
     }
 }
 

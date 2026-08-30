@@ -112,6 +112,7 @@ fn main() {
             FactorStatus::Singular => "Singular",
             FactorStatus::WrongInertia { .. } => "WrongInertia",
             FactorStatus::FatalError(_) => "FatalError",
+            FactorStatus::Interrupted => "Interrupted",
         };
 
         let inertia = solver.inertia().cloned().unwrap_or(feral::Inertia {
@@ -201,6 +202,7 @@ fn main() {
             FactorStatus::Singular => "Singular",
             FactorStatus::WrongInertia { .. } => "WrongInertia",
             FactorStatus::FatalError(_) => "FatalError",
+            FactorStatus::Interrupted => "Interrupted",
         };
         let inertia = solver.inertia().cloned().unwrap_or(feral::Inertia {
             positive: 0,

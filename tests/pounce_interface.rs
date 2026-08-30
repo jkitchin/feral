@@ -390,6 +390,10 @@ fn i7_quality_escalation_loop_terminates_with_correct_inertia() {
             }
             FactorStatus::Singular => panic!("unexpected Singular on a non-singular bordered KKT"),
             FactorStatus::FatalError(e) => panic!("fatal: {}", e),
+            // Issue #194: unreachable here — this Solver is never armed
+            // with an interrupt flag — but matched explicitly so a future
+            // status variant cannot be swallowed by a wildcard.
+            FactorStatus::Interrupted => panic!("unexpected Interrupted on an unarmed Solver"),
         }
     };
     assert!(matches!(final_status, FactorStatus::Success));

@@ -75,6 +75,7 @@ fn main() {
             ),
             FactorStatus::Singular => "Singular".to_string(),
             FactorStatus::FatalError(e) => format!("Fatal: {e:?}"),
+            FactorStatus::Interrupted => "Interrupted".to_string(),
         };
 
         println!("{i:>4}  {elapsed:>10.3}  {p:>10}  {n:>10}  {z:>10}  {label}");

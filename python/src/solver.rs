@@ -14,8 +14,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::common::{
-    array1_to_vec, ordering_from_str, ordering_to_str, quality_to_int, Inertia, STATUS_SINGULAR,
-    STATUS_SUCCESS, STATUS_WRONG_INERTIA,
+    array1_to_vec, ordering_from_str, ordering_to_str, quality_to_int, Inertia,
+    STATUS_INTERRUPTED, STATUS_SINGULAR, STATUS_SUCCESS, STATUS_WRONG_INERTIA,
 };
 use crate::errors::{
     map_feral_err, DelayBudgetExceeded, NumericFailure, PatternMismatch, SingularError,
@@ -200,6 +200,11 @@ impl Solver {
                 actual,
                 expected: _,
             } => Ok((STATUS_WRONG_INERTIA, Some(actual.into()))),
+            // Issue #194: unreachable from Python — these bindings expose
+            // no way to arm the interrupt flag — but returned as its own
+            // code rather than folded into NUMERIC_FAILURE, so if an
+            // arming API is added later nothing here has to change.
+            RustFactorStatus::Interrupted => Ok((STATUS_INTERRUPTED, None)),
             RustFactorStatus::FatalError(e) => Err(match e {
                 RustFeralError::NumericallyRankDeficient => SingularError::new_err(format!("{e}")),
                 RustFeralError::InvalidInput(s) => PyValueError::new_err(s),

@@ -1,0 +1,115 @@
+#+TITLE: Session 2026-08-30-01 journal
+#+STARTUP: showall
+
+* 00:35 :issue-194:orientation:
+Goal: fix issue #194 — `Solver::factor` cannot be cancelled, so a host
+enforcing a wall-clock budget cannot enforce it across one factorization.
+Reported measurement (pounce, `emfl050_5_5`, 5675 vars / 5625 cons):
+`max_wall_time=5` returned TIME_LIMIT after 48.8 s, one factorization
+having run ~44 s uninterrupted.
+
+Verified the issue's claims against this tree before designing:
+- `Solver::factor(&mut self, &CscMatrix, Option<Inertia>) -> FactorStatus`
+  (src/numeric/solver.rs:929) takes no interrupt/deadline/callback.
+- `FactorStatus` (solver.rs:87) is `Success | Singular | WrongInertia |
+  FatalError` — no early-return variant.
+- `NumericParams` (factorize.rs:56) has no equivalent field; none of the
+  16 `with_*` builders exposes one.
+- `FeralError::DelayBudgetExceeded` (error.rs) is a symbolic-time
+  *column-count* budget, not wall-clock. Confirmed as reported.
+- `Solver` holds `workspace`, `last_symbolic`, `permute_cache`,
+  `parallel_pool` across calls, so the reporter's "a watchdog thread on
+  our side would orphan mutable state" is correct.
+
+`grep -rin "interrupt|cancel|deadline|watchdog"` over dev/tried-and-rejected.md
+and dev/decisions.md found no prior attempt at this feature (all hits are
+about numerical *cancellation* in 2x2 determinants). Nothing to avoid
+repeating.
+
+Research note written: dev/research/issue-194-cooperative-interrupt.md.
+
+* 00:40 :issue-194:design:
+Key design finding, not in the issue: supernode-boundary polling alone
+would NOT fix the reported case. Issue #8 records that a delayed-pivot
+cascade concentrates 118k delayed pivots into three ~14k-column expanded
+root fronts — the 87 s factor is dominated by individual *fronts*, so a
+between-supernodes check returns "5 s plus one 44 s supernode".
+
+So poll at two places:
+  1. supernode boundaries, in both drivers;
+  2. the `while k < ncol_eff` panel loop in the dense frontal factor,
+     which is one level out from the hot kernels (loop body is >= O(nrow)).
+
+Mechanism `Option<Arc<AtomicBool>>` on `NumericParams` + a new
+`FeralError::Interrupted`, so both drivers' existing error unwind
+(sequential `?`, parallel `first_error` + task fast-exit) carries the
+cancellation with no new control flow.
+
+* 01:20 :issue-194:implementation:tests:
+Implemented and tested. Poll sites: `Solver::factor` entry; the supernode
+loop in both multifrontal drivers; the `while k < ncol_eff` panel loop in
+both the blocked and the unblocked dense frontal factor.
+
+Mechanism: `BunchKaufmanParams::interrupt: Option<Arc<AtomicBool>>` plus
+`interrupt_requested()`; `FeralError::Interrupted`;
+`FactorStatus::Interrupted`. Putting the field on `BunchKaufmanParams`
+rather than `NumericParams` means one field is visible to *both* the
+driver loops (which hold `params.bk`) and the dense frontal factor (which
+is handed only `&BunchKaufmanParams`) — no cross-struct sync step of the
+kind that made `fma` a silent no-op until finding N1.
+
+`tests/issue194_factor_interrupt.rs`, 8 tests, all pass. Measured in
+`--release`, warm solver (symbolic cached — the IPM case), 5-point
+Laplacian n = 122500:
+
+: sequential: baseline 263.2 ms; flag set at 26.3 ms; Interrupted at 34.8 ms
+: parallel:   baseline 153.5 ms; flag set at 15.3 ms; Interrupted at 25.5 ms
+
+Overshoot past the request ~9-10 ms, most of it the un-polled prologue
+(scaling + permute), against a factorization that would otherwise have
+run to completion. That is the issue's "~5 s plus one supernode" outcome.
+
+Full suite: 100 test binaries, 0 failures. fmt/clippy clean for `feral`
+and `feral-diagnostics`; `cargo check` clean for the python bindings.
+
+* 01:35 :issue-194:api-surface:
+Adding a `FactorStatus` variant broke exhaustive matches in four in-tree
+integration tests, ten `feral-diagnostics` probe binaries (built by CI
+with `-D warnings`, outside the root workspace default set), and the
+python bindings (`FactorStatus` *and* `FeralError`, both matched
+exhaustively in `python/src/`). All patched with explicit arms rather
+than wildcards, so the next variant is caught the same way.
+
+C ABI gets `FERAL_INTERRUPTED = 4` (also in `feral_capi.h`); Python gets
+`FactorStatus.INTERRUPTED`. Neither surface can arm the flag today, so
+both are defined for exhaustiveness, not reachable. Noted in the
+checkpoint as an obvious follow-up if a C or Python consumer wants this.
+
+* 01:50 :issue-194:benchmark:measurement-artifact:
+The corpus (154k matrices with oracle timings) is not present in this
+container, so `cargo run --bin bench --release` produced only the 8
+synthetic matrices and both exit-partition tables read N/A. No comparison
+against session 2026-08-19-05's p90 numbers is possible here; that is a
+gap in this checkpoint, not a pass.
+
+Measured the poll overhead directly instead: a paired A/B probe (same
+source, built against this branch and against a worktree at origin/main,
+best-of-10 warm refactors).
+
+**A measurement artifact worth recording.** The first main run read
+283-291 ms on `grid_laplacian_350` sequential against 202-205 ms for the
+branch — a 40% "regression on main", which is impossible for a change
+that only adds branches. Re-running interleaved immediately afterwards
+gave main 200-203 ms. The first main block simply landed in a slow patch
+of container time (it ran right after `git worktree add`). Interleaved
+best-of-10, two alternations:
+
+: grid seq   branch 203.8 / 197.8   main 222.8 / 203.5
+: grid par   branch  94.2 /  92.3   main  94.4 /  92.2
+: tridiag seq branch 57.7 /  57.3   main  59.4 /  59.2
+: tridiag par branch 56.3 /  56.9   main  56.8 /  54.6
+
+No measurable overhead; every difference is inside a noise floor that the
+discarded block shows to be tens of percent on this host. Lesson for
+future sessions: on this container a single un-interleaved A/B block can
+manufacture a 40% effect. Alternate the arms.
