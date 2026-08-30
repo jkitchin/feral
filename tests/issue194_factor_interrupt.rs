@@ -247,9 +247,12 @@ fn set_interrupt_arms_and_disarms_through_a_mut_borrow() {
 /// is being timed and interrupted is the numeric phase alone — which is the
 /// only phase the flag covers.
 fn mid_factorization_interrupt(parallel: bool) {
-    // 5-point Laplacian, n = 122_500. Big enough that the numeric factor is
-    // comfortably longer than a thread wake-up even in `--release`.
-    let a = grid_laplacian(350);
+    // 5-point Laplacian, n = 90_000. Big enough that the numeric factor is
+    // comfortably longer than a thread wake-up even in `--release`, small
+    // enough that four factorizations of it stay affordable in the debug
+    // build CI actually runs (`cargo test`, ci.yml:37) — at n = 122_500 this
+    // file cost 46.6 s there, nearly all of it these two tests.
+    let a = grid_laplacian(300);
     let flag = Arc::new(AtomicBool::new(false));
     let mut s = Solver::new()
         .with_parallel(parallel)

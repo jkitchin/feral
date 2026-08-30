@@ -113,3 +113,94 @@ No measurable overhead; every difference is inside a noise floor that the
 discarded block shows to be tens of percent on this host. Lesson for
 future sessions: on this container a single un-interleaved A/B block can
 manufacture a 40% effect. Alternate the arms.
+
+* 03:35 :issue-194:review:defect:
+Review on PR #195 found a real defect in this session's work. Verified it
+against the code before acting rather than taking the report on trust.
+
+`Solver::factor`'s issue-#65 MC64 rescue matched the retry factorization's
+result with a catch-all `_` arm, which absorbs `Err(_)` — including the
+`Err(FeralError::Interrupted)` this session's polling introduced. Two
+consequences:
+
+1. `factor` returns Success/Singular for a cancelled call, contradicting
+   the contract this branch publishes.
+2. `mc64_retry_not_adopted` latches. Keyed on the *pattern* and cleared
+   only on a pattern change, so an IPM refactoring a fixed pattern loses
+   the #65 rescue for every remaining iterate — reporting unrescued
+   inertia because of an unrelated cancellation. That is the inertia hard
+   rule in CLAUDE.md, broken by a caller pressing stop.
+
+The window is not a narrow race: it is the whole duration of the retry, a
+second full factorization, i.e. exactly the long-factorization case #194
+exists for. The latch's own doc already flags the interaction with the
+inertia rule, but reasons about a *genuine* non-adoption, where "MC64 did
+not help" is evidence. An interrupt arms it with no evidence at all.
+
+Fixed on the branch as 7b42414 (author's own commit, pushed while this
+session was preparing the same change): one arm before the `_`,
+propagating `Interrupted` and leaving the latch disarmed, plus
+`tests/issue194_interrupt_during_mc64_retry.rs`.
+
+* 03:50 :issue-194:test-design:circular-detector:lesson:
+Recording a false-green trap, because two independent implementations of
+the regression test hit it — this session's and 7b42414's — which is
+strong evidence it is easy to walk into rather than a one-off slip.
+
+The test must place a watchdog inside the MC64 rescue. The rescue only
+runs on the *first* factor of a pattern (it latches afterwards either
+way), so the flag has to land inside a cold call. The obvious detector for
+"did the flag land in the rescue?" is
+
+: status == Interrupted && mc64_retry_attempt_count() == 1
+
+and `status == Interrupted` is *precisely what the bug suppresses*. On
+un-fixed code every trial therefore reads as "missed the window", the
+sweep falls through to its skip-and-pass guard, and the test passes green
+against the very defect it was written for. Observed directly here:
+
+: 65% (359.9ms): missed the window — status Success, retry_attempts 1
+: 75% (415.3ms): missed the window — status Success, retry_attempts 1
+: SKIP: no watchdog fraction landed inside the MC64 rescue
+
+Every one of those "missed" lines is the bug firing, reported as a miss.
+
+Both fixes converged on the same repair: build the detector only from
+signals that read identically with and without the fix.
+`mc64_retry_attempt_count() == 1` proves factorization #1 returned
+`Ok(..)` (the rescue gate keys on `Ok`, so an interrupt seen during
+symbolic or factorization #1 would leave the count at 0), and a
+before-return check on the watchdog store (a `done` flag here, `delay <
+call_elapsed` in 7b42414) proves the flag went in while the call was
+still running.
+
+**Generalisable rule: a skip-and-pass guard must never be reachable
+through the failure mode it guards.** This tree uses skip-and-pass widely
+— fixture-gated tests, timing-gated tests — so the pattern is worth
+auditing for elsewhere.
+
+* 04:10 :issue-194:merge:ci-unblocked:
+`main` moved while the PR was open: 9c5dfac "satisfy clippy 1.98's new
+lints so CI is green again" fixes exactly the toolchain drift this session
+had established as not-this-PR's and stood down on. So the CI blocker was
+resolved upstream, not here; the branch now carries main (merge 942d130,
+and `git merge-base --is-ancestor 205cbbb HEAD` confirms it is current).
+
+Installed the CI toolchain locally (`rustup toolchain install 1.98.0`) so
+the static gate can be reproduced before pushing rather than discovered in
+CI — the local default is 1.94.1, which does not have the lints that were
+failing. `cargo +1.98.0 fmt --check` and `clippy --all-targets -D
+warnings` (feral and feral-diagnostics) are the exact CI checks and now
+both pass locally.
+
+* 04:20 :issue-194:ci-cost:
+`tests/issue194_factor_interrupt.rs` cost **46.6 s** in the debug build CI
+actually runs (`cargo test`, ci.yml:37) — nearly all of it the two
+mid-flight tests at `grid_laplacian(350)`, n = 122500, four factorizations
+each. Debug is ~30x slower than release here, which is easy to miss when
+calibrating a timing test in `--release`.
+
+Dropped to `grid_laplacian(300)`, n = 90000: **21.8 s** debug, 0.85 s
+release, with all eight tests still exercised and none skipped in either
+mode (release warm baselines 142 ms parallel / 233 ms sequential, both
+comfortably above the 100 ms anti-flake guard).
