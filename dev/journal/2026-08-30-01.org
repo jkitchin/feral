@@ -1,0 +1,46 @@
+#+TITLE: Session 2026-08-30-01 journal
+#+STARTUP: showall
+
+* 00:35 :issue-194:orientation:
+Goal: fix issue #194 — `Solver::factor` cannot be cancelled, so a host
+enforcing a wall-clock budget cannot enforce it across one factorization.
+Reported measurement (pounce, `emfl050_5_5`, 5675 vars / 5625 cons):
+`max_wall_time=5` returned TIME_LIMIT after 48.8 s, one factorization
+having run ~44 s uninterrupted.
+
+Verified the issue's claims against this tree before designing:
+- `Solver::factor(&mut self, &CscMatrix, Option<Inertia>) -> FactorStatus`
+  (src/numeric/solver.rs:929) takes no interrupt/deadline/callback.
+- `FactorStatus` (solver.rs:87) is `Success | Singular | WrongInertia |
+  FatalError` — no early-return variant.
+- `NumericParams` (factorize.rs:56) has no equivalent field; none of the
+  16 `with_*` builders exposes one.
+- `FeralError::DelayBudgetExceeded` (error.rs) is a symbolic-time
+  *column-count* budget, not wall-clock. Confirmed as reported.
+- `Solver` holds `workspace`, `last_symbolic`, `permute_cache`,
+  `parallel_pool` across calls, so the reporter's "a watchdog thread on
+  our side would orphan mutable state" is correct.
+
+`grep -rin "interrupt|cancel|deadline|watchdog"` over dev/tried-and-rejected.md
+and dev/decisions.md found no prior attempt at this feature (all hits are
+about numerical *cancellation* in 2x2 determinants). Nothing to avoid
+repeating.
+
+Research note written: dev/research/issue-194-cooperative-interrupt.md.
+
+* 00:40 :issue-194:design:
+Key design finding, not in the issue: supernode-boundary polling alone
+would NOT fix the reported case. Issue #8 records that a delayed-pivot
+cascade concentrates 118k delayed pivots into three ~14k-column expanded
+root fronts — the 87 s factor is dominated by individual *fronts*, so a
+between-supernodes check returns "5 s plus one 44 s supernode".
+
+So poll at two places:
+  1. supernode boundaries, in both drivers;
+  2. the `while k < ncol_eff` panel loop in the dense frontal factor,
+     which is one level out from the hot kernels (loop body is >= O(nrow)).
+
+Mechanism `Option<Arc<AtomicBool>>` on `NumericParams` + a new
+`FeralError::Interrupted`, so both drivers' existing error unwind
+(sequential `?`, parallel `first_error` + task fast-exit) carries the
+cancellation with no new control flow.
