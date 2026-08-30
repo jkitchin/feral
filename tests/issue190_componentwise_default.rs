@@ -180,11 +180,13 @@ fn normwise_criterion_alone_is_not_enough() {
         ("degenlpa", "DEGENLPA_0065", 1.89e-6),
         ("acopp14", "ACOPP14_0003", 6.42e-7),
     ];
+    let mut ran = 0usize;
     for (fam, stem, _measured) in cases {
         let p = PathBuf::from(format!("tests/data/parity/{fam}/{stem}.mtx"));
         if !p.exists() {
             continue;
         }
+        ran += 1;
         let (om_eps, om_default) = omegas(&p).unwrap_or_else(|| panic!("{stem}: solve failed"));
         assert!(
             om_eps > 10.0 * target,
@@ -198,11 +200,37 @@ fn normwise_criterion_alone_is_not_enough() {
              (EpsSqrtN gave {om_eps:.3e})"
         );
     }
+    // Without this the test passes vacuously if the `tests/data/parity`
+    // layout moves: every fixture would `continue` and nothing would be
+    // pinned. Its sibling guards the same way with `checked >= 60`.
+    assert_eq!(
+        ran,
+        cases.len(),
+        "only {ran} of {} pinned fixtures were found under tests/data/parity; \
+         this test pins the #190 regression and must not pass vacuously",
+        cases.len()
+    );
 }
 
-/// The default is the conjunction, so it can only ever refine *more* than
-/// the historical rule -- never less. This is what lets it ship without
-/// loosening any residual gate.
+/// The default is the conjunction, so it can only ever run *more* steps
+/// than the historical rule -- never fewer. This is what lets it ship
+/// without loosening any residual gate.
+///
+/// **This is an empirical corpus check, not an invariant the code
+/// guarantees.** More steps does not imply a smaller `ω`: best-iterate
+/// selection is still `min ‖r‖₂` (`solve.rs`, `if improved { best_omega
+/// = omega; ... }`), so a step that lowers the residual is free to raise
+/// the componentwise error. What the conjunction *does* guarantee is
+/// that the returned iterate is never worse **normwise** -- the
+/// `EpsSqrtN` half of the test still has to pass. The `ω` comparison
+/// below is the stronger statement, and it holds on every matrix in the
+/// tracked corpus today.
+///
+/// So a failure here is a finding to investigate, not necessarily a
+/// regression: it would mean a real matrix on which the extra
+/// componentwise steps land on a worse-`ω` iterate, which is the case
+/// for revisiting best-iterate selection. Do not silence it by
+/// weakening the comparison.
 #[test]
 fn default_is_never_weaker_than_the_historical_rule() {
     let paths = parity_matrices();
