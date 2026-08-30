@@ -130,3 +130,53 @@ caller calls =reset_quality()=; no numeric kernel, ordering, scaling or
 pivoting code was touched, and the forward ladder tests U1-U5 pass
 unchanged. So a perf regression is not a mechanism this diff has. That
 is an argument, not a measurement, and it is recorded as such.
+
+* 23:30 :ci:toolchain:issue-192:
+PR #193's =check= job went red. Root cause is **not** this PR: the
+failure is =clippy::needless_late_init= at
+=crates/feral-ordering-core/src/quotient_graph/algo.rs:1207=, and
+=git diff --stat origin/main...HEAD -- crates/= is **empty** -- this PR
+touches no file under =crates/=.
+
+Real cause: =dtolnay/rust-toolchain@stable= now resolves to 1.98.0
+(=88d9e12ae=, 2026-08-18). This container was pinned at 1.94.1
+(=e408947bf=, 2026-03-25), which is why local clippy and the pre-commit
+hook both passed while CI failed. Ran =rustup update stable= to 1.98.0
+and reproduced the failure exactly.
+
+Lesson: a green pre-commit hook is only as current as the local
+toolchain. Worth matching CI's toolchain before trusting a local clippy
+pass on a repo that tracks =stable=.
+
+* 23:40 :ci:toolchain:
+Fixing the first error revealed a second lint that cargo had never
+reached, because the dependency crate aborted the build first: 13 sites
+of =clippy::chunks_exact_to_as_chunks= (also new in 1.98). CI had only
+ever reported the first one. Had I pushed the one-line fix CI named, the
+job would have gone red again on lints I could have seen locally --
+which is the argument for reproducing on the real toolchain rather than
+patching what the log happens to show.
+
+Split the response by risk:
+- =needless_late_init= (ordering-core): real fix, clippy's own suggested
+  transformation. Pure control-flow refactor -- same statements, same
+  side-effect order on =ws.degree[i]=, =ws.wf[i]= never written in the
+  block. Behaviour-identical by inspection.
+- 3 sites in diagnostic binaries (=diag_schur_parity=, =diag_acopr14=):
+  real fix. Byte-decoding loops reading files, not hot paths; the
+  rewrite drops a =copy_from_slice= each.
+- 10 sites in =src/dense/schur_kernel.rs=: **allow, not rewrite.** That
+  is the 4-way unrolled SIMD body of the factorization's hottest loop.
+  The rewrite is plausibly neutral-or-better, but that is a hypothesis
+  and this container has no corpus to test it against. Recorded in
+  =dev/tried-and-rejected.md= as deferred-pending-measurement, with the
+  reasoning in a comment at the allow.
+
+Validation on 1.98.0, matching CI:
+
+: cargo clippy --workspace --all-targets -- -D warnings -> clean
+: cargo fmt --all --check                              -> clean
+: cargo test --workspace -> total passed: 1196  total failed: 0
+
+The 1196 includes the ordering-core suite, which is what would catch the
+AMF refactor if it had changed the ordering.

@@ -113,10 +113,8 @@ fn read_mumps_schur(json_path: &Path) -> Option<MumpsSchurRef> {
         return None;
     }
     let mut data = Vec::with_capacity(n_schur * n_schur);
-    for chunk in bytes.chunks_exact(8) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(chunk);
-        data.push(f64::from_le_bytes(buf));
+    for chunk in bytes.as_chunks::<8>().0 {
+        data.push(f64::from_le_bytes(*chunk));
     }
     Some(MumpsSchurRef {
         n,
@@ -138,10 +136,8 @@ fn read_dense_oracle(mtx_path: &Path, n_schur: usize) -> Option<Vec<f64>> {
         return None;
     }
     let mut data = Vec::with_capacity(n_schur * n_schur);
-    for chunk in bytes.chunks_exact(8) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(chunk);
-        data.push(f64::from_le_bytes(buf));
+    for chunk in bytes.as_chunks::<8>().0 {
+        data.push(f64::from_le_bytes(*chunk));
     }
     Some(data)
 }

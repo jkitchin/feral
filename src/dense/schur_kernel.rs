@@ -30,6 +30,16 @@
 //! continues to work on architectures without SIMD; no explicit
 //! `#[cfg(target_arch)]` gates are needed in this module.
 
+// `chunks_exact_to_as_chunks` (new in clippy 1.98) fires on the 4-way
+// unrolled SIMD bodies below, suggesting `as_chunks::<4>()`. Not taken
+// here: the unroll depth and the `into_remainder()` cleanup are a
+// measured design (`dev/research/dense-kernel-*.md`), and swapping the
+// iterator shape in the hottest loop in the factorization is a change
+// that has to be benchmarked against the corpus, not waved through to
+// satisfy a style lint. Allowed at file scope pending that measurement;
+// see the follow-up noted in `dev/tried-and-rejected.md`.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 /// `dst[i] -= alpha * src[i]` for `i in 0..dst.len()`.
 ///
 /// Preconditions:
