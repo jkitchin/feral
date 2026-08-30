@@ -1453,10 +1453,26 @@ impl SolveManyWorkspace {
         } else {
             n * nrhs
         };
-        // Allocate at the padded row stride unconditionally: the solve
-        // picks `ldw` per call, and under the `kernel-probe` feature the
-        // dispatch threshold can move between construction and use.
-        let ldw = padded_ldw(nrhs);
+        // Row stride to allocate at. This must match what
+        // `solve_sparse_core_many_into` computes, since that function
+        // slices these buffers at `n * ldw` / `nrow * ldw` / `ldw`: the
+        // panel path pads to a whole `NR` tile (see `padded_ldw`), the
+        // rank-1 path uses exactly `nrhs`.
+        //
+        // Sizing on the threshold rather than padding unconditionally
+        // matters at the `nrhs` an interior-point host actually uses:
+        // padding `nrhs = 1` allocates 8x the `y` and `w` it will touch,
+        // and `nrhs = 2` (Mehrotra predictor-corrector) 4x, on a
+        // workspace that refinement rebuilds per step.
+        //
+        // Under `kernel-probe` the threshold is a runtime override that
+        // can move between construction and use, so there — and only
+        // there — pad unconditionally.
+        let ldw = if cfg!(feature = "kernel-probe") || nrhs >= blas3_nrhs_threshold() {
+            padded_ldw(nrhs)
+        } else {
+            nrhs
+        };
         Self {
             y: vec![0.0; n * ldw],
             w: vec![0.0; max_nrow * ldw],
