@@ -2366,6 +2366,13 @@ impl RefineStop {
 /// satisfied, not violated. Reporting `1` for a structurally empty row
 /// would make any `BackwardError` target unreachable on such a system.
 ///
+/// **A non-finite row returns `f64::INFINITY`.** If `x` has overflowed,
+/// `|r|` and `d` both reach `inf` and their ratio is `NaN`; `NaN` loses
+/// every `>` comparison, so skipping such rows would let an all-`NaN`
+/// iterate report `ω = 0.0` and satisfy a
+/// [`StopCriterion::BackwardError`] target on the first test. `inf` is
+/// the only honest answer for an iterate that is not a solution at all.
+///
 /// `scratch` must be `n` long; it receives `|A|·|x|`.
 fn backward_error(
     matrix: &CscMatrix,
@@ -2381,6 +2388,17 @@ fn backward_error(
     let mut omega: f64 = 0.0;
     for i in 0..n {
         let d = scratch[i] + rhs[i].abs();
+        // A non-finite row means the iterate itself has blown up: an
+        // overflowed pivot sends `x` to `inf`, so `A*x` and hence both
+        // `r[i]` and `d` reach `inf` and `|r|/d` is `NaN`. `NaN` fails
+        // every `>` comparison, so without this guard the row is
+        // silently skipped -- and an all-`NaN` iterate would return
+        // `omega = 0.0`, i.e. read as *perfectly* backward stable and
+        // stop refinement on its first test. Report the worst possible
+        // backward error instead.
+        if !d.is_finite() || !r[i].is_finite() {
+            return f64::INFINITY;
+        }
         if d == 0.0 {
             // r[i] is provably 0 here; see the doc comment.
             continue;
@@ -4034,6 +4052,28 @@ mod tests {
         let x = [1.0, 0.0];
         let b = [1.0, 0.0];
         assert_eq!(omega_of(&m, &x, &b), 0.0, "empty row must contribute 0");
+    }
+
+    #[test]
+    fn backward_error_reports_infinity_on_a_non_finite_iterate() {
+        // A row where |r| and d are both `inf` makes the ratio `NaN`.
+        // `NaN` fails `term > omega`, so before the finiteness guard
+        // this returned 0.0 — a diverged iterate certifying itself as
+        // exactly backward stable, which would stop
+        // `StopCriterion::BackwardError` refinement on its first test.
+        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1.0, 1.0]).expect("m");
+        let b = [1.0, 1.0];
+        for x in [
+            [f64::INFINITY, 1.0],
+            [f64::NAN, 1.0],
+            [f64::NEG_INFINITY, 1.0],
+        ] {
+            let om = omega_of(&m, &x, &b);
+            assert!(
+                om == f64::INFINITY,
+                "non-finite iterate {x:?} must report inf, got {om:e}"
+            );
+        }
     }
 
     #[test]
