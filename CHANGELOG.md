@@ -51,6 +51,341 @@ All notable changes to FERAL will be documented in this file.
   `FERAL_INTERRUPTED = 4` and the Python bindings define
   `FactorStatus.INTERRUPTED`; neither surface can arm the flag yet, so on both
   the code is reserved rather than reachable.
+### Added - iterative refinement can be told what "converged" means (issue #190)
+
+- **The problem.** The refinement loop's only convergence test was a hardwired
+  `||r||_2 < eps * sqrt(n) * ||b||_2` — a *normwise* target. A normwise
+  residual is dominated by the rows where `|b_i|` is largest and says nothing
+  about the rows where it is smallest, so on a badly-scaled right-hand side
+  the loop can report success at a solution that is nowhere near backward
+  stable. Measured on `bratu3d` with entries spanning `1e-6..1e6`: the loop
+  stops immediately at `||r||_2/||b||_2 = 4.1e-16`, which looks perfect,
+  while the componentwise backward error is `9.0e-6`. Six of seven IPM-scale
+  KKT matrices show the same thing. The only lever was `max_steps`, a step
+  count with no principled value: the right count is problem-dependent, so
+  tuning it is guessing.
+- **What changed.** `RefineOptions` gains a `stop: StopCriterion` field:
+  - `StopCriterion::EpsSqrtN` — the historical behavior. Bit-for-bit
+    unchanged, but no longer the default; see the entry below.
+  - `StopCriterion::RelativeResidual(t)` — stop once
+    `||r||_2 <= t * ||b||_2`.
+  - `StopCriterion::BackwardError(t)` — stop once the componentwise backward
+    error `max_i |r_i| / (|A| |x| + |b|)_i <= t` (Arioli-Demmel-Duff 1989;
+    the quantity MA57 reports in `RINFO(6..8)` and MUMPS in `RINFO(7..8)`).
+    This is the criterion with a principled stopping value: `t` on the order
+    of `eps` says "as good as a backward-stable factorization would have
+    returned," independent of `n` and of row scaling.
+- **What you get back.** The `*_refined_into` entry points now return a
+  `RefineOutcome { steps, relative_residual, backward_error, stop }` instead
+  of `()`, where `stop` is `Converged | MaxSteps | Stagnated | Diverged`.
+  All four values are already computed by the loop, so reporting them costs
+  nothing.
+
+  `backward_error` is the achieved componentwise `omega` of the returned
+  iterate — the quantity the new default criterion certifies, so a host that
+  gets `Converged` back can log or threshold on the certificate without
+  paying a second `abs_symv` to recompute it. For a multi-RHS call it is the
+  worst column, matching `steps` and `relative_residual`.
+
+  **It is `NaN` when `omega` was not measured** — under `EpsSqrtN`,
+  `RelativeResidual`, and `max_steps = 0`, where the loop never forms it.
+  `NaN` here means *not measured* and is deliberately distinct from
+  `INFINITY`, which is a real measurement (a non-finite iterate). Test it
+  with `is_nan()` before comparing against a bound; `NaN < t` is `false`, so
+  a bare comparison reads "not measured" as failure.
+
+  The full `RefinementDiagnostics` is deliberately *not* returned here: it
+  computes a Hager-Higham condition estimate costing 3-5 extra solves, which
+  would multiply exactly the cost this change exists to cut. Ask for it
+  explicitly via `solve_sparse_refined_with_diagnostics` when you want it.
+- **Migration — BREAKING. An earlier version of this entry said the opposite
+  and was wrong.** It claimed "existing callers compile unchanged — the new
+  return value is not `#[must_use]`." That is false, and a downstream build
+  (pounce) disproved it. `#[must_use]` governs only whether *discarding* a
+  value warns at statement position; it does nothing for the value's type.
+  Three `Solver` methods now return `Result<RefineOutcome, FeralError>` where
+  they returned `Result<(), FeralError>`:
+  - `Solver::solve_refined_into`
+  - `Solver::solve_many_refined_into`
+  - the parallel refined entry point reached from `solve_refined_into`
+
+  Any caller that uses the result in *expression* position — a `match` arm, a
+  tail expression in a function returning `Result<(), _>`, a `let () =`
+  binding — fails to compile with `E0308: mismatched types`. Reported
+  downstream as incompatible `match` arms at `pounce-feral/src/lib.rs:1257`.
+
+  The fix at a call site that does not want the outcome is `.map(|_| ())`:
+
+  ```rust
+  // before
+  self.solver.solve_refined_into(m, rhs, x_out, opts)
+  // after, when the outcome is not wanted
+  self.solver.solve_refined_into(m, rhs, x_out, opts).map(|_| ())
+  ```
+
+  Adding `stop` to `RefineOptions` *is* source-compatible for callers that
+  build options through `with_max_steps` / the constructors, so the return
+  type is the only break. Under 0.x semver this makes the next release
+  **0.18.0**, not 0.17.1.
+- **Building a criterion.** `RefineOptions::with_target(t)`,
+  `RefineOptions::with_backward_error(t)`, or `.and_stop(...)` /
+  `.and_max_steps(...)` on an existing value.
+- **Note on scale.** `||r||_2 / ||b||_2` can look perfect while the solution
+  is not backward stable: on the worked badly-scaled 2x2 in the research
+  note it reads `1.0e-36` where the componentwise error is `5.0e-13`. Prefer
+  `BackwardError` unless you specifically want a normwise target.
+- **What it costs, measured.** This is an accuracy feature, not a speed
+  feature. On seven matrices (n up to 180,900) with a badly-scaled RHS, one
+  `BackwardError` step takes the componentwise error from as bad as `9.5e-5`
+  down to `~3e-16`, and costs roughly one extra solve — about 2x the
+  refinement wall time, factor excluded. With a *well-scaled* RHS the default
+  already converges in 0-2 steps on all seven, so there is no wasted-iteration
+  saving to claim.
+- **The new criteria can also overrun.** A componentwise target below what
+  the factorization can deliver has the same failure mode as an unreachable
+  normwise one: `qap15_kkt` with a badly-scaled RHS and
+  `BackwardError(1e-14)` runs 8 steps, exits `Stagnated`, and lands at
+  `4.2e-11` — while `BackwardError(1e-10)` reaches `4.4e-11` in 3. Set `t`
+  near `eps` scaled to what you expect, and read `stop`.
+- **Oracle.** The backward-error formula is LAPACK `dgerfs`'s, including its
+  `safe1`/`safe2` underflow guard, with one documented deviation: a row whose
+  denominator is exactly zero contributes 0 rather than LAPACK's 1, because
+  such a row forces `r_i == 0` exactly. Expected values for the four unit
+  tests were computed independently in Python from the published formula
+  before any Rust was written.
+- See `dev/research/issue-190-refine-target.md` and
+  `dev/plans/issue-190-refine-target.md`.
+
+
+### Changed - refinement's default stopping criterion now certifies componentwise accuracy (MA57/MUMPS parity)
+
+- **The defect.** `RefineOptions::default()` stopped on
+  `||r||_2 < eps * sqrt(n) * ||b||_2` alone. That test is normwise, so it is
+  dominated by the rows carrying the largest right-hand-side entries. On a RHS
+  whose entries span `1e-6..1e6` — the shape an interior-point method produces
+  near convergence, where the dual, primal and complementarity blocks differ by
+  many orders — it passes on the *raw* solve, and refinement never runs.
+  Measured against canonical MUMPS 5.8.2 on identical systems with identical
+  right-hand sides, FERAL returned:
+
+  | matrix | FERAL omega | MUMPS omega1 | FERAL steps |
+  |---|---:|---:|---:|
+  | `r05_kkt` | 9.520e-5 | 3.608e-16 | 0 |
+  | `bratu3d` | 8.953e-6 | 2.844e-16 | 0 |
+  | `cont-201` | 3.860e-7 | 2.728e-16 | 0 |
+
+  Nine to eleven orders behind the reference, reported as `Converged`, after
+  zero correction steps. MUMPS does not have this failure mode because its
+  `ICNTL(10)` loop stops on the componentwise backward error against
+  `CNTL(2)`, not on a norm ratio. In an IPM the small RHS blocks are the
+  complementarity residuals of near-active constraints — the rows that set the
+  step — so this was silently wrong exactly where it mattered, on
+  badly-scaled systems only.
+- **What changed.** `StopCriterion` gains `EpsSqrtNAndBackwardError(f64)`, and
+  it is the new `RefineOptions::default()` with
+  `DEFAULT_BACKWARD_ERROR_TARGET = sqrt(eps) = 1.4901161193847656e-8` —
+  MUMPS's `CNTL(2)` (`ref/mumps/src/dini_defaults.F:1094`). Refinement now
+  stops only when `||r||_2 < eps * sqrt(n) * ||b||_2` **and** `omega <=
+  sqrt(eps)`. Both are evaluated on the same best-iterate, so the returned `x`
+  satisfies both at once.
+- **It cannot regress an existing caller.** The new criterion is strictly
+  harder to satisfy than the old one, so the default can only refine *more*,
+  never less. No accuracy gate was loosened.
+- **What it costs, measured on the seven-matrix set.** n up to 180,900, both
+  RHS families. With a **well-scaled** RHS: identical to the old default on
+  all seven — same step counts, same residuals, no added work. With a
+  **badly-scaled** RHS: `r05_kkt`, `bratu3d` and `cont-201` each take one
+  extra correction step (5-14 ms) and their componentwise error drops to
+  `2.7e-16`, `3.2e-16` and `2.9e-16`, level with MUMPS. Worst-case step count
+  across all fourteen combinations is still 2, the bound `EpsSqrtN` already
+  had.
+- **What it costs on the full corpus: a real tail regression.** The
+  seven-matrix figures above understate it. A controlled A/B over the 154,588
+  benchmark matrices — same machine, same run, only `Default for
+  RefineOptions` changed — gives:
+
+  | ratio | `EpsSqrtN` | new default | delta |
+  |---|---:|---:|---:|
+  | solve/MUMPS geomean | 0.08 | 0.08 | none |
+  | solve/MUMPS p50 | 0.08 | 0.08 | none |
+  | solve/MUMPS p90 | 0.15 | 0.20 | **+33%** |
+  | solve/MUMPS p99 | 0.71 | 1.08 | **+52%** |
+  | solve/SSIDS geomean | 0.94 | 1.06 | **+13%** |
+  | solve/SSIDS p90 | 2.50 | 3.60 | **+44%** |
+  | solve/SSIDS p99 | 8.33 | 13.00 | **+56%** |
+
+  The median is untouched — the well-scaled majority never needed the extra
+  conjunct. The tail pays, because that is where the matrices sit whose
+  componentwise error was above `sqrt(eps)` and which now actually refine
+  (13 of 63 on the tracked parity corpus). Factor ratios are unchanged within
+  noise, confirming the effect is the refinement loop and not machine state.
+  **This is an accuracy-for-latency trade, not a free fix.** Callers that need
+  the old latency profile and can accept the componentwise gap can pass
+  `StopCriterion::EpsSqrtN` explicitly.
+- **On one real workload it is not a tail effect at all — it is the whole
+  run.** Measured downstream in pounce on `laptime` (58,014 variables, L-BFGS,
+  126,028-dimension KKT, 60 IPM iterations), one binary, arms differing only
+  in the `StopCriterion` handed to `RefineOptions`:
+
+  | stop criterion | overall | factor | back-solve | vs `EpsSqrtN` |
+  |---|---:|---:|---:|---:|
+  | `EpsSqrtN` (0.17.0's default) | 58.6 s | 9.27 s | 46.7 s | — |
+  | refinement off | 13.9 s | 5.85 s | 5.44 s | -76% |
+  | `RelativeResidual(1e-10)` | 22.8 s | 6.48 s | 13.77 s | -61% |
+  | **this default** | 69.4 s | 10.39 s | 56.4 s | **+18%** |
+
+  +18% overall and +21% on back-solve against 0.17.0, on every iteration —
+  not a p99 effect. A second model (`dirichlet120`, exact Hessian) is
+  factorization-dominated and does not discriminate: all four arms reach
+  `Optimal` in 56 iterations at the same objective. Anyone whose profile
+  resembles `laptime` should set `StopCriterion` explicitly rather than
+  inherit this default.
+- **Rejected on measurement.** A *pure* `BackwardError(sqrt(eps))` default was
+  tried first: it fixes the componentwise gap but stops earlier than
+  `EpsSqrtN` normwise, and `tests/parity.rs` caught it — `ROSZMAN1_0241` at
+  `4.805e-14` against a MUMPS-anchored gate of `2.077e-14`. `BackwardError(eps)`
+  — LAPACK `dgerfs`'s target — was also rejected: it is unreachable here,
+  stagnating or exhausting the step budget on five of seven under a
+  badly-scaled RHS.
+- **Not a fix for #190's cost complaint.** The conjunction keeps the
+  `EpsSqrtN` half, so a normwise target that a given problem cannot reach
+  still runs the step budget out. Hosts that know their own accuracy
+  requirement should say so via `RefineOptions::with_target(t)` or
+  `with_backward_error(t)`.
+- **Also ruled out this session, with evidence.** The gap was *not* the pivot
+  threshold and *not* `ZeroPivotAction::ForceAccept`. `ForceAccept` never
+  fires on this corpus (`inertia.zero == 0`, `n_tiny == 0` on all seven), and
+  FERAL's `pivot_threshold = 1e-8` already matches what Ipopt — the host
+  pounce ports — sets for MA27 and MA57 (`ma27_pivtol`, `ma57_pivtol`, both
+  `1e-8`; `mumps_pivtol` is `1e-6`). The standalone `CNTL(1) = 0.01` figure is
+  the library default Ipopt deliberately overrides downward. FERAL's inertia
+  matched MUMPS exactly on all seven matrices, including `qap15_kkt` at
+  `cond1 = 3.9e12`.
+- See `dev/research/issue-190-refine-target.md`, addendum 2026-08-21.
+
+### Changed - `needs_refinement` now measures growth against the pivot threshold, not a fixed 1e6
+
+- **What changed.** `Factors::needs_refinement` was set whenever any
+  `|L_ij| > 1e6`. That is a statement about the *magnitude* of `L`, which is
+  a property of the caller's scaling, not about growth, which is a property
+  of the factorization. It now compares against `1/u`, the multiplier bound
+  that threshold partial pivoting with `pivot_threshold = u` actually
+  promises. With no threshold in force (`u = 0`) the factorization makes no
+  such promise and the old absolute `1e6` remains as the fallback.
+- **Why it is the right bound.** TPP accepts a candidate only within a factor
+  `u` of its column maximum, so `|L_ij| <= 1/u` is the contract. Exceeding it
+  means the pivoting did not deliver its own guarantee on this matrix, which
+  is exactly when plain forward/back substitution is untrustworthy. The bound
+  also moves with the threshold, so `Solver::increase_quality` walking `u`
+  from 1e-8 towards `pivtol_max = 0.5` tightens the signal as it tightens the
+  promise.
+- **Who is affected.** Callers reading `factors.needs_refinement` on
+  badly-scaled systems will see far fewer spurious `true`s. A genuine
+  violation still flags: at `u = 1e-8` a `max|L|` of 4.2e13 is five orders
+  past the promise and sets the flag as before.
+- Covered by four new cases in `growth_flag_tests`, including that the same
+  `L` is accepted at `u = 1e-8` and rejected at `u = 0.5`.
+
+### Fixed - multi-RHS solve was up to 1.6x slower when `nrhs` was not a multiple of 8
+
+- **What changed.** The row-major multi-RHS work buffers (`y`, `w`) used a
+  leading dimension of exactly `nrhs`. When `nrhs` is not a multiple of 8,
+  every row of every supernode panel straddles cache lines, and the
+  misalignment compounds across the gather, the panel kernels, and the
+  scatter. The BLAS-3 path now pads the row stride up to a whole 8-column
+  tile, so every row starts on a 64-byte boundary. Separately, the panel
+  GEMM's `nrhs % 8` column tail ran an unblocked triple loop with no data
+  reuse; it now runs full-width register tiles with the unused lanes
+  zero-padded.
+- **Who is affected.** Anyone calling `solve_sparse_many`,
+  `solve_sparse_many_into`, or `solve_many_refined` with `nrhs >= 32` that is
+  not a multiple of 8 — 7 values in 8.
+- **Measured.** Geomean **1.36x** faster on the multi-RHS solve at
+  `nrhs = 33` across bcsstk38, r05_kkt and bratu3d (1.21x, 1.59x, 1.32x
+  anchored on `nrhs = 32`, whose code path is unchanged; raw times 1.22x,
+  1.22x, 1.32x). Before the fix, `nrhs = 31` cost **1.4-1.8x** `nrhs = 32` on
+  all seven large KKT matrices despite doing 3% less work; it is now ~1.0x.
+- **Results are bit-for-bit unchanged.** The padding columns carry a zero
+  right-hand side and are never read back, so every real column's arithmetic
+  and its order are untouched. Verified three ways: a new 800-shape
+  `to_bits()` equality test over every `nrhs % 8` and `m_dim % 4` residue; the
+  rank-1-vs-BLAS-3 difference unchanged at all 105 measured (matrix, `nrhs`)
+  points; and all 13 multi-RHS tests including the two
+  `assert_eq!(max_diff, 0.0)` band contracts. `BLAS3_NRHS_THRESHOLD` is
+  unchanged at 32.
+- See `dev/research/blas3-threshold-refit.md`.
+
+### Changed - the benchmark harness now times the solve core a host actually gets (issue #189)
+
+- **What changed.** `cargo run --bin bench` measured its sparse solve column
+  with `solve_sparse_refined`, which pins `SolveCore::SharedVector`. Every
+  host reaching FERAL through `Solver` gets `SolveCore::Auto`, which picks
+  between the shared-vector and contribution-block cores per factor. The
+  harness now calls `solve_sparse_refined_auto_into`, so the published number
+  describes the code path hosts run.
+- **Why it matters if you read the numbers.** On seven large KKT matrices,
+  `Auto` is 1.30x faster than `SharedVector` (geomean, n = 8k-181k), and the
+  old harness could not see any of it. On the ~154k-matrix regression corpus
+  the aggregate `solve/MUMPS` geomean and p50 are unchanged at 0.08, because
+  that corpus is almost entirely small matrices where `Auto` selects
+  `SharedVector` anyway.
+- **The harness stays serial** (`parallel = false`), so the solve column
+  remains a single-threaded measurement comparable with previous releases;
+  the schedule choice is bit-neutral and measures 0.98-1.01x, so nothing is
+  lost by holding it fixed.
+- **No library behaviour changes.** This is the benchmark binary only.
+### Added — `Solver::reset_quality()` bounds the lifetime of a quality escalation (issue #192)
+
+- **What changed.** New `Solver::reset_quality() -> bool` (and the Python
+  binding `Solver.reset_quality()`). It reverts every escalation
+  `increase_quality` applied — the `Identity → InfNorm` scaling flip and the
+  raised `bk.pivot_threshold` — restoring the parameters the caller had
+  configured and returning `quality_level()` to `Baseline`. Valid from any
+  level, `Exhausted` included. Returns `true` only if a parameter was actually
+  restored to a different value — `false` both when the solver was already at
+  baseline and when the escalation itself moved nothing (a rung can fire, and
+  report `true`, without changing a parameter: from non-`Identity` scaling with
+  `pivot_threshold` already at `pivtol_max`, `0.5^0.75` clamps back to `0.5`).
+  Either way the level is re-baselined and the ladder is armed again.
+  `with_scaling` applied while an escalation is live re-states the caller's
+  baseline, so a later reset restores the strategy pinned last rather than
+  silently undoing it (the issue-#51 escape hatch keeps working mid-solve).
+- **Why.** `increase_quality` was a one-way ratchet with no way back, so an
+  escalation chosen for *one* hard factorization governed **every** later
+  factorization for the life of the `Solver`. Ipopt exposes no reset because
+  MA57 answers `IncreaseQuality` by raising `pivtol` toward `pivtolmax` —
+  monotone in robustness, so leaving it raised can only make later
+  factorizations safer. FERAL's rungs change *which pivots are taken*: the
+  factorization is different, not uniformly better, and persisting it changes
+  the caller's whole remaining trajectory.
+- **Evidence (pounce gh#850).** On `square_flowsheet_resto` the rung fires
+  twice and costs both solve arms: the exact-Hessian leg goes from `Optimal`
+  in 99 iterations to `RestorationFailed` in 131, and the limited-memory leg
+  from `Optimal` in 178 to 3000 iterations at the cap. Declining to escalate
+  is not the fix either — a 12-variable watchdog model ends at `obj = 3.7e-6`
+  with the escalation and at `obj = 3.42` against `f* = 0` without it, and the
+  rung buys 15–25% of the iterations on five other models. The distinguishing
+  variable is how long the escalation lasts, not whether it fires.
+- **Guaranteed, not incidental.** Three properties are contract, each pinned
+  by a named test; a change that breaks one is a breaking change, not a detail.
+  1. *A caller that never calls `reset_quality` sees byte-identical behaviour
+     to 0.17.0.* The escalation ladder is untouched — its rungs, the `0.75`
+     exponent, `pivtol_max` — and the snapshot is inert state. Pinned by U1–U5,
+     which predate the method and pass unchanged. Downstream release processes
+     that diff a fixture sweep against a baseline binary depend on this not
+     drifting silently.
+  2. *`reset_quality` then `increase_quality` retraces exactly the rungs a
+     freshly constructed `Solver` would.* Pinned by R4 (records the traversal
+     before any reset exists, asserts the second equals it) and R6.
+  3. *Re-baselining costs no symbolic re-analysis.* The cached
+     `SymbolicFactorization` survives, exactly as it survives an escalation.
+     A cost guarantee: a caller may reset once per IPM iteration, so a reset
+     that forced re-analysis would be a silent per-iteration cost. Pinned by
+     integration test I9 via `symbolic_call_count`.
+- **Nothing else changes.** The reset touches only the two escalated
+  parameters and the level — not `last_factors`, not `mc64_scaling_cache`, and
+  none of the independent latches — mirroring what `increase_quality` leaves
+  alone.
 
 ## [0.17.0] - 2026-08-19
 

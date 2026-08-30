@@ -54,7 +54,8 @@ pub use numeric::solve::{
     solve_sparse_refined_auto_into, solve_sparse_refined_auto_opts, solve_sparse_refined_cb,
     solve_sparse_refined_cb_opts, solve_sparse_refined_into, solve_sparse_refined_opts,
     solve_sparse_refined_with_diagnostics, solve_sparse_refined_with_diagnostics_opts,
-    RefineOptions, RefinementDiagnostics, RefinementStep, SolveCore, DEFAULT_REFINE_MAX_STEPS,
+    RefineOptions, RefineOutcome, RefineStop, RefinementDiagnostics, RefinementStep, SolveCore,
+    StopCriterion, DEFAULT_REFINE_MAX_STEPS,
 };
 pub use numeric::solver::{FactorStats, FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};

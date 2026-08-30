@@ -450,6 +450,50 @@ fn i8_solver_lifetime_state_persists() {
     assert!((solver.pivot_threshold() - want_after_2).abs() < 1e-15);
 }
 
+/// I9 — issue #192: `reset_quality()` re-baselines the escalation
+/// without disturbing anything else the solver carries.
+///
+/// The pounce-side failure in #192 is that an escalation taken for one
+/// hard KKT system silently governs every later factorization. A caller
+/// that re-baselines at a major-iteration or restoration boundary must
+/// get back the factory parameters *and* must not pay a fresh symbolic
+/// analysis for doing so — the symbolic cache is scaling-invariant
+/// (β refactor), so neither escalating nor reverting may invalidate it.
+#[test]
+fn i9_reset_quality_rebaselines_without_invalidating_symbolic() {
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
+
+    let mut solver = Solver::new();
+    assert!(matches!(solver.factor(&csc, None), FactorStatus::Success));
+    let n_sym = solver.symbolic_call_count();
+
+    // Escalate twice, as the Ipopt `IncreaseQuality` retry loop would.
+    assert!(solver.increase_quality());
+    assert!(solver.increase_quality());
+    assert_eq!(solver.quality_level(), QualityLevel::PivotRaised);
+    assert!(matches!(solver.factor(&csc, None), FactorStatus::Success));
+    assert_ne!(solver.pivot_threshold(), 1e-8, "escalation took effect");
+
+    // Re-baseline at a caller-chosen boundary.
+    assert!(solver.reset_quality(), "an escalation was undone");
+    assert_eq!(solver.quality_level(), QualityLevel::Baseline);
+    assert_eq!(
+        solver.pivot_threshold(),
+        1e-8,
+        "back at MA27's cntl[1] default, the value `Solver::new()` \
+         starts from (issue #2)"
+    );
+
+    // The next factorization runs at factory parameters and still
+    // succeeds; no re-analysis was forced by either direction.
+    assert!(matches!(solver.factor(&csc, None), FactorStatus::Success));
+    assert_eq!(solver.symbolic_call_count(), n_sym);
+
+    // Idempotent: a second re-baseline at the same boundary is a no-op.
+    assert!(!solver.reset_quality());
+    assert_eq!(solver.pivot_threshold(), 1e-8);
+}
+
 /// `Solver::min_diagonal()` returns `None` before any successful factor.
 #[test]
 fn min_diagonal_before_factor_is_none() {

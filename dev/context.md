@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-30T00:59:34Z
+Generated: 2026-08-30T03:31:20Z
 
 ## Latest Session
 File: dev/sessions/2026-08-30-01.md
@@ -59,34 +59,34 @@ container drift.
 
 ## Git Status
 ```
+70ee241 docs: session checkpoint 2026-08-30-01 (issue #194 factor cancellation)
 4c7691a feat: cooperative cancellation for Solver::factor (#194)
 9edce95 docs: research note for issue #194 cooperative factor cancellation
 9b9e882 Merge pull request #188 from jkitchin/ci/codecov-coverage
 1292984 ci: measure coverage with cargo-llvm-cov and report it to Codecov
-ad0d96d Merge pull request #187 from jkitchin/docs/session-2026-08-19-05
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::is_arrow_bordered_rejects_low_nnz_share_border ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 442 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.79s
+test result: ok. 466 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.83s
 
 ```
 
@@ -150,57 +150,57 @@ when unarmed.
 
 ## Recent Decisions
 
-**The flag lives on `BunchKaufmanParams`, not `NumericParams`.** It is
-not a Bunch-Kaufman parameter in spirit, and `NumericParams` is where a
-reader would look first. But the multifrontal drivers hold
-`params.bk` and the dense frontal factor is handed *only*
-`&BunchKaufmanParams`, so one field there is readable from every poll
-site with no sync step, while a field on `NumericParams` would need
-copying into `bk` — exactly the shape that left `NumericParams::fma` a
-silent no-op until finding N1 (`dev/research/repo-review-2026-06-09.md`).
-`BunchKaufmanParams` already carries execution knobs of this kind
-(`intrafront_parallel`, `fma`), so this is consistent with what the
-struct had become. Cost of the choice: discoverability, mitigated by
-`Solver::with_interrupt` / `set_interrupt` / `interrupt` being the
-documented entry points.
+**Scope of the change.** The escalation ladder is untouched — its rungs,
+the `0.75` exponent, `pivtol_max` — and unit tests U1–U5 pass unchanged,
+so a caller that never calls `reset_quality` sees byte-identical
+behaviour. The reset touches only the two escalated parameters and the
+level, mirroring what `increase_quality` leaves alone: the cached
+symbolic factorization survives (scaling-invariant since the β refactor
+moved scaling to the numeric phase), so re-baselining costs no
+re-analysis exactly as escalating costs none. Pinned by integration test
+`i9_reset_quality_rebaselines_without_invalidating_symbolic`.
 
-**`Interrupted` is a `FeralError` variant, so both drivers cancel for
-free.** The sequential driver already propagates errors out of its
-supernode loop with `?`; the parallel driver already funnels them into
-`first_error`, whose fast-exit at the top of `run_parallel_task` drains
-the scope without starting further work. Raising the interrupt as an
-ordinary error reuses both, so cancellation added no new control flow to
-either driver — including the several-tasks-in-flight case. The
-alternative, a distinct early-return channel, would have duplicated the
-parallel driver's unwind for no benefit.
+## 2026-08-29 — the escalation baseline is snapshotted lazily, not at construction (issue #192)
 
-**Consequence for the API.** `FactorStatus` and `FeralError` each gain a
-variant, so every exhaustive `match` over them in the tree, in
-`feral-diagnostics` and in the Python bindings needed a new arm. All were
-given explicit arms rather than wildcards, deliberately: the next variant
-should break the same builds rather than be silently absorbed.
+**Decision.** `reset_quality` restores a `QualityBaseline { scaling,
+pivot_threshold }` captured on the transition *out of*
+`QualityLevel::Baseline` — i.e. at the instant the ladder starts — held
+in `Option<QualityBaseline>` and cleared by every reset. Not captured in
+`with_params`.
+
+**Why.** The `with_*` builders are consuming and run *after*
+`with_params`, so `Solver::with_params(np, sn).with_scaling(Identity)`
+would have a construction-time snapshot recording `np`'s strategy, and a
+reset would silently discard the caller's builder configuration. The
+lazy snapshot also makes the round trip exact by construction: it
+records a state the solver demonstrably occupied, so `reset` →
+`increase` retraces the same rungs a freshly constructed `Solver` would
+— the property downstream needs when re-baselining at a loop boundary.
+Pinned by `r6_reset_quality_preserves_builder_configured_scaling` (would
+fail under a construction-time snapshot) and
+`r4_reset_quality_from_exhausted_restarts_identical_ladder`.
 
 ## Recent Tried-and-Rejected
-total factor time** on a matrix whose paying bucket is 91% of that time. Moving
-three quarters of the panel share into BLAS-3 buys 1.3%: the two kernels cost
-nearly the same per flop at this front shape, so the 53.5% panel share is not
-recoverable time.
+semantically identical, and giving the compiler `&[[f64; 4]]` instead of
+`&[f64]` may well be neutral or better for codegen. That is a
+*hypothesis*. This is the hottest loop in the factorization; its unroll
+depth and `into_remainder()` cleanup are a measured design
+(`dev/research/dense-kernel-*.md`), and the container this was found in
+has no corpus, so the change could not be benchmarked — the exit
+partition reports N/A here. Landing an unmeasured edit to that loop to
+satisfy a style lint inverts the project's order of operations.
 
-It also does not generalize. `bs = 48` and `bs = 64` are identical for any front
-with `ncol ≤ 48`, and that is every other matrix sampled — `ncol` p90 is 1-19
-across clnlbeam, dtoc2, marine_1600, rocket, steering, gasoil_3200, pinene_3200,
-robot_1600, svanberg, nql180, qcqp1500-1c, cont5_2_4_l; only dtoc1nd is at 63. On
-the two with any wide fronts at all the paired sweep finds nothing: nql180 0.990
-(5/12 wins, tied with the default), qcqp1500-1c 0.994 (3/12). A 1.3% win on one
-corpus matrix and a no-op elsewhere is below the bar for changing a global default.
+**What was done instead.** A file-scoped
+`#![allow(clippy::chunks_exact_to_as_chunks)]` in `schur_kernel.rs` with
+the reasoning in a comment beside it. The three other sites the lint
+flagged — `diag_schur_parity.rs` (x2) and `diag_acopr14.rs` — are
+byte-decoding loops in diagnostic binaries, not hot paths, so those took
+the real rewrite (and lost a `copy_from_slice` each).
 
-**Kept from this attempt:** `block_size` is bit-neutral on all three matrices
-swept — identical inertia, zero delayed pivots, identical residual, and an
-identical hash over every `L`/`D` bit in storage order across
-`bs ∈ {8,16,24,32,48,62,64}` (`dtoc1nd_0010` 9cb93f568423e6c0, `nql180_0000`
-4f588093d6bac8c7, `qcqp1500-1c_0000` cfec17df1a4f8d38). So future retuning of it
-is a performance-only change. Not yet established on a matrix that actually
-delays a pivot — all three report `d0`.
+**Still open.** Whether `as_chunks` in the kernel is neutral, a win, or
+a loss is unmeasured and unclaimed. A session with corpus access should
+sweep it and either land the rewrite with numbers or record the
+regression here. Until then the `allow` is a deferral, not a verdict.
 
 ## Source Files
 ```
@@ -273,8 +273,8 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -290,6 +290,14 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -299,6 +307,8 @@ tests/issue128_supernode_nrow.rs
 tests/issue177_parallel_entry_point_core.rs
 tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
+tests/issue190_componentwise_default.rs
+tests/issue190_refine_target.rs
 tests/issue194_factor_interrupt.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
@@ -306,30 +316,22 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
-tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
+tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_scaling.rs
-tests/lu_sparse.rs
 tests/lu_sparse_rhs.rs
+tests/lu_sparse.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -342,11 +344,9 @@ tests/n4_mc64_retry_latch.rs
 tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
-tests/pounce710_refine_cap_nrhs2.rs
 tests/pounce_interface.rs
+tests/pounce710_refine_cap_nrhs2.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/refined_solve_core_stability.rs
-tests/rook_rescue.rs
 
-(truncated from 363 lines to 350 line budget)
+(truncated from      365 lines to 350 line budget)
