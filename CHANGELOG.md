@@ -2,6 +2,61 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Added — `Solver::reset_quality()` bounds the lifetime of a quality escalation (issue #192)
+
+- **What changed.** New `Solver::reset_quality() -> bool` (and the Python
+  binding `Solver.reset_quality()`). It reverts every escalation
+  `increase_quality` applied — the `Identity → InfNorm` scaling flip and the
+  raised `bk.pivot_threshold` — restoring the parameters the caller had
+  configured and returning `quality_level()` to `Baseline`. Valid from any
+  level, `Exhausted` included. Returns `true` only if a parameter was actually
+  restored to a different value — `false` both when the solver was already at
+  baseline and when the escalation itself moved nothing (a rung can fire, and
+  report `true`, without changing a parameter: from non-`Identity` scaling with
+  `pivot_threshold` already at `pivtol_max`, `0.5^0.75` clamps back to `0.5`).
+  Either way the level is re-baselined and the ladder is armed again.
+  `with_scaling` applied while an escalation is live re-states the caller's
+  baseline, so a later reset restores the strategy pinned last rather than
+  silently undoing it (the issue-#51 escape hatch keeps working mid-solve).
+- **Why.** `increase_quality` was a one-way ratchet with no way back, so an
+  escalation chosen for *one* hard factorization governed **every** later
+  factorization for the life of the `Solver`. Ipopt exposes no reset because
+  MA57 answers `IncreaseQuality` by raising `pivtol` toward `pivtolmax` —
+  monotone in robustness, so leaving it raised can only make later
+  factorizations safer. FERAL's rungs change *which pivots are taken*: the
+  factorization is different, not uniformly better, and persisting it changes
+  the caller's whole remaining trajectory.
+- **Evidence (pounce gh#850).** On `square_flowsheet_resto` the rung fires
+  twice and costs both solve arms: the exact-Hessian leg goes from `Optimal`
+  in 99 iterations to `RestorationFailed` in 131, and the limited-memory leg
+  from `Optimal` in 178 to 3000 iterations at the cap. Declining to escalate
+  is not the fix either — a 12-variable watchdog model ends at `obj = 3.7e-6`
+  with the escalation and at `obj = 3.42` against `f* = 0` without it, and the
+  rung buys 15–25% of the iterations on five other models. The distinguishing
+  variable is how long the escalation lasts, not whether it fires.
+- **Guaranteed, not incidental.** Three properties are contract, each pinned
+  by a named test; a change that breaks one is a breaking change, not a detail.
+  1. *A caller that never calls `reset_quality` sees byte-identical behaviour
+     to 0.17.0.* The escalation ladder is untouched — its rungs, the `0.75`
+     exponent, `pivtol_max` — and the snapshot is inert state. Pinned by U1–U5,
+     which predate the method and pass unchanged. Downstream release processes
+     that diff a fixture sweep against a baseline binary depend on this not
+     drifting silently.
+  2. *`reset_quality` then `increase_quality` retraces exactly the rungs a
+     freshly constructed `Solver` would.* Pinned by R4 (records the traversal
+     before any reset exists, asserts the second equals it) and R6.
+  3. *Re-baselining costs no symbolic re-analysis.* The cached
+     `SymbolicFactorization` survives, exactly as it survives an escalation.
+     A cost guarantee: a caller may reset once per IPM iteration, so a reset
+     that forced re-analysis would be a silent per-iteration cost. Pinned by
+     integration test I9 via `symbolic_call_count`.
+- **Nothing else changes.** The reset touches only the two escalated
+  parameters and the level — not `last_factors`, not `mc64_scaling_cache`, and
+  none of the independent latches — mirroring what `increase_quality` leaves
+  alone.
+
 ## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)
