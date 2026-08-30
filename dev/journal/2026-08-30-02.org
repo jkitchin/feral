@@ -1,0 +1,359 @@
+#+TITLE: Session journal 2026-08-29-02
+#+STARTUP: showeverything
+
+* 09:00 :review:pr191:
+Code review of PR #191 (fix/componentwise-refine-default) surfaced eight
+findings. Two material: the README still documents 0.17.0's default, and
+`backward_error` returns 0.0 on a non-finite iterate. Six smaller: an
+unconditional padded workspace allocation, two understated API breaks in
+the CHANGELOG, a doc contradiction on `StopCriterion::EpsSqrtN`, a test
+asserting an invariant the code does not guarantee, a test that can pass
+vacuously, and a run-on doc comment in `dense/factor.rs`.
+
+Downstream (pounce) comment on the PR confirms both #190 asks are closed,
+declines to veto the conjunctive default, and asks whether `RefineOutcome`
+carries omega. It does not — it carries `steps`, `relative_residual`,
+`stop` only.
+
+* 09:20 :refine:backward-error:bug:
+`backward_error` (src/numeric/solve.rs) skipped any row whose `term` was
+`NaN`, because `term > omega` is false for `NaN`. An overflowed iterate
+makes every row `NaN` (|r| and d both reach inf, ratio is NaN), so the
+function returned `omega = 0.0` — a diverged solve certifying itself as
+exactly backward stable. Under `StopCriterion::BackwardError(t)`, newly
+public in this PR, `reached()` is then true on the first test: the loop
+breaks immediately and returns `RefineStop::Converged` with a garbage
+iterate and `relative_residual = NaN`.
+
+Evidence, with the guard removed:
+: non-finite iterate [inf, 1.0] must report inf, got 0e0
+
+The historical `EpsSqrtN` rule does not have this hole (`NaN < threshold`
+is false, so refinement keeps running) and the shipped conjunction default
+is covered by its normwise half, so only the bare `BackwardError` option
+is exposed. Fixed by returning `f64::INFINITY` for any row where `d` or
+`r[i]` is non-finite, guarded before the `d == 0.0` branch. Regression
+test `backward_error_reports_infinity_on_a_non_finite_iterate` covers
+inf/NaN/-inf iterates.
+
+* 10:05 :solve:workspace:alloc:
+`SolveManyWorkspace::for_factors` allocated `y`/`w`/`acc` at
+`padded_ldw(nrhs) = nrhs.div_ceil(8)*8` unconditionally, while
+`solve_sparse_core_many_into` only uses that stride when
+`nrhs >= blas3_nrhs_threshold()` (32); below it the buffers are sliced
+at `ldw = nrhs` and the padding is never touched. So the over-allocation
+is worst exactly in the IPM regime: 8x on `nrhs = 1`, 4x on `nrhs = 2`.
+On pounce's 126,028-row KKT that is 1 MB of `y` allocated as 8 MB, same
+on `w`, rebuilt per refinement step. Invisible to the corpus benchmarks,
+which run large `nrhs` where padding is exact.
+
+Fixed by sizing on the same predicate the solve dispatches on, keeping
+the unconditional padding only under `cfg!(feature = "kernel-probe")`
+where the threshold is a runtime override that can move between
+construction and use. The two must agree since the solve slices at
+`n*ldw` / `nrow*ldw` / `ldw`.
+
+* 10:20 :docs:changelog:api:
+Two API breaks in `RefineOptions` were missing from the CHANGELOG, which
+claimed "the return type is the only break". `RefineOptions` has public
+fields, so `RefineOptions { max_steps: k }` is now E0063; and the derive
+went from `(Debug, Clone, Copy, PartialEq, Eq)` on main to
+`(Debug, Clone, Copy, PartialEq)`, because `StopCriterion` carries `f64`
+payloads. Any downstream `HashSet`/`HashMap` key or `T: Eq` bound is
+E0277. Both now documented with their fixes. Verified against
+`git show origin/main:src/numeric/solve.rs`.
+
+* 10:30 :test:hygiene:
+Two tests in `tests/issue190_componentwise_default.rs` overstated what
+they establish. `normwise_criterion_alone_is_not_enough` `continue`s
+past any missing fixture with no post-loop count check, so a moved
+`tests/data/parity` layout would make the #190 regression test pass
+vacuously -- added the count assertion its sibling already has.
+`default_is_never_weaker_than_the_historical_rule` asserts
+`omega_default <= omega_EpsSqrtN` corpus-wide and calls it a property of
+the conjunction; it is not, since best-iterate selection is still
+`min ||r||_2` and a residual-lowering step may raise omega. Assertion
+kept, doc corrected to name it an empirical corpus check and to say a
+failure is a finding about best-iterate selection, not noise to silence.
+
+* 10:40 :verification:
+`cargo clippy --all-targets -- -D warnings` clean. Full suite 955
+passing, 101 suites, 0 failures. Confirmed +1 against main by stashing:
+main is 954. Pre-commit hooks (fmt + clippy + clippy on
+feral-diagnostics) passed on every commit.
+
+* 21:46 :bench:contention:invalid:
+First `cargo run --bin bench --release` on the fixed branch reported the
+sparse small-frontal partition at p90 2.10 against a <= 2.0 target --
+FAIL -- where PR #191's body reports 1.56 and the 2026-08-19-05 baseline
+is 1.58. Dense read 1.60 / 2.00 (PASS/PASS).
+
+The run is invalid. Load average was 22.97 with nine `rustc` processes
+at ~85% CPU: a *pounce* session was running
+`cargo test --workspace --release --no-fail-fast` (pid 25704) for the
+whole benchmark. This is the same drift 7de1a93 recorded ("cold bench
+resolves the drift"), where the byte-identical control arm moved by up
+to 2x between contended runs.
+
+Nothing in this branch's diff can move a *factor* ratio: the two code
+changes are `backward_error`'s finiteness guard (refinement only, and
+only on the `BackwardError` criteria) and `SolveManyWorkspace`
+allocation sizing (multi-RHS *solve* only). Neither is on the
+factorization path the partition measures. Re-running on a quiet machine
+before drawing any conclusion; if it stays above 2.0 the next step is to
+re-run on 978b41e, the PR head before these fixes, to attribute it.
+
+* 22:05 :api:refine:issue190:downstream:
+Answered the open downstream question on PR #191 ("Does =RefineOutcome=
+carry the achieved residual / ω as well as the step count?") by
+implementing it rather than just replying. It carried =steps=,
+=relative_residual=, =stop= — ω was computed at every construction site
+and dropped on the floor.
+
+Added =RefineOutcome::backward_error=. The case for doing it now rather
+than in 0.19.0: =RefineOutcome= is new and unreleased in this PR, so the
+field costs no additional break, whereas adding it after release costs
+one. And 0.18.0 makes ω *the thing the default criterion certifies* — a
+host that gets =Converged= back currently cannot see the certificate
+without a second =abs_symv=.
+
+The one real design question was the not-measured sentinel. ω is only
+formed when it is the criterion (=wants_omega=); otherwise =best_omega=
+sits at the never-read =INFINITY=. Exposing that directly would report a
+=EpsSqrtN= run that converged fine as ω = inf, i.e. catastrophic. So the
+field is =NaN= when not measured, and the gate is on =wants_omega=, NOT
+on =best_omega == INFINITY= — because since this session's earlier fix,
+=INFINITY= is a *real* measurement (non-finite iterate) and must survive.
+
+Five construction sites plus =aggregate_outcome= (now takes =best_om= and
+=wants_omega=) plus the separately written narrow-path fold in
+=Solver::solve_many_refined_into=, which needed its own =any_om_nan=
+guard: a max fold over NaN silently yields 0.0, which would read as a
+*perfect* backward error on a run that never formed ω.
+
+* 22:10 :test:oracle:refine:
+Four tests in =tests/issue190_refine_target.rs=. Oracle is
+=omega_by_definition=, which recomputes ω straight from Arioli-Demmel-Duff
+with its own residual and its own traversal — it deliberately does not
+call =abs_symv= or anything in =numeric::solve=, so it is independent of
+the code under test.
+
+The oracle immediately earned its keep. First cut of the multi-RHS
+fixture scaled column c by 10^-c to make the columns differ; the oracle's
+guard assertion fired:
+
+: fixture denominator 7.991377060288349e-9 is near the guard
+
+i.e. the ladder had pushed the small columns' denominators toward the
+=dgerfs= safe1/safe2 underflow region, where the oracle's unguarded
+formula legitimately stops agreeing with the production guarded one — a
+disagreement about the fixture, not about the code. Replaced with an
+O(1) rotate-and-rescale per column. 20/20 pass in that file.
+
+* 22:15 :review:pr193:clippy:toolchain:
+=/code-review 193= returned three findings; its #2 is the same
+=with_scaling=-after-escalation hole I had found independently, which is
+some evidence it is real and not an artifact of either read.
+
+Its #1 is the actionable blocker and I confirmed it directly rather than
+relaying it: =src/dense/schur_kernel.rs= carries
+=#![allow(clippy::chunks_exact_to_as_chunks)]=, and
+
+: clippy-driver -W help | grep -c "clippy::"   -> 819
+: clippy-driver -W help | grep chunks_exact_to_as_chunks   -> no match
+
+on the installed clippy 1.96.0. An unknown lint under =-D warnings= is a
+hard error, and =-D warnings= is exactly what the mandatory pre-commit
+hook runs — so merging #193 as-is blocks *every* local commit, on any
+change, for anyone not yet on 1.98. CI uses =dtolnay/rust-toolchain@stable=
+so CI stays green and would not catch this. One-line fix:
+=#![allow(unknown_lints)]= above it.
+
+* 23:05 :bench:pr191:ab:contention:
+Interleaved A/B (main vs fix/componentwise-refine-default) round 1, arms
+run back-to-back under comparable load (main 22:44 load=7.93, branch
+22:49 load=7.56). Phase 2.8.1 exit partition, factor ratio vs the stored
+MUMPS oracle sidecars:
+
+|                     | main | branch | target | verdict |
+| dense  small-frontal| 1.60 |  1.62  |  <=2.0 | PASS    |
+| dense  medium       | 2.00 |  2.00  |  <=3.0 | PASS    |
+| sparse small-frontal| 1.58 |  1.63  |  <=2.0 | PASS    |
+| sparse medium       | 1.58 |  1.63  |  <=3.0 | PASS    |
+
+Conclusion: #191 does NOT regress the small-frontal factor gate. All four
+buckets PASS on the branch; the branch-vs-main delta is +0.02..+0.05 on a
+p90 of ratios whose denominator is a fixed on-disk oracle, so the delta is
+noise in feral's numerator, not a change in MUMPS. This closes the open
+question raised when the earlier single-shot run reported FAIL: that run
+was taken under load with no interleaved control.
+
+Round 2 is contaminated and is not used: I started `cargo test --all` and
+(worse) a `until ...; do :; done` spin-wait on the same box, and the branch
+arm of round 2 launched at load=15.71 against main's 9.67. The spin-wait
+was killed once noticed. Lesson: any background waiter in this repo must
+`sleep`, never busy-poll, while a benchmark is live.
+
+* 23:10 :review:pr195:mc64:inertia:
+Reviewing #195 (cooperative cancellation). Found one substantive defect,
+in `Solver::factor`'s issue-#65 MC64 rescue at solver.rs:1359-1373:
+
+    match retry {
+        Ok((rf, ri)) if ri.zero < first_zero => { ...adopt... }
+        _ => { mc64_retry_not_adopted_now = true; Ok((factors, inertia)) }
+    }
+
+The `_` arm absorbs `Err(_)`, so if the caller's flag is observed during
+the *retry* factorization the resulting `Err(FeralError::Interrupted)` is
+swallowed twice over:
+
+1. `factor` returns Success/Singular, not Interrupted -- contradicting the
+   PR's own published contract ("the first observation of true aborts the
+   factorization").
+2. `self.mc64_retry_not_adopted` latches. That latch is keyed on the
+   *pattern* and cleared only on pattern change (solver.rs:1038), so in an
+   IPM -- fixed pattern for the whole solve -- one unrelated cancellation
+   permanently disables the MC64 rescue for every remaining iterate. The
+   field's own doc-comment (solver.rs:252-273) flags this latch as
+   interacting with the inertia hard rule: suppressing the retry reports
+   "unrescued inertia where the pre-latch code recovered."
+
+So a cancellation, which is supposed to be side-effect-free, can cause
+wrong inertia for the rest of a solve. Fix is one arm before the `_`:
+propagate `Err(FeralError::Interrupted)` and do not arm the latch. A
+cancellation is not evidence that MC64 does not help -- the retry never
+finished.
+
+Verified the rest of the mechanism is sound: the ordering escalation at
+solver.rs:1558 is on the `Ok` path only, so Interrupted cannot drive the
+recursive re-factor; `run_parallel_task`'s `task_res = Err(..); break`
+lands in the existing Err arm (factorize.rs:3919) which sets `first_error`
+and skips the parent enqueue, and `break` (not `return`) keeps the
+`local_contribs` restore into the workspace.
+
+* 23:20 :bench:pr191:ab:
+Round 2 of the A/B landed. Even contaminated it strengthens the round-1
+conclusion, because the contamination ran *against* the branch:
+
+|                     | main_2 | branch_2 | load at launch      |
+| dense  small-frontal|  1.62  |   1.62   | 9.67 vs 15.71       |
+| dense  medium       |  2.00  |   2.00   |                     |
+| sparse small-frontal|  1.64  |   1.61   |                     |
+| sparse medium       |  1.64  |   1.61   |                     |
+
+Branch is *better* in round 2 (1.61 vs 1.64 sparse) while running at ~1.6x
+main's load, and worse in round 1 (1.63 vs 1.58) at equal load. A quantity
+that flips sign between rounds is noise. Eight of eight measurements PASS
+their target. #191 is cleared on the Phase 2.8.1 factor gate; the sign of
+the delta is not resolvable at this sample size and does not need to be.
+
+* 23:35 :pr191:merge:ci:
+#191 merged (2026-08-30T03:30:57Z). Sequence that got it there:
+
+1. #193 merged first, inverting the order the user gave. CI runs
+   dtolnay/rust-toolchain@stable which rolled to 1.98; local clippy is
+   0.1.96. On 1.98 the pre-existing `let rmf: f64;` at
+   crates/feral-ordering-core/src/quotient_graph/algo.rs:1207 trips
+   needless_late_init under -D warnings. Untouched by #191, so #191
+   could not go green until #193 landed the hoist.
+2. Merged origin/main into fix/componentwise-refine-default (9710b0d).
+   src/numeric/solver.rs auto-merged -- no source conflict between
+   #193's with_scaling/reset_quality and this branch's narrow-path
+   backward_error fold. cargo test --all on the merge result: exit 0.
+3. All checks pass, mergeStateStatus CLEAN, merged with a merge commit.
+
+Process note: `git commit` timed out at the 2-minute foreground limit
+twice, both times inside the pre-commit clippy hook, and both times the
+staged state survived intact (verified MERGE_HEAD present, index clean,
+no unmerged paths). Backgrounding the commit is the reliable route on
+this box; the hook takes minutes under load. The hook-skipping flag is
+forbidden by CLAUDE.md, and when I reached for it out of habit here the
+tool classifier blocked it -- correctly.
+
+* 23:55 :pr195:mc64:test:red-green:
+Committed the #195 MC64 fix as 7b42414 (3 files, +300/-6). All three
+pre-commit hooks Passed. Full =cargo test --all= on the merged branch:
+0 failures, exit 0.
+
+The regression test needed three iterations before it could be trusted,
+and the second failure is the one worth remembering:
+
+1. =thread::sleep= watchdog -- ~1ms granularity, overshoots, against a
+   ~6ms call. Seven coarse fractions, nothing landed in the window, test
+   failed its own vacuity guard ("no attempt landed inside the retry
+   window ... Calibrated full call = 11.272458ms").
+2. Landing detector keyed on =status == Interrupted=. That is exactly the
+   observable the bug swallows, so pre-fix it could never report "landed".
+   It would have misreported a live bug as "never exercised" and passed
+   the fix off as untested -- a false-negative test that looks like a
+   coverage gap. Caught this in reasoning before the run confirmed it.
+3. Fix: two fix-independent observables. =mc64_retry_attempt_count() == 1=
+   proves factorization #1 returned =Ok(..)= (the issue-#65 gate keys on
+   =Ok=, so the flag was set after it), and =delay < call_elapsed= proves
+   it was set before the call returned. Together they pin the flag inside
+   the retry without referencing the status under assertion.
+
+RED confirmed verbatim with the fix stashed:
+: landed inside the retry at frac=0.52 (delay 5.296698ms of call 6.352291ms) after 13 attempts; status Success
+: panicked: an interrupt observed during the MC64 retry must be reported as Interrupted ... got Success
+GREEN after; 8 consecutive release runs + 1 debug run all pass.
+
+Generalizable rule: *never key a test's "did I reach the code under test"
+detector on the same observable the assertion checks.* If the bug hides
+that observable, the detector reports a coverage gap instead of a defect.
+
+* 00:05 :pr191:pounce:api:
+Answered the downstream omega question on #191
+(issuecomment-5466524833) rather than deferring it: =RefineOutcome= now
+carries =backward_error: f64=. Reasoning -- omega was already computed at
+every construction site and discarded, the type is new and unreleased so
+the field adds no break, and 0.18.0 is the release that makes omega the
+quantity the default criterion certifies. Returning =Converged= without
+exposing the certificate was the wrong shape.
+
+Flagged the sharp edge explicitly in the reply: omega is only formed when
+it is the criterion, so under =EpsSqrtN=, =RelativeResidual= and
+=max_steps = 0= the field is =NaN= = *not measured*, distinct from
+=INFINITY= = a measured non-finite iterate. Consumers must guard on
+=is_nan()=; a bare =>= comparison reads =NaN= as "fine".
+
+* 00:15 :bench:merge:release-gate:
+#195 merged (d0b3000) after all checks passed. Session-end corpus bench on
+=main= with #191, #193 and #195 all in: *all four Phase 2.8.1 exit
+partitions PASS* -- dense small-frontal p90 1.63 (<= 2.0), dense medium
+2.00 (<= 3.0); sparse 1.55 and 1.55. Sparse factor/MUMPS geomean 0.44,
+p50 0.30, p90 1.55, max 9.39 over 153560 matrices. Consistent with the
+interleaved A/B earlier tonight (1.60-1.64 dense, 2.00 medium), so the
+three landings cost nothing measurable.
+
+Caveat recorded in the checkpoint: this was *not* an idle host. A =python=
+process from another project's session held ~98% of a core for the whole
+walk (load 6.84 at start), and it was not mine to kill. The contention is
+one-directional -- p90s are ratios against on-disk MUMPS oracle sidecars,
+so load inflates only feral's numerator -- which makes a PASS under load
+the safe direction to be wrong in. A clean baseline is still owed before
+0.18.0.
+
+Also killed two *orphaned* bench launchers (PIDs 43581, 31927) left over
+from an earlier plan in this session; each was in a wait-for-quiet loop
+that would eventually have fired its own corpus walk and contended with
+this one. Lesson alongside the busy-poll one: a background waiter that
+launches work must be cleaned up when the plan that created it is
+abandoned, or it fires later against an unrelated measurement.
+
+* 00:20 :process:session-numbering:
+Renumbered this session 2026-08-29-02 -> *2026-08-30-02*. #195 arrived
+carrying =dev/sessions/2026-08-30-01.md=, which sorts after 2026-08-29-02
+but chronologically *precedes* this session (it authored the PR reviewed
+here). =assemble-context.sh= takes the lexically-last session file as
+"Latest Session" and sources its benchmark block, so context.md was
+orienting the next session on 2026-08-30-01's =N/A= tables ("corpus not
+present in this container") instead of tonight's real corpus numbers.
+Renaming fixes the ordering, matches UTC (it is 03:52Z), and makes
+context.md source the corpus run. Journal file renamed to match, per the
+"same numbering as session files" rule.
+
+Worth knowing: session files written in a container without the corpus
+will keep landing with =N/A= benchmark blocks, and whichever sorts last
+wins context.md. Check =## Latest Session= after any merge that brings a
+session file with it.

@@ -7543,3 +7543,49 @@ records a state the solver demonstrably occupied, so `reset` →
 Pinned by `r6_reset_quality_preserves_builder_configured_scaling` (would
 fail under a construction-time snapshot) and
 `r4_reset_quality_from_exhausted_restarts_identical_ladder`.
+
+## 2026-08-29 — `RefineOutcome::backward_error`: `NaN` means "not measured"
+
+**Context.** `RefineOutcome` gained `backward_error: f64` in response to a
+downstream question on PR #191. The refinement loop only forms ω when ω is
+the stop criterion; under `EpsSqrtN`, `RelativeResidual`, and `max_steps = 0`
+it is never computed.
+
+**Decision.** On those paths the field is `f64::NAN`, meaning *not measured*.
+`f64::INFINITY` is reserved for a real measurement: a non-finite iterate.
+
+**Why the two must stay distinguishable.** Collapsing them would make an
+unmeasured path indistinguishable from a diverged one — the caller could not
+tell "we never checked" from "we checked and it is catastrophic". Consumers
+must guard with `!o.backward_error.is_nan()`; a bare `>` comparison reads
+`NaN` as "fine", because `NaN` fails every comparison.
+
+**Rejected alternative.** Computing ω unconditionally so the field is always
+a number. That charges every caller an `abs_symv` per step for a quantity
+their chosen criterion does not use, which is exactly the cost `EpsSqrtN`
+exists to avoid.
+
+## 2026-08-29 — a cancellation is not evidence about MC64
+
+**Context.** `Solver::factor` may run two factorizations: when the first
+reports `inertia.zero > 0` under non-MC64 `Auto` scaling, the issue-#65
+rescue re-factors with `Mc64Symmetric` and adopts iff the zero count strictly
+drops. Non-adoption arms `mc64_retry_not_adopted`, a latch keyed on the
+pattern fingerprint and cleared only on a pattern change, so subsequent
+same-pattern `factor()`s skip the retry.
+
+**Decision.** `mc64_retry_not_adopted` may only be armed by a retry that ran
+to completion and genuinely failed to reduce the zero count. Any `Err` out of
+the retry — `FeralError::Interrupted` today, and by the same argument any
+future error variant — propagates and leaves the latch disarmed.
+
+**Why this is a correctness rule, not a tuning choice.** The latch is a cache
+of a *measurement*: "MC64 does not help on this pattern." Arming it without
+having taken the measurement gates off the inertia rescue on false pretences.
+Because the latch survives every refactorization of the same pattern, and an
+interior-point host holds one pattern for a whole solve, a single unrelated
+cancellation would suppress the rescue for every remaining iterate and report
+unrescued inertia — the one hard constraint in `CLAUDE.md`. The
+`mc64_retry_not_adopted` doc already flags this interaction; it reasons about
+the latch being armed by genuine evidence, and that premise must be enforced
+at every arming site.

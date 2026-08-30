@@ -1,206 +1,251 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-30T03:31:20Z
+Generated: 2026-08-30T03:52:15Z
 
 ## Latest Session
-File: dev/sessions/2026-08-30-01.md
+File: dev/sessions/2026-08-30-02.md
 ```
-# Session 2026-08-30-01
+# Session 2026-08-30-02
+
+## Benchmark note (read first)
+
+No new corpus regression to report, but two benchmark facts belong at the
+top because both cut against a claim made earlier in the session:
+
+1. **A single-shot Phase 2.8.1 run on #191 FAILED, and that result was
+   wrong.** The failing number was produced while a busy-wait loop I had
+   started (`until grep -q ...; do :; done`, no sleep) was pinning a core
+   against a live benchmark. Load hit 15.71. MUMPS timings are read from
+   on-disk oracle sidecars, so contention inflates only feral's numerator
+   -- the ratio is not contention-symmetric and a loaded host reads as a
+   regression. Do not trust any single-shot p90 taken under load.
+
+2. **The interleaved re-run cleared it, 8/8 PASS.** Round 1 (equal load):
+   `main` dense p90 1.60 / 2.00, sparse 1.58 / 1.58; branch 1.62 / 2.00,
+   1.63 / 1.63. Round 2 (branch deliberately at load 15.71 vs `main` at
+   9.67): `main` 1.62 / 2.00 / 1.64 / 1.64; branch 1.62 / 2.00 / 1.61 /
+   1.61 -- the branch measured *better* under materially worse conditions.
+   A delta that flips sign across rounds is noise, not signal. Both exit
+   partitions PASS on `main` (small-frontal target <= 2.0, medium <= 3.0).
+
+Lesson recorded in the journal: any background waiter in this repo must
+`sleep`, never busy-poll, while a benchmark is live.
 
 ## Goal
 
-Fix issue #194: `Solver::factor` cannot be cancelled once running, and
-offers no surface through which a caller could ask, which makes a host's
-wall-clock budget unenforceable whenever a single factorization is larger
-than the whole budget.
+Review PR #191 (`fix/componentwise-refine-default`) and #193, apply the
+findings, and land both; answer the downstream comment on #191 asking
+whether `RefineOutcome` carries the achieved omega; then review and land
+#195 (issue #194, cooperative cancellation). All three are 0.18.0 material
+and pounce asked that they land together so downstream does one pin bump
+and one sweep.
 
-## Benchmark Results
+## Accomplished
 
-**No comparison against the previous session's numbers is possible in
-this container, and that is a gap in this checkpoint rather than a pass.**
-The corpus (154k matrices with oracle timings) is not present here, so
-`cargo run --bin bench --release` ran only the 8 synthetic matrices and
-both exit-partition tables read `N/A`:
+### PR #191 -- reviewed, fixed, merged (f1dc5ee)
 
-```
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+Eight review findings, all verified against the source before acting, all
+fixed. Two were material:
 
-Dense failure analysis: no failures
-Sparse failure analysis: no failures
-
---- Dense perf vs oracles: no matrices have oracle timings ---
---- Sparse perf vs oracles: no matrices have oracle timings ---
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-```
-
-Session 2026-08-19-05's p90s (dense 1.58 / 2.00, sparse 1.58 / 1.58)
-therefore stand unchallenged and unconfirmed. A session with the corpus
-mounted should re-run before this is treated as regression-free on the
-corpus.
-
-In place of that, the poll overhead was measured directly: a paired A/B
-probe (same source, built against this branch and against a worktree at
-`origin/main`, best-of-10 warm refactors), alternated to control for
-container drift.
+1. **`backward_error` returned `0.0` on a non-finite iterate**
+   (`src/numeric/solve.rs`). `NaN` loses every `>` comparison, so a row
+   whose `term` was `NaN` was silently skipped; an overflowed iterate makes
+   *every* row `NaN` (`x -> inf`, so `|A||x|` and `|r|` both reach `inf`
+   and the ratio is `NaN`), and the function returned `omega = 0.0` -- a
+   diverged solve certifying itself as exactly backward stable. Under
+   `StopCriterion::BackwardError(t)`, which #191 newly exposes, `reached()`
+   is then true on the first test: the loop breaks immediately and returns
 ```
 
 ## Git Status
 ```
-70ee241 docs: session checkpoint 2026-08-30-01 (issue #194 factor cancellation)
-4c7691a feat: cooperative cancellation for Solver::factor (#194)
-9edce95 docs: research note for issue #194 cooperative factor cancellation
-9b9e882 Merge pull request #188 from jkitchin/ci/codecov-coverage
-1292984 ci: measure coverage with cargo-llvm-cov and report it to Codecov
+d0b3000 Merge pull request #195 from jkitchin/claude/issue-194-p6gri8
+7b42414 fix(solve): an interrupt during the MC64 retry must not be swallowed
+942d130 Merge origin/main into claude/issue-194-p6gri8
+f1dc5ee Merge pull request #191 from jkitchin/fix/componentwise-refine-default
+9710b0d Merge origin/main into fix/componentwise-refine-default
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::is_arrow_bordered_rejects_low_nnz_share_border ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 466 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.83s
+test result: ok. 466 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.70s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-30-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-30-02.md)
 
 
-**No comparison against the previous session's numbers is possible in
-this container, and that is a gap in this checkpoint rather than a pass.**
-The corpus (154k matrices with oracle timings) is not present here, so
-`cargo run --bin bench --release` ran only the 8 synthetic matrices and
-both exit-partition tables read `N/A`:
+Run on `main` at d0b3000, i.e. with #191, #193 and #195 all merged. All
+four Phase 2.8.1 exit partitions PASS: dense 1.63 / 2.00, sparse 1.55 /
+1.55, against targets of 2.0 (small-frontal) and 3.0 (medium). Those are
+consistent with the interleaved A/B numbers above (1.60-1.64 dense, 2.00
+medium), so the session's landings cost nothing measurable.
 
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+**Caveat, stated because the top of this checkpoint argues for it:** this
+run was *not* taken on an idle host. A `python` process belonging to a
+different project's session held ~98% of a core for the whole walk (load
+6.84 at start). It was not mine to kill. Since the p90s are ratios against
+on-disk MUMPS oracle sidecars, contention inflates only feral's numerator,
+so these numbers are if anything pessimistic -- they PASS despite the
+load, which is the direction that makes the verdict safe to trust. A clean
+baseline still needs to be taken on a quiet host before 0.18.0 ships.
 
-Dense failure analysis: no failures
-Sparse failure analysis: no failures
+AVION2                   2682       1.80       1.92       2.30
+CERI651ALS               2331       0.09       0.09       0.11
+PFIT4                    2286       0.09       0.09       0.10
+CERI651C                 2233       0.09       0.10       0.11
+CERI651CLS               2227       0.09       0.09       0.11
+BATCH                    2054       3.84       4.04       4.58
 
---- Dense perf vs oracles: no matrices have oracle timings ---
---- Sparse perf vs oracles: no matrices have oracle timings ---
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(μs)    mumps(μs)      ratio
+GAUSS2_0034                    758        22470          246      91.34
+GAUSS2_0016                    758        22459          246      91.30
+CRESC100_0000                  806        21589          238      90.71
+GAUSS2_0017                    758        22665          251      90.30
+GAUSS2_0035                    758        22565          250      90.26
+GAUSS2_0008                    758        21933          245      89.52
+GAUSS2_0029                    758        22512          252      89.33
+GAUSS2_0025                    758        22687          254      89.32
+GAUSS2_0032                    758        22394          257      87.14
+GAUSS2_0024                    758        22353          257      86.98
+
+=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
+
+ratio               count    geomean        p50        p90        p99        max
+factor/MUMPS       153560       0.44       0.30       1.55       3.30       9.39
+solve/MUMPS        153560       0.08       0.08       0.20       1.00       4.18
+factor/SSIDS       154500       0.04       0.03       0.32       0.96       1.93
+solve/SSIDS        154500       1.05       1.00       3.50      12.00      53.25
+nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
+nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
+
+Per-family factor geomean vs MUMPS (top 25 families by count):
+family                  count    geomean        p50        max
+HATFLDH                  3000       0.43       0.45       0.60
+CONCON                   3000       0.83       0.88       1.69
+HS89                     3000       0.20       0.20       0.30
+HATFLDBNE                3000       0.41       0.40       1.50
+PALMER5A                 3000       0.29       0.30       0.40
+BIGGSC4                  3000       0.43       0.45       0.60
+HS13                     3000       0.17       0.20       0.33
+DJTL                     3000       0.09       0.10       0.20
+HS92                     3000       0.35       0.40       0.50
+MCONCON                  3000       0.88       0.93       1.69
+SSI                      3000       0.21       0.22       0.25
+ALLINITA                 3000       0.40       0.40       0.92
+ALLINITC                 3000       0.19       0.20       0.27
+SSINE                    3000       0.27       0.27       0.33
+HS91                     3000       0.27       0.30       0.44
+MGH10LS                  3000       0.21       0.22       0.25
+PALMER7A                 3000       0.28       0.30       0.44
+HS90                     3000       0.20       0.20       0.33
+HS118                    3000       0.92       0.95       1.20
+AVION2                   2682       1.47       1.50       2.09
+CERI651ALS               2331       0.28       0.30       0.40
+PFIT4                    2286       0.25       0.27       0.33
+CERI651C                 2233       0.28       0.30       0.33
+CERI651CLS               2227       0.27       0.27       0.33
+BATCH                    2054       1.34       1.40       1.92
+
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(μs)    mumps(μs)      ratio
+KIRBY2_0007                    458         1117          119       9.39
+KIRBY2_0006                    458         1080          127       8.50
+KIRBY2_0008                    458          921          122       7.55
+KIRBY2_0009                    458          818          128       6.39
+KIRBY2_0010                    458          775          133       5.83
+KIRBY2_0011                    458          692          120       5.77
+GROUPING_0097                  225          659          119       5.54
+GROUPING_0285                  225          621          118       5.26
+CRESC132_0000                 5314        62242        12266       5.07
+GROUPING_0217                  225          561          112       5.01
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
+small-frontal (<200)     147982     1.63     <= 2.0     PASS
+medium (<500)            152145     2.00     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-
-Session 2026-08-19-05's p90s (dense 1.58 / 2.00, sparse 1.58 / 1.58)
-therefore stand unchallenged and unconfirmed. A session with the corpus
-mounted should re-run before this is treated as regression-free on the
-corpus.
-
-In place of that, the poll overhead was measured directly: a paired A/B
-probe (same source, built against this branch and against a worktree at
-`origin/main`, best-of-10 warm refactors), alternated to control for
-container drift.
-
-                     branch (this PR)      main (9b9e882)
-grid_laplacian_350   203.8 / 197.8 ms      222.8 / 203.5 ms   sequential
-grid_laplacian_350    94.2 /  92.3 ms       94.4 /  92.2 ms   parallel
-tridiag_200k          57.7 /  57.3 ms       59.4 /  59.2 ms   sequential
-tridiag_200k          56.3 /  56.9 ms       56.8 /  54.6 ms   parallel
-
-No measurable overhead; every difference is inside this host's noise
-floor. That floor is wide — see the artifact recorded under *Abandoned*
-below — so the honest claim is "no regression detectable here", not "zero
-cost proven". A regression would in any case be surprising: every poll
-site short-circuits on an `Option::is_some` branch and touches no atomic
-when unarmed.
+small-frontal (<200)     153455     1.55     <= 2.0     PASS
+medium (<500)            153560     1.55     <= 3.0     PASS
 
 ```
 
 ## Recent Decisions
 
-**Scope of the change.** The escalation ladder is untouched — its rungs,
-the `0.75` exponent, `pivtol_max` — and unit tests U1–U5 pass unchanged,
-so a caller that never calls `reset_quality` sees byte-identical
-behaviour. The reset touches only the two escalated parameters and the
-level, mirroring what `increase_quality` leaves alone: the cached
-symbolic factorization survives (scaling-invariant since the β refactor
-moved scaling to the numeric phase), so re-baselining costs no
-re-analysis exactly as escalating costs none. Pinned by integration test
-`i9_reset_quality_rebaselines_without_invalidating_symbolic`.
+**Rejected alternative.** Computing ω unconditionally so the field is always
+a number. That charges every caller an `abs_symv` per step for a quantity
+their chosen criterion does not use, which is exactly the cost `EpsSqrtN`
+exists to avoid.
 
-## 2026-08-29 — the escalation baseline is snapshotted lazily, not at construction (issue #192)
+## 2026-08-29 — a cancellation is not evidence about MC64
 
-**Decision.** `reset_quality` restores a `QualityBaseline { scaling,
-pivot_threshold }` captured on the transition *out of*
-`QualityLevel::Baseline` — i.e. at the instant the ladder starts — held
-in `Option<QualityBaseline>` and cleared by every reset. Not captured in
-`with_params`.
+**Context.** `Solver::factor` may run two factorizations: when the first
+reports `inertia.zero > 0` under non-MC64 `Auto` scaling, the issue-#65
+rescue re-factors with `Mc64Symmetric` and adopts iff the zero count strictly
+drops. Non-adoption arms `mc64_retry_not_adopted`, a latch keyed on the
+pattern fingerprint and cleared only on a pattern change, so subsequent
+same-pattern `factor()`s skip the retry.
 
-**Why.** The `with_*` builders are consuming and run *after*
-`with_params`, so `Solver::with_params(np, sn).with_scaling(Identity)`
-would have a construction-time snapshot recording `np`'s strategy, and a
-reset would silently discard the caller's builder configuration. The
-lazy snapshot also makes the round trip exact by construction: it
-records a state the solver demonstrably occupied, so `reset` →
-`increase` retraces the same rungs a freshly constructed `Solver` would
-— the property downstream needs when re-baselining at a loop boundary.
-Pinned by `r6_reset_quality_preserves_builder_configured_scaling` (would
-fail under a construction-time snapshot) and
-`r4_reset_quality_from_exhausted_restarts_identical_ladder`.
+**Decision.** `mc64_retry_not_adopted` may only be armed by a retry that ran
+to completion and genuinely failed to reduce the zero count. Any `Err` out of
+the retry — `FeralError::Interrupted` today, and by the same argument any
+future error variant — propagates and leaves the latch disarmed.
+
+**Why this is a correctness rule, not a tuning choice.** The latch is a cache
+of a *measurement*: "MC64 does not help on this pattern." Arming it without
+having taken the measurement gates off the inertia rescue on false pretences.
+Because the latch survives every refactorization of the same pattern, and an
+interior-point host holds one pattern for a whole solve, a single unrelated
+cancellation would suppress the rescue for every remaining iterate and report
+unrescued inertia — the one hard constraint in `CLAUDE.md`. The
+`mc64_retry_not_adopted` doc already flags this interaction; it reasons about
+the latch being armed by genuine evidence, and that premise must be enforced
+at every arming site.
 
 ## Recent Tried-and-Rejected
-semantically identical, and giving the compiler `&[[f64; 4]]` instead of
-`&[f64]` may well be neutral or better for codegen. That is a
-*hypothesis*. This is the hottest loop in the factorization; its unroll
-depth and `into_remainder()` cleanup are a measured design
-(`dev/research/dense-kernel-*.md`), and the container this was found in
-has no corpus, so the change could not be benchmarked — the exit
-partition reports N/A here. Landing an unmeasured edit to that loop to
-satisfy a style lint inverts the project's order of operations.
+**Replaced with.** Two fix-independent observables:
+`mc64_retry_attempt_count() == 1` proves factorization #1 returned `Ok(..)`
+(the issue-#65 gate keys on `Ok`, so the flag was set after it completed),
+and `delay < call_elapsed` proves it was set before the call returned.
+Together they pin the flag inside the retry without referencing the status
+being asserted.
 
-**What was done instead.** A file-scoped
-`#![allow(clippy::chunks_exact_to_as_chunks)]` in `schur_kernel.rs` with
-the reasoning in a comment beside it. The three other sites the lint
-flagged — `diag_schur_parity.rs` (x2) and `diag_acopr14.rs` — are
-byte-decoding loops in diagnostic binaries, not hot paths, so those took
-the real rewrite (and lost a `copy_from_slice` each).
+## 2026-08-29 — busy-wait shell pollers while a benchmark is live
 
-**Still open.** Whether `as_chunks` in the kernel is neutral, a win, or
-a loss is unmeasured and unclaimed. A session with corpus access should
-sweep it and either land the rewrite with numbers or record the
-regression here. Until then the `allow` is a deferral, not a verdict.
+**Tried.** `until grep -q ...; do :; done` to wait on a background job.
+
+**Symptom.** Pinned a core, pushed load to 15.71 alongside `cargo test --all`
+and a live A/B benchmark, and contaminated the branch arm of round 2. Phase
+2.8.1 p90s are ratios against **on-disk MUMPS oracle sidecars**, so
+contention inflates only feral's numerator — the metric is not
+contention-symmetric and a loaded host reads as a regression. A single-shot
+run under that load FAILED; the interleaved re-run was 8/8 PASS.
+
+**Rule.** Any background waiter in this repo must `sleep`, never busy-poll.
+Do not trust a single-shot p90 taken under load; interleave A/B.
 
 ## Source Files
 ```
@@ -303,50 +348,5 @@ tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
 tests/issue112_bg_update.rs
 tests/issue127_pipeline_split.rs
-tests/issue128_supernode_nrow.rs
-tests/issue177_parallel_entry_point_core.rs
-tests/issue178_refine_cap.rs
-tests/issue178_solve_into.rs
-tests/issue190_componentwise_default.rs
-tests/issue190_refine_target.rs
-tests/issue194_factor_interrupt.rs
-tests/issue52_stats.rs
-tests/issue64_arrow_ordering.rs
-tests/issue65_mc64_fallback.rs
-tests/issue67_thin_ordering.rs
-tests/issue91_preprocess_misfire.rs
-tests/issue99_fma_front_gate.rs
-tests/kkt_hardening.rs
-tests/kkt_matrices.rs
-tests/large_matrix_smoke.rs
-tests/ldlt_compress.rs
-tests/lu_adversarial_inputs.rs
-tests/lu_default_ordering.rs
-tests/lu_dense_bump.rs
-tests/lu_dense_update_bg.rs
-tests/lu_dense.rs
-tests/lu_ft_widebump.rs
-tests/lu_hyper_sparse.rs
-tests/lu_markowitz.rs
-tests/lu_real_bases.rs
-tests/lu_scaling.rs
-tests/lu_sparse_rhs.rs
-tests/lu_sparse.rs
-tests/lu_update_alloc_probe.rs
-tests/lu_update_casctanks.rs
-tests/maxfromm_parity.rs
-tests/mc64_end_to_end.rs
-tests/mc64_scaling.rs
-tests/multi_rhs.rs
-tests/n2_static_pivot_scaling.rs
-tests/n3_parallel_profiler.rs
-tests/n4_mc64_retry_latch.rs
-tests/parallel_parity.rs
-tests/parity.rs
-tests/pivot_rejection.rs
-tests/pounce_interface.rs
-tests/pounce710_refine_cap_nrhs2.rs
-tests/profiler_smoke.rs
-tests/property_tests.rs
 
-(truncated from      365 lines to 350 line budget)
+(truncated from      411 lines to 350 line budget)

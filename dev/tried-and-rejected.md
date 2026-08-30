@@ -5907,3 +5907,69 @@ the real rewrite (and lost a `copy_from_slice` each).
 a loss is unmeasured and unclaimed. A session with corpus access should
 sweep it and either land the rewrite with numbers or record the
 regression here. Until then the `allow` is a deferral, not a verdict.
+
+## 2026-08-29 — warming the symbolic cache before the #194 interrupt test
+
+**Tried.** PR #195's own eight interrupt tests warm the symbolic cache with a
+first `factor()` so the timed call has a predictable duration.
+
+**Why it fails here.** The regression test needs a pattern that fires the
+issue-#65 gate, i.e. one where factorization #1 returns `inertia.zero > 0`.
+Warming requires a `factor()` on that pattern — which arms
+`mc64_retry_not_adopted`, the very latch under test — and there is no public
+API to clear it.
+
+**Replaced with.** Calibrate the full call time on a fresh `Solver`
+(asserting `mc64_retry_attempt_count() == 1` to confirm the retry ran), then
+sweep the flag-set delay across that duration in 1% steps, a fresh `Solver`
+per step.
+
+## 2026-08-29 — `thread::sleep` as the interrupt-test watchdog
+
+**Tried.** A watchdog thread that `thread::sleep(delay)` then sets the
+interrupt flag.
+
+**Symptom.** ~1 ms granularity and it overshoots, against a ~6 ms total call.
+With seven coarse fractions no attempt ever landed inside the retry window;
+the test failed its own vacuity guard:
+
+```
+no attempt landed inside the retry window, so the regression this test
+guards was never exercised. Calibrated full call = 11.272458ms.
+```
+
+**Replaced with.** A `std::hint::spin_loop()` busy-wait for microsecond
+precision, over 61 steps at 1% granularity.
+
+## 2026-08-29 — keying the interrupt test's landing detector on `status == Interrupted`
+
+**Tried.** Deciding "the flag landed inside the MC64 retry" by observing
+`FactorStatus::Interrupted`.
+
+**Why it is wrong, and dangerously so.** That status is exactly what the bug
+under test swallows. Pre-fix, the detector could never report a landing, so
+the test would fail its vacuity guard and report *"the regression was never
+exercised"* — misreading a live, reproducible defect as a coverage gap, and
+certifying the eventual fix as untested. The detector must never share an
+observable with the assertion.
+
+**Replaced with.** Two fix-independent observables:
+`mc64_retry_attempt_count() == 1` proves factorization #1 returned `Ok(..)`
+(the issue-#65 gate keys on `Ok`, so the flag was set after it completed),
+and `delay < call_elapsed` proves it was set before the call returned.
+Together they pin the flag inside the retry without referencing the status
+being asserted.
+
+## 2026-08-29 — busy-wait shell pollers while a benchmark is live
+
+**Tried.** `until grep -q ...; do :; done` to wait on a background job.
+
+**Symptom.** Pinned a core, pushed load to 15.71 alongside `cargo test --all`
+and a live A/B benchmark, and contaminated the branch arm of round 2. Phase
+2.8.1 p90s are ratios against **on-disk MUMPS oracle sidecars**, so
+contention inflates only feral's numerator — the metric is not
+contention-symmetric and a loaded host reads as a regression. A single-shot
+run under that load FAILED; the interleaved re-run was 8/8 PASS.
+
+**Rule.** Any background waiter in this repo must `sleep`, never busy-poll.
+Do not trust a single-shot p90 taken under load; interleave A/B.
