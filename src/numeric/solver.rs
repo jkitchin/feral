@@ -1844,6 +1844,7 @@ impl Solver {
             return Ok(RefineOutcome {
                 steps: 0,
                 relative_residual: 0.0,
+                backward_error: 0.0,
                 stop: RefineStop::Converged,
             });
         }
@@ -1861,15 +1862,20 @@ impl Solver {
         }
         // Aggregate the per-column outcomes the same way the batched
         // refiner does, so the two dispatch paths report identically
-        // (issue #190). `relative_residual` is NaN under `max_steps = 0`,
-        // and `NaN > x` is false, so the max fold leaves it at 0.0 —
-        // handled explicitly rather than silently.
+        // (issue #190). `relative_residual` and `backward_error` are NaN
+        // under `max_steps = 0`, and `NaN > x` is false, so the max fold
+        // leaves them at 0.0 — handled explicitly rather than silently.
+        // `backward_error` is additionally NaN whenever ω is not the
+        // criterion, which is a per-*call* property, so in practice
+        // either every column reports NaN or none does.
         let mut agg = RefineOutcome {
             steps: 0,
             relative_residual: 0.0,
+            backward_error: 0.0,
             stop: RefineStop::Converged,
         };
         let mut any_nan = false;
+        let mut any_om_nan = false;
         for c in 0..nrhs {
             let src = &rhs[c * n..(c + 1) * n];
             let dst = &mut x_out[c * n..(c + 1) * n];
@@ -1881,9 +1887,17 @@ impl Solver {
             } else if o.relative_residual > agg.relative_residual {
                 agg.relative_residual = o.relative_residual;
             }
+            if o.backward_error.is_nan() {
+                any_om_nan = true;
+            } else if o.backward_error > agg.backward_error {
+                agg.backward_error = o.backward_error;
+            }
         }
         if any_nan {
             agg.relative_residual = f64::NAN;
+        }
+        if any_om_nan {
+            agg.backward_error = f64::NAN;
         }
         Ok(agg)
     }

@@ -29,10 +29,25 @@ All notable changes to FERAL will be documented in this file.
     of `eps` says "as good as a backward-stable factorization would have
     returned," independent of `n` and of row scaling.
 - **What you get back.** The `*_refined_into` entry points now return a
-  `RefineOutcome { steps, relative_residual, stop }` instead of `()`, where
-  `stop` is `Converged | MaxSteps | Stagnated | Diverged`. All three values
-  are already computed by the loop, so reporting them costs nothing. The
-  full `RefinementDiagnostics` is deliberately *not* returned here: it
+  `RefineOutcome { steps, relative_residual, backward_error, stop }` instead
+  of `()`, where `stop` is `Converged | MaxSteps | Stagnated | Diverged`.
+  All four values are already computed by the loop, so reporting them costs
+  nothing.
+
+  `backward_error` is the achieved componentwise `omega` of the returned
+  iterate — the quantity the new default criterion certifies, so a host that
+  gets `Converged` back can log or threshold on the certificate without
+  paying a second `abs_symv` to recompute it. For a multi-RHS call it is the
+  worst column, matching `steps` and `relative_residual`.
+
+  **It is `NaN` when `omega` was not measured** — under `EpsSqrtN`,
+  `RelativeResidual`, and `max_steps = 0`, where the loop never forms it.
+  `NaN` here means *not measured* and is deliberately distinct from
+  `INFINITY`, which is a real measurement (a non-finite iterate). Test it
+  with `is_nan()` before comparing against a bound; `NaN < t` is `false`, so
+  a bare comparison reads "not measured" as failure.
+
+  The full `RefinementDiagnostics` is deliberately *not* returned here: it
   computes a Hager-Higham condition estimate costing 3-5 extra solves, which
   would multiply exactly the cost this change exists to cut. Ask for it
   explicitly via `solve_sparse_refined_with_diagnostics` when you want it.

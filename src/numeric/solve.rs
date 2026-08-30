@@ -2316,6 +2316,19 @@ pub struct RefineOutcome {
     /// formed and there is nothing honest to report. For a multi-RHS
     /// call this is the maximum over columns.
     pub relative_residual: f64,
+    /// The Arioli-Demmel-Duff componentwise backward error
+    /// `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ` of the iterate that was
+    /// returned. For a multi-RHS call this is the maximum over columns.
+    ///
+    /// **`NaN` when the criterion did not require ω** — that is, under
+    /// [`StopCriterion::EpsSqrtN`] and [`StopCriterion::RelativeResidual`],
+    /// and under `max_steps == 0`. ω costs an extra `abs_symv` per step,
+    /// so the refiner only forms it when it is being tested against;
+    /// reporting a stale or defaulted number instead would be worse than
+    /// reporting none. Note that `NaN` here means *not measured* and is
+    /// distinct from `INFINITY`, which is a real measurement: a
+    /// non-finite iterate. Test with `is_nan()`, not against a bound.
+    pub backward_error: f64,
     /// Which exit fired. For a multi-RHS call, the worst over columns in
     /// the order `MaxSteps > Diverged > Stagnated > Converged` —
     /// `MaxSteps` ranks first because "did the budget bind?" is the
@@ -2956,6 +2969,7 @@ fn solve_sparse_refined_core(
                 // No residual was formed, so there is nothing honest to
                 // report. See `RefineOutcome::relative_residual`.
                 relative_residual: f64::NAN,
+                backward_error: f64::NAN,
                 stop: RefineStop::MaxSteps,
             },
             None,
@@ -3163,6 +3177,11 @@ fn solve_sparse_refined_core(
     let outcome = RefineOutcome {
         steps: steps_taken,
         relative_residual: rel_res(best_r_norm),
+        // Gate on `wants_omega`, not on `best_omega == INFINITY`: under
+        // the normwise criteria `best_omega` is the never-read `INFINITY`
+        // sentinel, but when ω *is* the criterion `INFINITY` is a real
+        // measurement (a non-finite iterate) and must be reported.
+        backward_error: if wants_omega { best_omega } else { f64::NAN },
         stop,
     };
 
@@ -3250,6 +3269,7 @@ pub fn solve_sparse_many_refined_into(
         return Ok(RefineOutcome {
             steps: 0,
             relative_residual: 0.0,
+            backward_error: 0.0,
             stop: RefineStop::Converged,
         });
     }
@@ -3314,6 +3334,7 @@ pub fn solve_sparse_many_refined_into(
             steps: 0,
             // No residual formed; see `RefineOutcome::relative_residual`.
             relative_residual: f64::NAN,
+            backward_error: f64::NAN,
             stop: RefineStop::MaxSteps,
         });
     }
@@ -3360,7 +3381,14 @@ pub fn solve_sparse_many_refined_into(
         }
     }
     if active.is_empty() {
-        return Ok(aggregate_outcome(&col_stop, &col_steps, &best_rn, &bnorm));
+        return Ok(aggregate_outcome(
+            &col_stop,
+            &col_steps,
+            &best_rn,
+            &bnorm,
+            &best_om,
+            wants_omega,
+        ));
     }
 
     // Refinement is needed for at least one column. `x_out` holds the
@@ -3439,7 +3467,14 @@ pub fn solve_sparse_many_refined_into(
         active = still;
     }
 
-    Ok(aggregate_outcome(&col_stop, &col_steps, &best_rn, &bnorm))
+    Ok(aggregate_outcome(
+        &col_stop,
+        &col_steps,
+        &best_rn,
+        &bnorm,
+        &best_om,
+        wants_omega,
+    ))
 }
 
 /// Collapse the per-column refinement record into one [`RefineOutcome`],
@@ -3455,10 +3490,13 @@ fn aggregate_outcome(
     col_steps: &[usize],
     best_rn: &[f64],
     bnorm: &[f64],
+    best_om: &[f64],
+    wants_omega: bool,
 ) -> RefineOutcome {
     let mut stop = RefineStop::Converged;
     let mut steps = 0usize;
     let mut worst_rel = 0.0f64;
+    let mut worst_om = 0.0f64;
     for c in 0..col_stop.len() {
         stop = stop.worst(col_stop[c]);
         steps = steps.max(col_steps[c]);
@@ -3470,10 +3508,17 @@ fn aggregate_outcome(
         if rel > worst_rel {
             worst_rel = rel;
         }
+        if best_om[c] > worst_om {
+            worst_om = best_om[c];
+        }
     }
     RefineOutcome {
         steps,
         relative_residual: worst_rel,
+        // `best_om` is the untouched `INFINITY` sentinel under the
+        // normwise criteria; report "not measured" rather than a fold
+        // over sentinels. See `RefineOutcome::backward_error`.
+        backward_error: if wants_omega { worst_om } else { f64::NAN },
         stop,
     }
 }

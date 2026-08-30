@@ -380,3 +380,236 @@ fn the_multi_rhs_path_honors_each_criterion_per_column() {
         }
     }
 }
+
+// --- ask 2b: the outcome reports ω, not just the normwise residual ----
+//
+// The downstream question on PR #191 was whether `RefineOutcome` carries
+// the achieved backward error as well as the step count. It does, and
+// these tests pin what the number means. The point of the field is that
+// 0.18.0 makes ω *the thing being certified* by the default criterion —
+// a host that gets `Converged` back and wants to log or threshold on the
+// certificate should not have to recompute it with a second `abs_symv`.
+
+/// ω computed straight from the Arioli-Demmel-Duff definition
+/// `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ`, with its own residual and its own
+/// traversal of the stored lower triangle. Deliberately does **not** call
+/// `CscMatrix::abs_symv` or anything in `numeric::solve`, so it is an
+/// independent oracle for what the refiner reports.
+///
+/// The production version carries LAPACK `dgerfs`'s `safe1`/`safe2`
+/// guard for denominators near underflow. These fixtures are the
+/// `tridiag(20, 2.0)` family with an O(1) right-hand side, so every
+/// denominator is O(1) — some twenty orders above the guard's cutoff —
+/// and the guarded and unguarded forms agree to the last bit.
+fn omega_by_definition(a: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
+    let n = a.n;
+    let mut ax = vec![0.0f64; n];
+    let mut den = vec![0.0f64; n];
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            let v = a.values[k];
+            ax[i] += v * x[j];
+            den[i] += v.abs() * x[j].abs();
+            if i != j {
+                ax[j] += v * x[i];
+                den[j] += v.abs() * x[i].abs();
+            }
+        }
+    }
+    let mut om = 0.0f64;
+    for i in 0..n {
+        let d = den[i] + b[i].abs();
+        assert!(d > 1e-8, "fixture denominator {d:e} is near the guard");
+        let t = (b[i] - ax[i]).abs() / d;
+        if t > om {
+            om = t;
+        }
+    }
+    om
+}
+
+#[test]
+fn the_reported_omega_is_the_omega_of_the_returned_iterate() {
+    let (a, f, rhs) = full_budget_case();
+    // Every criterion that actually forms ω. `full_budget_case` cannot
+    // reach `√ε`, so these run to the cap and the returned iterate is
+    // the best one seen -- exactly the case where a host wants to know
+    // how close refinement got.
+    let criteria = [
+        StopCriterion::BackwardError(1e-4),
+        StopCriterion::BackwardError(f64::EPSILON.sqrt()),
+        StopCriterion::EpsSqrtNAndBackwardError(f64::EPSILON.sqrt()),
+    ];
+    for stop in criteria {
+        let (x, o) = refine(
+            &a,
+            &f,
+            &rhs,
+            RefineOptions {
+                stop,
+                ..RefineOptions::default()
+            },
+        );
+        let expect = omega_by_definition(&a, &x, &rhs);
+        assert!(
+            o.backward_error.is_finite(),
+            "{stop:?}: reported ω must be a measurement, got {:e}",
+            o.backward_error
+        );
+        let rel = (o.backward_error - expect).abs() / expect;
+        assert!(
+            rel < 1e-12,
+            "{stop:?}: reported ω {:e} != recomputed {expect:e} (rel {rel:e})",
+            o.backward_error
+        );
+    }
+}
+
+#[test]
+fn omega_is_reported_as_not_measured_under_the_normwise_criteria() {
+    // `NaN` means "not formed", and is deliberately distinct from
+    // `INFINITY`, which the refiner reports for a non-finite iterate.
+    // Leaking the internal `INFINITY` sentinel here would read as a
+    // catastrophically bad solve on a run that converged fine.
+    let (a, f, rhs) = early_exit_case();
+    for stop in [
+        StopCriterion::EpsSqrtN,
+        StopCriterion::RelativeResidual(1e-4),
+    ] {
+        let (_, o) = refine(
+            &a,
+            &f,
+            &rhs,
+            RefineOptions {
+                stop,
+                ..RefineOptions::default()
+            },
+        );
+        assert_eq!(o.stop, RefineStop::Converged, "{stop:?}: {o:?}");
+        assert!(
+            o.backward_error.is_nan(),
+            "{stop:?}: ω was never formed, must report NaN, got {:e}",
+            o.backward_error
+        );
+    }
+}
+
+#[test]
+fn omega_is_reported_as_not_measured_when_the_budget_is_zero() {
+    // Issue #178 requires `max_steps = 0` to cost exactly an unrefined
+    // solve, so no residual and no ω are formed -- same reasoning as
+    // `relative_residual` being NaN on this path.
+    let (a, f, rhs) = early_exit_case();
+    let (_, o) = refine(
+        &a,
+        &f,
+        &rhs,
+        RefineOptions {
+            max_steps: 0,
+            ..RefineOptions::default()
+        },
+    );
+    assert!(o.relative_residual.is_nan(), "{o:?}");
+    assert!(o.backward_error.is_nan(), "{o:?}");
+}
+
+#[test]
+fn the_multi_rhs_outcome_reports_the_worst_column_omega() {
+    // Two aggregations, written independently and both checked here:
+    // the batched refiner's own fold over `best_om`, and the fold in
+    // `Solver::solve_many_refined_into`, which for `nrhs` below
+    // BLAS3_REFINE_THRESHOLD loops per column and combines the
+    // single-RHS outcomes itself. #190 requires the two dispatch paths
+    // report identically, so `nrhs = 2` (the IPM width, narrow path) and
+    // `nrhs = 40` (batched path) are both run through the `Solver` as
+    // well as through the free function.
+    let (a, f, _rhs1) = full_budget_case();
+    let perturbed = tridiag(N, |j| 2.0 + 1e-2 * (1.0 + (j as f64) * 0.01));
+    let mut solver = Solver::new();
+    let st = solver.factor(&perturbed, None);
+    assert!(matches!(st, FactorStatus::Success), "factor: {st:?}");
+    let opts = RefineOptions {
+        stop: StopCriterion::BackwardError(1e-4),
+        ..RefineOptions::default()
+    };
+    for nrhs in [2usize, 40] {
+        // Each column rotates the base RHS pattern and rescales by an
+        // O(1) factor, so the columns have genuinely different ω and the
+        // max fold is exercised. Deliberately *not* a 10^-c ladder: that
+        // pushes the small columns' denominators toward the `dgerfs`
+        // underflow guard, where the oracle's unguarded formula stops
+        // agreeing with the production one for reasons that have nothing
+        // to do with what this test is asserting.
+        let mut rhs = vec![0.0; N * nrhs];
+        for c in 0..nrhs {
+            let s = 1.0 + 0.25 * (c as f64);
+            for i in 0..N {
+                rhs[c * N + i] = (((i + 2 * c) % 7) as f64 - 3.0) * s;
+            }
+        }
+        let mut x = vec![0.0; N * nrhs];
+        let o = solve_sparse_many_refined_into(&a, &f, &rhs, nrhs, &mut x, opts).expect("many");
+        let worst = (0..nrhs)
+            .map(|c| omega_by_definition(&a, &x[c * N..(c + 1) * N], &rhs[c * N..(c + 1) * N]))
+            .fold(0.0f64, f64::max);
+        assert!(
+            o.backward_error.is_finite(),
+            "nrhs={nrhs}: {:e}",
+            o.backward_error
+        );
+        let rel = (o.backward_error - worst).abs() / worst;
+        assert!(
+            rel < 1e-12,
+            "nrhs={nrhs}: reported ω {:e} != worst column {worst:e} (rel {rel:e})",
+            o.backward_error
+        );
+
+        // Same problem through the `Solver`, which at nrhs = 2 takes the
+        // per-column loop and its separately written fold.
+        let mut xs = vec![0.0; N * nrhs];
+        let os = solver
+            .solve_many_refined_into(&a, &rhs, nrhs, &mut xs, opts)
+            .expect("solver many");
+        let rel = (os.backward_error - worst).abs() / worst;
+        assert!(
+            rel < 1e-12,
+            "nrhs={nrhs}: Solver reported ω {:e} != worst column {worst:e} (rel {rel:e})",
+            os.backward_error
+        );
+    }
+}
+
+#[test]
+fn the_solver_multi_rhs_path_also_reports_omega_as_not_measured() {
+    // The narrow path's fold is written separately from the batched
+    // one, so its "not measured" case needs its own check: a max fold
+    // over NaN silently yields 0.0, which would read as a *perfect*
+    // backward error on a run that never formed ω at all.
+    let perturbed = tridiag(N, |j| 2.0 + 1e-4 * (1.0 + (j as f64) * 0.01));
+    let a = tridiag(N, |_| 2.0);
+    let mut solver = Solver::new();
+    let st = solver.factor(&perturbed, None);
+    assert!(matches!(st, FactorStatus::Success), "factor: {st:?}");
+    for nrhs in [2usize, 40] {
+        let rhs = many_rhs(N, nrhs);
+        let mut x = vec![0.0; N * nrhs];
+        let o = solver
+            .solve_many_refined_into(
+                &a,
+                &rhs,
+                nrhs,
+                &mut x,
+                RefineOptions {
+                    stop: StopCriterion::EpsSqrtN,
+                    ..RefineOptions::default()
+                },
+            )
+            .expect("solver many");
+        assert!(
+            o.backward_error.is_nan(),
+            "nrhs={nrhs}: ω never formed, must be NaN, got {:e}",
+            o.backward_error
+        );
+    }
+}
