@@ -5877,3 +5877,33 @@ reintroduced from the other direction.
 (`ref/mumps/src/dini_defaults.F:1094`), so matching it is both the cheaper
 and the better-justified choice. Recorded in the doc comment on
 `DEFAULT_BACKWARD_ERROR_TARGET` so it is not retried.
+## 2026-08-29 — `as_chunks::<4>()` in the Schur SIMD kernel: deferred, not measured
+
+**Context.** The stable toolchain moved to 1.98.0 (rustc `88d9e12ae`,
+2026-08-18), and clippy 1.98 added `chunks_exact_to_as_chunks`. It fires
+on 10 sites in `src/dense/schur_kernel.rs` — the 4-way unrolled SIMD
+bodies of `axpy_minus` / `axpy2_minus` — suggesting `as_chunks::<4>()`
+in place of `chunks_exact(4)` / `chunks_exact_mut(4)`. Under
+`-D warnings` this turned CI's `check` job red on every PR.
+
+**Not taken, and explicitly not because it is wrong.** The rewrite looks
+semantically identical, and giving the compiler `&[[f64; 4]]` instead of
+`&[f64]` may well be neutral or better for codegen. That is a
+*hypothesis*. This is the hottest loop in the factorization; its unroll
+depth and `into_remainder()` cleanup are a measured design
+(`dev/research/dense-kernel-*.md`), and the container this was found in
+has no corpus, so the change could not be benchmarked — the exit
+partition reports N/A here. Landing an unmeasured edit to that loop to
+satisfy a style lint inverts the project's order of operations.
+
+**What was done instead.** A file-scoped
+`#![allow(clippy::chunks_exact_to_as_chunks)]` in `schur_kernel.rs` with
+the reasoning in a comment beside it. The three other sites the lint
+flagged — `diag_schur_parity.rs` (x2) and `diag_acopr14.rs` — are
+byte-decoding loops in diagnostic binaries, not hot paths, so those took
+the real rewrite (and lost a `copy_from_slice` each).
+
+**Still open.** Whether `as_chunks` in the kernel is neutral, a win, or
+a loss is unmeasured and unclaimed. A session with corpus access should
+sweep it and either land the rewrite with numbers or record the
+regression here. Until then the `allow` is a deferral, not a verdict.

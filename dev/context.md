@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-21T15:45:10Z
+Generated: 2026-08-30T02:51:11Z
 
 ## Latest Session
-File: dev/sessions/2026-08-21-01.md
+File: dev/sessions/2026-08-29-01.md
 ```
-# Session 2026-08-21-01
-
-## Unfavorable result, reported first (per CLAUDE.md)
-
-**The solve tail regressed 33–56%, this session's change caused it, and a
-controlled A/B proves that rather than leaving it as a hypothesis.**
-
-`src/bin/bench.rs:1985` times the sparse solve with `RefineOptions::default()`,
-so the new stopping criterion sits directly in the measured path. I ran the
-bench with the shipped default, then reverted `Default for RefineOptions` to
-`EpsSqrtN`, rebuilt, and re-ran on the same quiet machine:
-
-| ratio | control (`EpsSqrtN`) | shipped default | delta |
-|---|---:|---:|---:|
-| factor/MUMPS p90 | 1.54 | 1.56 | +1.3% (noise) |
-| solve/MUMPS geomean | 0.08 | 0.08 | none |
-| solve/MUMPS p50 | 0.08 | 0.08 | none |
-| solve/MUMPS p90 | 0.15 | **0.20** | **+33%** |
-| solve/MUMPS p99 | 0.71 | **1.08** | **+52%** |
-| solve/SSIDS geomean | 0.94 | **1.06** | **+13%** |
-| solve/SSIDS p90 | 2.50 | **3.60** | **+44%** |
-| solve/SSIDS p99 | 8.33 | **13.00** | **+56%** |
-
-**The shape is what the design predicts.** Geomean and p50 are identical to
-three decimals — the well-scaled majority never needed the extra conjunct
-and does not pay for it. The tail pays, because that is where the matrices
-live whose componentwise error was above `√ε` and which now actually refine.
-On the tracked parity corpus that is 13 of 63 (21%), the right order to move
-a p90.
-
-Factor is unchanged within noise, as it must be — the change is confined to
-the refinement loop's stopping test. That also validates the control: machine
-state would have moved factor too, and did not. **Unlike 2026-08-20-02,
-nothing here is attributed to machine state.**
-
-**Against the standing bar** ("rigorous, thoroughly correct, and result in
-performance gains, or we will not include it in a release"): this is a
-measured performance *cost*, not a gain. It buys MA57/MUMPS componentwise
-parity on systems where feral returned ω up to 9.5e-5 and reported
-`Converged`. Whether that trade ships is the human's call. The alternative is
-to keep `EpsSqrtN` as the default and make the conjunction opt-in — which
-costs pounce the fix it asked for.
+# Session 2026-08-29-01
 
 ## Goal
 
-Human instruction: *"we need to fix the deficiency gap with ma57/mumps if
-there is one because this is causing an issue on a class of problems in
-pounce. surprisingly, it works well for the vast majority of problems."*
+Fix issue #192: `Solver::increase_quality`'s escalation is permanent and
+unscopable, so an escalation chosen for one hard factorization governs
+every factorization for the remaining life of the `Solver`.
+
+## Benchmark Results
+
+**The exit partition was not measured this session.** The 153k-matrix
+corpus is not present in this container, so both partitions report
+`N/A` and there is no comparison against session 2026-08-19-05's
+1.58 / 1.58 to report — favourable or otherwise.
+
+```
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
+
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+```
+
+What did run is clean, and the diff has no mechanism by which it could
+regress performance: it is a pure API addition whose new code path runs
+only when a caller calls `reset_quality()`. No numeric kernel, ordering,
+scaling, or pivoting code was touched, and the forward-ladder tests
+U1–U5 pass unchanged. That is an argument, not a measurement, and the
+next session with corpus access should confirm it.
 
 ## Accomplished
+
+### `Solver::reset_quality()` (issue #192, commit `0952f99`)
+
+New `Solver::reset_quality() -> bool` and its Python binding. Reverts
 ```
 
 ## Git Status
 ```
-f5bc004 docs(dense): drop unverifiable pounce provenance from the growth-flag docs
-396bfa3 fix(solve): default refinement now certifies componentwise accuracy
-001a7db diag: four probes that locate the MA57/MUMPS deficiency gap
-963884c docs: session checkpoint 2026-08-20-03 (#190 measured; premise refuted)
-65f488c docs(refine): correct #190's premise against the corpus measurement
+be1e234 feat(refine): report the achieved componentwise omega in RefineOutcome
+9c64660 test(refine): stop two #190 tests from claiming more than they prove
+429dfca docs: describe the refinement default that actually ships
+9b5323c perf(solve): size the multi-RHS workspace on the dispatch threshold
+47f332e fix(refine): a non-finite iterate must not certify as backward stable
 ```
 
 ## Test Status
@@ -75,9 +75,9 @@ test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
@@ -86,98 +86,103 @@ test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 456 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.68s
+test result: ok. 466 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.90s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-21-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-29-01.md)
 
 
-Inertia gate: **154531/154590 (100.0%) match vs MUMPS** — holds.
-
-ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.44       0.30       1.56       3.45      11.05
-solve/MUMPS        153560       0.08       0.08       0.20       1.08       4.56
-factor/SSIDS       154500       0.04       0.03       0.32       1.02       2.49
-solve/SSIDS        154500       1.06       1.00       3.60      13.00      52.33
-nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
-nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
+**The exit partition was not measured this session.** The 153k-matrix
+corpus is not present in this container, so both partitions report
+`N/A` and there is no comparison against session 2026-08-19-05's
+1.58 / 1.58 to report — favourable or otherwise.
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.56     <= 2.0     PASS
-medium (<500)            153560     1.56     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
-All four partitions PASS and sit at the bottom of the observed band against
-the 08-19-05 baseline of 1.58/1.58/1.58/2.00. `factor/MUMPS` max fell
-71.94 → 11.05, the machine-quietness signature. The solve regression is
-covered at the top of this file.
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 
-Suite: **956 passed, 0 failed, 113 suites.** `cargo clippy -- -D warnings` and
-`cargo clippy -p feral-diagnostics --all-targets -- -D warnings` both clean.
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+
+What did run is clean, and the diff has no mechanism by which it could
+regress performance: it is a pure API addition whose new code path runs
+only when a caller calls `reset_quality()`. No numeric kernel, ordering,
+scaling, or pivoting code was touched, and the forward-ladder tests
+U1–U5 pass unchanged. That is an argument, not a measurement, and the
+next session with corpus access should confirm it.
 
 ```
 
 ## Recent Decisions
-tolerance or residual gate. `EpsSqrtN` remains available and bit-for-bit
-unchanged for callers that want the historical behavior.
 
-**Cost, measured — and it is not free.** On the seven large matrices:
-well-scaled RHS identical to the old default (same steps, same iterates);
-badly-scaled RHS one extra step (5–14 ms) on the three worst, which then sit
-level with MUMPS at ~3e-16.
+**Scope of the change.** The escalation ladder is untouched — its rungs,
+the `0.75` exponent, `pivtol_max` — and unit tests U1–U5 pass unchanged,
+so a caller that never calls `reset_quality` sees byte-identical
+behaviour. The reset touches only the two escalated parameters and the
+level, mirroring what `increase_quality` leaves alone: the cached
+symbolic factorization survives (scaling-invariant since the β refactor
+moved scaling to the numeric phase), so re-baselining costs no
+re-analysis exactly as escalating costs none. Pinned by integration test
+`i9_reset_quality_rebaselines_without_invalidating_symbolic`.
 
-That understates the corpus-wide cost. A controlled A/B over the 154,588
-benchmark matrices — same machine, only `Default for RefineOptions` changed —
-shows the median untouched and the tail paying: solve/MUMPS p90 0.15 → 0.20
-(+33%), p99 0.71 → 1.08 (+52%); solve/SSIDS geomean 0.94 → 1.06 (+13%), p90
-2.50 → 3.60 (+44%), p99 8.33 → 13.00 (+56%). Factor is unchanged within noise,
-which confirms the effect is the refinement loop rather than machine state.
+## 2026-08-29 — the escalation baseline is snapshotted lazily, not at construction (issue #192)
 
-So this decision trades tail latency for componentwise correctness. It is
-recorded as such, not as a free improvement. Callers needing the old latency
-profile can pass `StopCriterion::EpsSqrtN` explicitly and accept the gap.
+**Decision.** `reset_quality` restores a `QualityBaseline { scaling,
+pivot_threshold }` captured on the transition *out of*
+`QualityLevel::Baseline` — i.e. at the instant the ladder starts — held
+in `Option<QualityBaseline>` and cleared by every reset. Not captured in
+`with_params`.
 
-**Rejected alternatives** (both in `dev/tried-and-rejected.md` with their
-failing cases): `BackwardError(√ε)` alone, which fails `tests/parity.rs` on
-ROSZMAN1_0241 because ω ≤ √ε can hold while the normwise residual is looser
-than the old rule delivered; and `BackwardError(f64::EPSILON)`, LAPACK
-`dgerfs`'s target, which stagnates or exhausts the step budget on five of
-seven large matrices under the badly-scaled RHS.
-
-**Regression coverage.** `tests/issue190_componentwise_default.rs`. The
-defect reproduces on the tracked parity corpus — `EpsSqrtN` leaves ω above
-√ε on 13 of 63 matrices, worst DEGENLPB_0046 at 359×√ε — and the new default
-drives all 63 to ω ≤ √ε.
+**Why.** The `with_*` builders are consuming and run *after*
+`with_params`, so `Solver::with_params(np, sn).with_scaling(Identity)`
+would have a construction-time snapshot recording `np`'s strategy, and a
+reset would silently discard the caller's builder configuration. The
+lazy snapshot also makes the round trip exact by construction: it
+records a state the solver demonstrably occupied, so `reset` →
+`increase` retraces the same rungs a freshly constructed `Solver` would
+— the property downstream needs when re-baselining at a loop boundary.
+Pinned by `r6_reset_quality_preserves_builder_configured_scaling` (would
+fail under a construction-time snapshot) and
+`r4_reset_quality_from_exhausted_restarts_identical_ladder`.
 
 ## Recent Tried-and-Rejected
-`StopCriterion::EpsSqrtNAndBackwardError(√ε)`, which is strictly harder to
-satisfy than the old default and therefore cannot regress any caller.
-ROSZMAN1_0241 and the rest of `tests/parity.rs` pass unchanged under it.
+semantically identical, and giving the compiler `&[[f64; 4]]` instead of
+`&[f64]` may well be neutral or better for codegen. That is a
+*hypothesis*. This is the hottest loop in the factorization; its unroll
+depth and `into_remainder()` cleanup are a measured design
+(`dev/research/dense-kernel-*.md`), and the container this was found in
+has no corpus, so the change could not be benchmarked — the exit
+partition reports N/A here. Landing an unmeasured edit to that loop to
+satisfy a style lint inverts the project's order of operations.
 
-## 2026-08-21 — `BackwardError(f64::EPSILON)` as the componentwise target
+**What was done instead.** A file-scoped
+`#![allow(clippy::chunks_exact_to_as_chunks)]` in `schur_kernel.rs` with
+the reasoning in a comment beside it. The three other sites the lint
+flagged — `diag_schur_parity.rs` (x2) and `diag_acopr14.rs` — are
+byte-decoding loops in diagnostic binaries, not hot paths, so those took
+the real rewrite (and lost a `copy_from_slice` each).
 
-**Tried.** Using `f64::EPSILON` — LAPACK `dgerfs`'s componentwise target —
-rather than `√ε` for `DEFAULT_BACKWARD_ERROR_TARGET`. Measured with
-`OMEGA_EPS=1 HARD_RHS=1 probe_vs_mumps_residual`.
-
-**Failed on cost.** Under the badly-scaled RHS it stagnates or exhausts the
-step budget on **five of the seven** large matrices, taking up to 10
-correction steps, while `√ε` converges on the same systems in at most one.
-That is precisely the wasted-budget pathology issue #190 complained about,
-reintroduced from the other direction.
-
-**Disposition.** Rejected. `√ε` is what MUMPS itself targets
-(`ref/mumps/src/dini_defaults.F:1094`), so matching it is both the cheaper
-and the better-justified choice. Recorded in the doc comment on
-`DEFAULT_BACKWARD_ERROR_TARGET` so it is not retried.
+**Still open.** Whether `as_chunks` in the kernel is neutral, a win, or
+a loss is unmeasured and unclaimed. A session with corpus access should
+sweep it and either land the rewrite with numbers or record the
+regression here. Until then the `allow` is a deferral, not a verdict.
 
 ## Source Files
 ```

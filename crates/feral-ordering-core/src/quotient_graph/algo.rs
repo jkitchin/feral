@@ -1204,9 +1204,8 @@ pub fn finalize_step_amf(
             ws.nv[i] = nvi;
             let degme_i = degme_i32;
             let nvi_i = nvi;
-            let rmf: f64;
             let deg_i = ws.degree[i];
-            if (deg_i as usize) + (degme_i as usize) > nleft {
+            let rmf: f64 = if (deg_i as usize) + (degme_i as usize) > nleft {
                 // Saturated branch. RMF1 uses original DEG.
                 let deg_f = deg_i as f64;
                 let rmf1 = deg_f * (deg_f - 1.0 + 2.0 * degme_i as f64) - ws.wf[i] as f64;
@@ -1215,12 +1214,12 @@ pub fn finalize_step_amf(
                 let nd = new_deg as f64;
                 let rmf_new =
                     nd * (nd - 1.0) - (degme_i - nvi_i) as f64 * (degme_i - nvi_i - 1) as f64;
-                rmf = rmf_new.min(rmf1);
+                rmf_new.min(rmf1)
             } else {
                 let deg_f = deg_i as f64;
                 ws.degree[i] = deg_i + degme_i - nvi_i;
-                rmf = deg_f * (deg_f - 1.0 + 2.0 * degme_i as f64) - ws.wf[i] as f64;
-            }
+                deg_f * (deg_f - 1.0 + 2.0 * degme_i as f64) - ws.wf[i] as f64
+            };
             let rmf = rmf / (nvi_i as f64 + 1.0);
             let qscore: i32 = if rmf < dummy_f {
                 rmf.round() as i32
