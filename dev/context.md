@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-30T04:00:18Z
+Generated: 2026-08-30T04:00:52Z
 
 ## Latest Session
 File: dev/sessions/2026-08-30-02.md
@@ -59,11 +59,11 @@ fixed. Two were material:
 
 ## Git Status
 ```
+5d567e1 Merge remote-tracking branch 'origin/main' into claude/issue-194-p6gri8
 f112b93 docs: record the #195 review round; halve the interrupt tests' debug cost
+91ace05 docs: session checkpoint 2026-08-30-02 (#191, #193, #195 reviewed and landed)
+d0b3000 Merge pull request #195 from jkitchin/claude/issue-194-p6gri8
 7b42414 fix(solve): an interrupt during the MC64 retry must not be swallowed
-942d130 Merge origin/main into claude/issue-194-p6gri8
-f1dc5ee Merge pull request #191 from jkitchin/fix/componentwise-refine-default
-9710b0d Merge origin/main into fix/componentwise-refine-default
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 464 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.55s
+test result: ok. 464 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.54s
 
 ```
 

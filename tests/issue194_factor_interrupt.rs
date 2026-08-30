@@ -250,8 +250,9 @@ fn mid_factorization_interrupt(parallel: bool) {
     // 5-point Laplacian, n = 90_000. Big enough that the numeric factor is
     // comfortably longer than a thread wake-up even in `--release`, small
     // enough that four factorizations of it stay affordable in the debug
-    // build CI actually runs (`cargo test`, ci.yml:37) — at n = 122_500 this
-    // file cost 46.6 s there, nearly all of it these two tests.
+    // build CI actually runs (`cargo test`, ci.yml:37). These two tests were
+    // calibrated in `--release`, where the file is sub-second; debug is ~30x
+    // slower here and at n = 122_500 the file cost 47.8 s on CI.
     let a = grid_laplacian(300);
     let flag = Arc::new(AtomicBool::new(false));
     let mut s = Solver::new()

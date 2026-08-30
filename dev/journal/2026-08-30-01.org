@@ -194,7 +194,7 @@ warnings` (feral and feral-diagnostics) are the exact CI checks and now
 both pass locally.
 
 * 04:20 :issue-194:ci-cost:
-`tests/issue194_factor_interrupt.rs` cost **46.6 s** in the debug build CI
+`tests/issue194_factor_interrupt.rs` cost **47.8 s** in the debug build CI
 actually runs (`cargo test`, ci.yml:37) — nearly all of it the two
 mid-flight tests at `grid_laplacian(350)`, n = 122500, four factorizations
 each. Debug is ~30x slower than release here, which is easy to miss when
@@ -204,3 +204,22 @@ Dropped to `grid_laplacian(300)`, n = 90000: **21.8 s** debug, 0.85 s
 release, with all eight tests still exercised and none skipped in either
 mode (release warm baselines 142 ms parallel / 233 ms sequential, both
 comfortably above the 100 ms anti-flake guard).
+
+* 04:50 :issue-194:merged:followup:
+PR #195 merged at 7b42414 (main d0b3000, then the author's checkpoint
+91ace05). The commit this session pushed to the branch afterwards is
+therefore *not* in main. A merged PR cannot track new work, so the branch
+carries it forward by merging main in rather than stacking further on the
+merged history: `git diff origin/main` on the branch is now exactly the
+follow-up — the fixture trim plus this session's own records — with no
+merged commit re-proposed.
+
+Re-measured the trim's justification on current main rather than reusing
+the pre-merge number: `tests/issue194_factor_interrupt.rs` costs
+**47.76 s** in the debug build CI runs, against **21.74 s** after the trim
+(0.83 s release, no test skipped in either mode).
+
+The author's checkpoint dev/sessions/2026-08-30-02.md independently
+records the false-green detector trap under "Abandoned Approaches". Both
+records are kept: they are separate sessions, and CLAUDE.md makes the
+journal per-session and append-only.
