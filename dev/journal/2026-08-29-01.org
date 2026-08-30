@@ -180,3 +180,72 @@ Validation on 1.98.0, matching CI:
 
 The 1196 includes the ordering-core suite, which is what would catch the
 AMF refactor if it had changed the ordering.
+
+* 02:20 :review:issue-192:pr-193:
+Review from jkitchin on PR #193. Three findings, all verified against
+the code before acting -- none taken on faith.
+
+** Finding 1 (high): the clippy allow blocks commits on toolchains < 1.98
+Confirmed by installing 1.96.0 and reproducing the reporter's exact
+command:
+
+: $ cargo +1.96.0 clippy --lib -- -D warnings
+: error: unknown lint: `clippy::chunks_exact_to_as_chunks`
+:   --> src/dense/schur_kernel.rs:41:10
+
+This is a regression I introduced in 9c5dfac and it is worse than it
+looks: =unknown_lints= is warn-by-default, =-D warnings= promotes it to
+an error, and =cargo clippy -- -D warnings= is exactly what the
+mandatory pre-commit hook runs. So it blocks *every* local commit, on
+every file, for anyone not yet on 1.98 -- and CI tracks =stable=, so CI
+would never have caught it. My own "clippy clean" claim in the PR body
+was true only on the toolchain I happened to have just updated to.
+
+Fixed with =#![allow(unknown_lints)]= above the existing allow. Verified
+clean on both:
+
+: cargo +1.96.0 clippy --all-targets -- -D warnings -> clean
+: cargo clippy --workspace --all-targets -- -D warnings -> clean
+
+** Finding 2 (medium): with_scaling after escalating is silently undone
+Real. =with_scaling= is the documented issue-#51 escape hatch and is the
+only external writer of =numeric_params.scaling=; it did not touch
+=quality_baseline=, so a strategy pinned mid-escalation was reverted to
+the stale snapshot by the next =reset_quality=. Same failure mode the
+lazy snapshot was chosen to avoid, relocated to the post-escalation
+window (R6 only covered the pre- window).
+
+Fix: =with_scaling= refreshes =quality_baseline.scaling= when a
+snapshot is live -- the call re-states what the caller's baseline *is*.
+Chose refresh over clearing the whole snapshot: clearing would also drop
+the pivot-threshold half, so a later reset would leave the pivot
+escalated and report nothing undone.
+
+** Finding 3 (low): reset_quality() == true with nothing moved
+Real. From non-Identity scaling with =pivot_threshold == pivtol_max=,
+stage 1 no-ops and stage 2 computes 0.5^0.75 = 0.5946, clamps back to
+0.5, and lands on =Exhausted= -- =increase_quality= returns true having
+changed no parameter, so the paired reset reported a phantom undo.
+
+Fix: =reset_quality= compares the snapshot against current values and
+returns whether anything actually differs. Level is still re-baselined
+either way.
+
+** The two fixes interact, and the first version of R7 was wrong
+R7 as first written asserted =reset_quality() == true= after pinning a
+strategy post-escalation. With finding 3 fixed that is *false* and
+correctly so: =with_scaling= had already superseded the only rung that
+fired (stage 1), so nothing was left to restore. The test was wrong, not
+the code. Split it:
+- R7 escalates twice (scaling *and* pivot) so the return value stays
+  meaningful, and pins that the *pinned* strategy survives the reset.
+- R7b pins the composed behaviour directly: pin supersedes the only
+  rung -> reset returns false, strategy stays pinned, level re-baselined.
+
+Both findings reproduced RED first:
+
+: r7 ... FAILED (assertion failed: s.reset_quality())
+: r8 ... FAILED (no parameter moved, so nothing was undone)
+
+Final: 9 reset tests pass, =cargo test --workspace= 1199 passed /
+0 failed, fmt clean, clippy clean on 1.96 and 1.98, pytest 16 passed.

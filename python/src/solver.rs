@@ -346,9 +346,12 @@ impl Solver {
 
     /// Revert every escalation applied by `increase_quality`, putting
     /// the solver back at `QualityLevel.BASELINE` with the scaling
-    /// strategy and pivot threshold it was configured with. Returns
-    /// `True` if an escalation was undone, `False` if the solver was
-    /// already at baseline.
+    /// strategy and pivot threshold it was configured with.
+    ///
+    /// Returns `True` only if a parameter was actually restored to a
+    /// different value; `False` both when the solver was already at
+    /// baseline and when the escalation itself moved nothing. Either
+    /// way the level is re-baselined and the ladder is armed again.
     ///
     /// Lets a caller bound the escalation's lifetime -- re-baselining
     /// at a major iteration, or on entering a restoration

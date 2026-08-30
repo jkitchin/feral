@@ -38,6 +38,14 @@
 // that has to be benchmarked against the corpus, not waved through to
 // satisfy a style lint. Allowed at file scope pending that measurement;
 // see the follow-up noted in `dev/tried-and-rejected.md`.
+//
+// `unknown_lints` first: `chunks_exact_to_as_chunks` does not exist
+// before stable 1.98, and `unknown_lints` is warn-by-default, so under
+// the mandatory pre-commit hook's `-D warnings` the allow below would
+// itself be a hard error on any older toolchain -- blocking every local
+// commit, on every file, for anyone not yet on 1.98. CI tracks `stable`
+// and would never catch it.
+#![allow(unknown_lints)]
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 /// `dst[i] -= alpha * src[i]` for `i in 0..dst.len()`.

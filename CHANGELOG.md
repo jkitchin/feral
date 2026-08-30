@@ -10,9 +10,16 @@ All notable changes to FERAL will be documented in this file.
   binding `Solver.reset_quality()`). It reverts every escalation
   `increase_quality` applied — the `Identity → InfNorm` scaling flip and the
   raised `bk.pivot_threshold` — restoring the parameters the caller had
-  configured and returning `quality_level()` to `Baseline`. Returns `true` if
-  an escalation was undone, `false` if the solver was already at baseline.
-  Valid from any level, `Exhausted` included.
+  configured and returning `quality_level()` to `Baseline`. Valid from any
+  level, `Exhausted` included. Returns `true` only if a parameter was actually
+  restored to a different value — `false` both when the solver was already at
+  baseline and when the escalation itself moved nothing (a rung can fire, and
+  report `true`, without changing a parameter: from non-`Identity` scaling with
+  `pivot_threshold` already at `pivtol_max`, `0.5^0.75` clamps back to `0.5`).
+  Either way the level is re-baselined and the ladder is armed again.
+  `with_scaling` applied while an escalation is live re-states the caller's
+  baseline, so a later reset restores the strategy pinned last rather than
+  silently undoing it (the issue-#51 escape hatch keeps working mid-solve).
 - **Why.** `increase_quality` was a one-way ratchet with no way back, so an
   escalation chosen for *one* hard factorization governed **every** later
   factorization for the life of the `Solver`. Ipopt exposes no reset because

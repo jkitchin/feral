@@ -796,6 +796,16 @@ impl Solver {
     /// `factor()` calls) which already prevents the flap; this builder
     /// is for hosts that want full control of the choice.
     pub fn with_scaling(mut self, scaling: ScalingStrategy) -> Self {
+        // If an escalation is live, this call re-states what the
+        // caller's baseline *is* — so the snapshot `reset_quality`
+        // will restore has to move with it. Without this, pinning a
+        // strategy mid-escalation would be silently undone by the
+        // next reset, which is the issue-#51 escape hatch failing in
+        // exactly the situation it exists for (review finding 2 on
+        // PR #193, test R7).
+        if let Some(baseline) = self.quality_baseline.as_mut() {
+            baseline.scaling = scaling.clone();
+        }
         self.numeric_params.scaling = scaling;
         self
     }
@@ -1967,9 +1977,19 @@ impl Solver {
     }
 
     /// Revert every escalation applied by [`Solver::increase_quality`]
-    /// and return to `QualityLevel::Baseline`. Returns `true` if an
-    /// escalation was undone, `false` if the solver was already at
-    /// `Baseline` (a no-op).
+    /// and return to `QualityLevel::Baseline`.
+    ///
+    /// Returns `true` only if a parameter was actually restored to a
+    /// different value. It returns `false` both when the solver was
+    /// already at `Baseline` and when the escalation itself moved
+    /// nothing — a rung can fire, and report `true`, without changing
+    /// a parameter: from non-`Identity` scaling with
+    /// `pivot_threshold` already at `pivtol_max`, stage 1 is a no-op
+    /// and stage 2 computes `0.5^0.75 = 0.594`, clamps back to `0.5`,
+    /// and lands on `Exhausted`. A caller keying retry telemetry on
+    /// this return value should not see a phantom undo (review
+    /// finding 3 on PR #193, test R8). In every case the level is
+    /// left at `Baseline` and the ladder is armed again.
     ///
     /// Restores the scaling strategy and `bk.pivot_threshold` the
     /// caller had configured when the ladder started, so
@@ -1998,10 +2018,12 @@ impl Solver {
     pub fn reset_quality(&mut self) -> bool {
         match self.quality_baseline.take() {
             Some(baseline) => {
+                let moved = self.numeric_params.scaling != baseline.scaling
+                    || self.numeric_params.bk.pivot_threshold != baseline.pivot_threshold;
                 self.numeric_params.scaling = baseline.scaling;
                 self.numeric_params.bk.pivot_threshold = baseline.pivot_threshold;
                 self.quality_level = QualityLevel::Baseline;
-                true
+                moved
             }
             None => false,
         }
@@ -3105,6 +3127,95 @@ mod tests {
             "must restore the builder-configured strategy, not the \
              one `with_params` was constructed with"
         );
+    }
+
+    /// R7 — reconfiguring scaling *after* escalating must not be
+    /// silently undone by a later reset (review finding 2 on PR #193).
+    ///
+    /// `with_scaling` is the documented issue-#51 escape hatch for a
+    /// host that sees the picker flapping. A caller that pins a
+    /// strategy mid-solve and later re-baselines must get the strategy
+    /// it pinned, not the one the snapshot happened to capture. R6
+    /// covers the pre-escalation window; this covers the post one.
+    #[test]
+    fn r7_reset_quality_honors_scaling_pinned_after_escalating() {
+        let mut s = solver_with_scaling(ScalingStrategy::Identity);
+        // Stage 1 (scaling), then stage 2 (pivot) — so the reset has
+        // something to restore independently of the pinned strategy.
+        assert!(s.increase_quality());
+        assert!(s.increase_quality());
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
+        assert_eq!(s.pivot_threshold(), 0.01, "stage 2 first-jump rule");
+
+        // Host pins a strategy while the escalation is live.
+        s = s.with_scaling(ScalingStrategy::Mc64Symmetric);
+
+        assert!(s.reset_quality(), "the pivot bump is still undone");
+        assert!(
+            matches!(s.scaling_strategy(), ScalingStrategy::Mc64Symmetric),
+            "reset must restore the strategy the caller pinned last, \
+             not the stale pre-escalation snapshot; got {:?}",
+            s.scaling_strategy()
+        );
+        assert_eq!(s.pivot_threshold(), 0.0, "pivot still re-baselined");
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+    }
+
+    /// R7b — the finding-2 and finding-3 fixes compose: when the only
+    /// escalated parameter is the one the caller then overwrote, the
+    /// reset genuinely has nothing left to undo and says so.
+    #[test]
+    fn r7b_reset_quality_false_when_pin_already_superseded_the_rung() {
+        let mut s = solver_with_scaling(ScalingStrategy::Identity);
+        assert!(s.increase_quality()); // stage 1 only: scaling flip
+        assert_eq!(s.quality_level(), QualityLevel::ScalingEnabled);
+        assert_eq!(s.pivot_threshold(), 0.0, "pivot untouched by stage 1");
+
+        s = s.with_scaling(ScalingStrategy::Mc64Symmetric);
+
+        assert!(
+            !s.reset_quality(),
+            "the pin already superseded the only rung that fired"
+        );
+        assert!(matches!(
+            s.scaling_strategy(),
+            ScalingStrategy::Mc64Symmetric
+        ));
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+    }
+
+    /// R8 — an escalation that moved nothing is not reported as undone
+    /// (review finding 3 on PR #193).
+    ///
+    /// With non-`Identity` scaling and `pivot_threshold` already at
+    /// `pivtol_max`, stage 1 is a no-op and stage 2 computes
+    /// `0.5^0.75 = 0.594`, clamps back to `0.5`, and jumps to
+    /// `Exhausted` — so `increase_quality` returns `true` having
+    /// changed no parameter. A caller keying telemetry on
+    /// `reset_quality()` must not see a phantom undo.
+    #[test]
+    fn r8_reset_quality_reports_false_when_escalation_moved_nothing() {
+        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
+        s.numeric_params.bk.pivot_threshold = 0.5; // == pivtol_max
+
+        assert!(s.increase_quality(), "the rung still fires");
+        assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+        assert_eq!(
+            s.pivot_threshold(),
+            0.5,
+            "0.5^0.75 clamps back to pivtol_max: nothing moved"
+        );
+
+        assert!(
+            !s.reset_quality(),
+            "no parameter moved, so nothing was undone"
+        );
+        // The level is still re-baselined either way.
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+        assert_eq!(s.pivot_threshold(), 0.5);
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
+        // And the ladder is armed again.
+        assert!(s.increase_quality());
     }
 
     /// F1 — same pattern fingerprints equal, structural hash stable
