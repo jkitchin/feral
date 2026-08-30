@@ -1992,10 +1992,44 @@ impl Solver {
     /// left at `Baseline` and the ladder is armed again.
     ///
     /// Restores the scaling strategy and `bk.pivot_threshold` the
-    /// caller had configured when the ladder started, so
-    /// `reset_quality` followed by `increase_quality` retraces the
-    /// same rungs a freshly constructed `Solver` would. Valid from
-    /// any level, `Exhausted` included.
+    /// caller had configured when the ladder started. Valid from any
+    /// level, `Exhausted` included. A `with_scaling` call made while
+    /// an escalation is live re-states that baseline, so a later reset
+    /// restores the strategy pinned last rather than undoing it
+    /// (test R7).
+    ///
+    /// # Guarantees
+    ///
+    /// These are contract, not incidental properties of the current
+    /// implementation. Each is pinned by a named test; a refactor that
+    /// breaks one is a breaking change, not a detail.
+    ///
+    /// 1. **A caller that never calls `reset_quality` sees
+    ///    byte-identical behaviour to before this method existed.**
+    ///    The escalation ladder is untouched — its rungs, the `0.75`
+    ///    exponent, `pivtol_max` — and the snapshot is inert state.
+    ///    Pinned by U1–U5, which predate this method and still pass
+    ///    unchanged. Downstream release processes diff a fixture sweep
+    ///    against a baseline binary and treat any moved line as a
+    ///    trajectory change needing explanation, so this property must
+    ///    not be allowed to drift silently.
+    ///
+    /// 2. **`reset_quality` then `increase_quality` retraces exactly
+    ///    the rungs a freshly constructed `Solver` would.** The round
+    ///    trip is idempotent: the snapshot records a state the solver
+    ///    demonstrably occupied, and is cleared on restore, so the
+    ///    next escalation re-captures and walks the identical ladder.
+    ///    Pinned by R4 (records the traversal before any reset exists
+    ///    and asserts the second traversal equals it) and R6.
+    ///
+    /// 3. **Re-baselining costs no symbolic re-analysis.** The cached
+    ///    `SymbolicFactorization` survives — it is scaling-invariant
+    ///    since scaling moved to the numeric phase — exactly as it
+    ///    survives an escalation. This is a cost guarantee: a caller
+    ///    may reset once per IPM iteration (e.g. on every KKT-matrix
+    ///    change), so a reset that forced re-analysis would become a
+    ///    silent per-iteration cost. Pinned by integration test I9 via
+    ///    `symbolic_call_count`.
     ///
     /// Issue #192. Ipopt has no counterpart, because MA57 answers
     /// `IncreaseQuality` by raising `pivtol` toward `pivtolmax` —
@@ -2010,11 +2044,11 @@ impl Solver {
     /// iteration, or on entering a restoration sub-problem — without
     /// FERAL having to know anything about the caller's algorithm.
     ///
-    /// Touches nothing but the escalated parameters and the level.
-    /// In particular the cached symbolic factorization survives (it is
-    /// scaling-invariant since scaling moved to the numeric phase), so
-    /// re-baselining costs no re-analysis, exactly as escalating costs
-    /// none.
+    /// Touches nothing but the escalated parameters and the level —
+    /// not `last_factors`, not `mc64_scaling_cache`, and none of the
+    /// independent latches (`ordering_escalated`, `auto_arm_latched`,
+    /// `mc64_retry_not_adopted`), mirroring what `increase_quality`
+    /// leaves alone.
     pub fn reset_quality(&mut self) -> bool {
         match self.quality_baseline.take() {
             Some(baseline) => {

@@ -36,14 +36,26 @@ All notable changes to FERAL will be documented in this file.
   with the escalation and at `obj = 3.42` against `f* = 0` without it, and the
   rung buys 15–25% of the iterations on five other models. The distinguishing
   variable is how long the escalation lasts, not whether it fires.
-- **Nothing else changes.** The escalation ladder — its rungs, the `0.75`
-  exponent, `pivtol_max` — is untouched, and a solver that never calls
-  `reset_quality` behaves exactly as before. The reset touches only the two
-  escalated parameters and the level: the cached symbolic factorization
-  survives (it is scaling-invariant since scaling moved to the numeric phase),
-  so re-baselining costs no re-analysis, exactly as escalating costs none.
-  `reset_quality` followed by `increase_quality` retraces the same rungs a
-  freshly constructed `Solver` would.
+- **Guaranteed, not incidental.** Three properties are contract, each pinned
+  by a named test; a change that breaks one is a breaking change, not a detail.
+  1. *A caller that never calls `reset_quality` sees byte-identical behaviour
+     to 0.17.0.* The escalation ladder is untouched — its rungs, the `0.75`
+     exponent, `pivtol_max` — and the snapshot is inert state. Pinned by U1–U5,
+     which predate the method and pass unchanged. Downstream release processes
+     that diff a fixture sweep against a baseline binary depend on this not
+     drifting silently.
+  2. *`reset_quality` then `increase_quality` retraces exactly the rungs a
+     freshly constructed `Solver` would.* Pinned by R4 (records the traversal
+     before any reset exists, asserts the second equals it) and R6.
+  3. *Re-baselining costs no symbolic re-analysis.* The cached
+     `SymbolicFactorization` survives, exactly as it survives an escalation.
+     A cost guarantee: a caller may reset once per IPM iteration, so a reset
+     that forced re-analysis would be a silent per-iteration cost. Pinned by
+     integration test I9 via `symbolic_call_count`.
+- **Nothing else changes.** The reset touches only the two escalated
+  parameters and the level — not `last_factors`, not `mc64_scaling_cache`, and
+  none of the independent latches — mirroring what `increase_quality` leaves
+  alone.
 
 ## [0.17.0] - 2026-08-19
 

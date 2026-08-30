@@ -249,3 +249,42 @@ Both findings reproduced RED first:
 
 Final: 9 reset tests pass, =cargo test --workspace= 1199 passed /
 0 failed, fmt clean, clippy clean on 1.96 and 1.98, pytest 16 passed.
+
+* 02:40 :review:contract:pr-193:
+Found a second review comment from jkitchin (00:27Z, downstream/pounce
+confirmation) that never arrived as a notification -- only the 02:09
+review did. Worth noting as a gap: polling the comment list caught what
+the event stream did not. Do not treat the wake events as complete.
+
+Content: pounce confirms =reset_quality()= + the already-public
+=quality_level()= is expressively complete and they explicitly do *not*
+want the guard form -- they would rather own their own retry loop. That
+retires the deferred-guard question from my side.
+
+Also a useful correction to my own reading of #192's evidence: the
+process-global firing cap did *not* measure what a matrix-boundary reset
+does. Capping at one firing still left that escalation in force for the
+whole remaining solve, which is why "allowing only the first firing
+still loses the leg". So #192's measurements do not predict the outcome
+of the reset in either direction. They will re-run the corpus rather
+than assume; I should not claim the reset fixes
+=square_flowsheet_resto=, only that it makes the lifetime expressible.
+
+Three contract asks, documentation-only, all implemented:
+1. "never calling reset_quality => byte-identical behaviour" (U1-U5)
+2. "reset -> increase retraces a fresh Solver's rungs" (R4, R6)
+3. "re-baselining costs no symbolic re-analysis" (I9)
+
+All three were already true and pinned, but asserted only in the PR body
+-- i.e. implementation detail, not contract. Promoted into a
+=# Guarantees= section on the =reset_quality= doc comment and into the
+CHANGELOG, each naming the test that pins it. Their reason is concrete:
+their release process diffs a 158-leg fixture sweep against a *baseline
+binary*, not a spec, so an unstated property that later drifts shows up
+as unexplained corpus drift months later. Ask 3 is a cost guarantee, not
+a correctness one -- they would call reset once per IPM iteration.
+
+Validation: fmt clean, clippy clean on 1.96 and 1.98, workspace 1199
+passed / 0 failed. Checked the new rustdoc adds no warnings: =cargo doc
+--no-deps -p feral= reports 40 warnings on origin/main and 40 on this
+branch, all pre-existing.
