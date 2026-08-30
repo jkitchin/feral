@@ -7096,3 +7096,62 @@ uncovered while being covered locally. The coverage job prints the skip
 list to the run summary — the same step ci.yml has — so a low number in
 those modules can be checked against it before being treated as a real
 gap.
+
+## 2026-08-30 — cancellation is a caller-owned flag polled at two granularities, not a deadline (#194)
+
+`Solver::factor` gains cooperative cancellation. Four choices are worth
+recording, because each had a plausible alternative.
+
+**A flag, not a deadline.** feral takes an `Arc<AtomicBool>` the caller
+owns and feral only ever reads. It does not take an `Instant`, a
+`Duration`, or a callback. Holding a clock would force feral to choose
+between wall time, CPU time and a host's own budget accounting — a policy
+question that belongs to the host, which is also the only party that
+knows what its remaining budget is. Polling `Ordering::Relaxed` is
+sufficient: the flag carries no data dependency, and a missed observation
+costs one more panel before the next poll. feral never writes the flag,
+so re-arming after an interrupt is the caller's `store(false)`.
+
+**Two poll granularities, because one is not enough.** The issue asked
+for supernode boundaries. That alone would not have fixed the case that
+motivated it. Issue #8 measured a delayed-pivot cascade concentrating
+118k delayed pivots into three ~14k-column expanded root fronts, so an
+87 s factorization is dominated by a handful of *individual fronts*; a
+check that fires only between supernodes returns "budget plus one 44 s
+supernode", which is the reported bug again. So the dense frontal factor
+polls at its panel-loop boundaries too (blocked and unblocked paths).
+That loop is still one level out from the hot kernels — every iteration
+guards at least `O(nrow)` of work — so this is not a kernel-level check.
+The *published* contract stays the weaker of the two: supernode
+boundaries, and within a supernode dense panel boundaries, with no
+promise about when within a panel.
+
+**The flag lives on `BunchKaufmanParams`, not `NumericParams`.** It is
+not a Bunch-Kaufman parameter in spirit, and `NumericParams` is where a
+reader would look first. But the multifrontal drivers hold
+`params.bk` and the dense frontal factor is handed *only*
+`&BunchKaufmanParams`, so one field there is readable from every poll
+site with no sync step, while a field on `NumericParams` would need
+copying into `bk` — exactly the shape that left `NumericParams::fma` a
+silent no-op until finding N1 (`dev/research/repo-review-2026-06-09.md`).
+`BunchKaufmanParams` already carries execution knobs of this kind
+(`intrafront_parallel`, `fma`), so this is consistent with what the
+struct had become. Cost of the choice: discoverability, mitigated by
+`Solver::with_interrupt` / `set_interrupt` / `interrupt` being the
+documented entry points.
+
+**`Interrupted` is a `FeralError` variant, so both drivers cancel for
+free.** The sequential driver already propagates errors out of its
+supernode loop with `?`; the parallel driver already funnels them into
+`first_error`, whose fast-exit at the top of `run_parallel_task` drains
+the scope without starting further work. Raising the interrupt as an
+ordinary error reuses both, so cancellation added no new control flow to
+either driver — including the several-tasks-in-flight case. The
+alternative, a distinct early-return channel, would have duplicated the
+parallel driver's unwind for no benefit.
+
+**Consequence for the API.** `FactorStatus` and `FeralError` each gain a
+variant, so every exhaustive `match` over them in the tree, in
+`feral-diagnostics` and in the Python bindings needed a new arm. All were
+given explicit arms rather than wildcards, deliberately: the next variant
+should break the same builds rather than be silently absorbed.

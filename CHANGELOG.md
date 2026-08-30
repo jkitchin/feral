@@ -2,6 +2,56 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Added — `Solver::factor` can now be cancelled (issue #194)
+
+- **What changed.** A caller-owned `Arc<AtomicBool>` can be armed on a
+  `Solver` with `with_interrupt(flag)` (builder) or `set_interrupt(Some(flag))`
+  (through a `&mut` borrow; `None` disarms), and read back with `interrupt()`.
+  While armed, `factor` polls the flag and, on the first observation of `true`,
+  stops and returns the new `FactorStatus::Interrupted`. The underlying
+  free-function drivers surface it as the new `FeralError::Interrupted`, and
+  the flag itself is `BunchKaufmanParams::interrupt`, so direct users of
+  `factorize_multifrontal*` and of the dense frontal factor get the same
+  mechanism.
+- **Why.** `factor` could not be cancelled once running and offered no surface
+  through which to ask, so a host enforcing a wall-clock budget could not
+  enforce it whenever a single factorization was larger than the whole budget —
+  it never regained control to check its own deadline. Measured in pounce on
+  `emfl050_5_5` (5675 variables, 5625 constraints): a `max_wall_time=5` solve
+  returned `TIME_LIMIT` after **48.8 s**, because the between-operation check
+  passed while under budget and one factorization then ran ~44 s uninterrupted.
+  A watchdog on the caller's side cannot fix this: `Solver` holds workspace,
+  symbolic and permute caches across calls, so abandoning a factorization
+  mid-flight either orphans mutable state or forces a fresh `Solver` per call
+  and destroys the symbolic reuse an interior-point host depends on.
+- **Contract.** On `Interrupted` the factors are left invalid exactly as after
+  any failed factor — `inertia()` is `None`, `solve()` returns `NoFactor` — and
+  a subsequent `factor` re-runs cleanly once the caller clears the flag. No
+  partial results are promised. Polling happens at supernode boundaries and, in
+  a supernode, at dense panel boundaries; there is no guarantee about *when*
+  within a panel the check fires. Only the numeric factorization is covered:
+  the symbolic analysis on the first factor of a new pattern is not
+  interruptible.
+- **Caller-owned, and no clock.** feral only ever *reads* the flag, so
+  re-arming after an interrupt is the caller's `store(false)`. Taking a flag
+  rather than a deadline keeps feral clock-agnostic and leaves
+  wall-vs-CPU-vs-budget policy where it belongs.
+- **Measured.** In `--release` on a warm solver (symbolic cached, the
+  interior-point case), 5-point Laplacian `n = 122500`: sequential driver,
+  263.2 ms un-interrupted, flag set at 26.3 ms, `Interrupted` returned at
+  34.8 ms; parallel driver, 153.5 ms un-interrupted, flag set at 15.3 ms,
+  returned at 25.5 ms. A paired A/B against the previous release found no
+  measurable cost when unarmed — every poll site short-circuits on an
+  `Option::is_some` branch and touches no atomic.
+- **Additive.** An unarmed `Solver` is unaffected in behaviour and in
+  performance. `FactorStatus` and `FeralError` each gain one variant, so
+  exhaustive `match`es over them need a new arm. The C ABI defines
+  `FERAL_INTERRUPTED = 4` and the Python bindings define
+  `FactorStatus.INTERRUPTED`; neither surface can arm the flag yet, so on both
+  the code is reserved rather than reachable.
+
 ## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)

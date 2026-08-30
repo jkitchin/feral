@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-30T00:31:02Z
+Generated: 2026-08-30T00:59:34Z
 
 ## Latest Session
-File: dev/sessions/2026-08-19-05.md
+File: dev/sessions/2026-08-30-01.md
 ```
-# Session 2026-08-19-05
+# Session 2026-08-30-01
 
 ## Goal
 
-Close out issue #153 item 2, review the six PRs merged since v0.16.0 for
-mistakes before shipping, and cut release 0.17.0 (which unblocks
-pounce#710's second blocker).
+Fix issue #194: `Solver::factor` cannot be cancelled once running, and
+offers no surface through which a caller could ask, which makes a host's
+wall-clock budget unenforceable whenever a single factorization is larger
+than the whole budget.
 
 ## Benchmark Results
 
-No regression. Both exit partitions PASS, and the small-frontal p90
-improved slightly against the run earlier in this session (1.60/1.61 ->
-1.58); the change is within run-to-run noise on this container and is not
-claimed as an improvement.
+**No comparison against the previous session's numbers is possible in
+this container, and that is a gap in this checkpoint rather than a pass.**
+The corpus (154k matrices with oracle timings) is not present here, so
+`cargo run --bin bench --release` ran only the 8 synthetic matrices and
+both exit-partition tables read `N/A`:
 
 ```
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
+
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.58     <= 2.0     PASS
-medium (<500)            153560     1.58     <= 3.0     PASS
-
-=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
-ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.45       0.32       1.58       3.45      10.58
-solve/MUMPS        153560       0.08       0.08       0.15       0.79       2.71
-factor/SSIDS       154500       0.04       0.03       0.33       1.02       2.30
-solve/SSIDS        154500       0.95       1.00       2.50       9.00      35.25
-nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
-nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 ```
 
-## Accomplished
+Session 2026-08-19-05's p90s (dense 1.58 / 2.00, sparse 1.58 / 1.58)
+therefore stand unchallenged and unconfirmed. A session with the corpus
+mounted should re-run before this is treated as regression-free on the
+corpus.
 
-### Issue #153 item 2 — both hypotheses falsified (PR #184, merged)
-
-Rescoped #153 to item 2 and measured rather than assumed. Both standing
-hypotheses for the dtoc1nd dense-front gap — a packed-SIMD work gate, and
-`block_size` — were falsified by measurement. Research note written; two
-diagnostic probes landed.
-
-### Pre-release review of six PRs (PR #185, merged)
-
-Reviewed #174, #179, #180, #181, #182, #183 with agents, then verified
-every reported finding by hand against git before acting on it. One
-behavioural regression, one guard-test gap, and a set of unsupported
+In place of that, the poll overhead was measured directly: a paired A/B
+probe (same source, built against this branch and against a worktree at
+`origin/main`, best-of-10 warm refactors), alternated to control for
+container drift.
 ```
 
 ## Git Status
 ```
+4c7691a feat: cooperative cancellation for Solver::factor (#194)
+9edce95 docs: research note for issue #194 cooperative factor cancellation
 9b9e882 Merge pull request #188 from jkitchin/ci/codecov-coverage
 1292984 ci: measure coverage with cargo-llvm-cov and report it to Codecov
 ad0d96d Merge pull request #187 from jkitchin/docs/session-2026-08-19-05
-b224ed1 docs: session checkpoint 2026-08-19-05 (pre-release review, 0.17.0 tagged)
-2fbf9b7 Merge pull request #186 from jkitchin/release/0.17.0
 ```
 
 ## Test Status
@@ -86,72 +86,99 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 442 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.84s
+test result: ok. 442 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.79s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-19-05.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-30-01.md)
 
 
-No regression. Both exit partitions PASS, and the small-frontal p90
-improved slightly against the run earlier in this session (1.60/1.61 ->
-1.58); the change is within run-to-run noise on this container and is not
-claimed as an improvement.
+**No comparison against the previous session's numbers is possible in
+this container, and that is a gap in this checkpoint rather than a pass.**
+The corpus (154k matrices with oracle timings) is not present here, so
+`cargo run --bin bench --release` ran only the 8 synthetic matrices and
+both exit-partition tables read `N/A`:
+
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.58     <= 2.0     PASS
-medium (<500)            153560     1.58     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
-=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
-ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.45       0.32       1.58       3.45      10.58
-solve/MUMPS        153560       0.08       0.08       0.15       0.79       2.71
-factor/SSIDS       154500       0.04       0.03       0.33       1.02       2.30
-solve/SSIDS        154500       0.95       1.00       2.50       9.00      35.25
-nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
-nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
+Session 2026-08-19-05's p90s (dense 1.58 / 2.00, sparse 1.58 / 1.58)
+therefore stand unchallenged and unconfirmed. A session with the corpus
+mounted should re-run before this is treated as regression-free on the
+corpus.
+
+In place of that, the poll overhead was measured directly: a paired A/B
+probe (same source, built against this branch and against a worktree at
+`origin/main`, best-of-10 warm refactors), alternated to control for
+container drift.
+
+                     branch (this PR)      main (9b9e882)
+grid_laplacian_350   203.8 / 197.8 ms      222.8 / 203.5 ms   sequential
+grid_laplacian_350    94.2 /  92.3 ms       94.4 /  92.2 ms   parallel
+tridiag_200k          57.7 /  57.3 ms       59.4 /  59.2 ms   sequential
+tridiag_200k          56.3 /  56.9 ms       56.8 /  54.6 ms   parallel
+
+No measurable overhead; every difference is inside this host's noise
+floor. That floor is wide — see the artifact recorded under *Abandoned*
+below — so the honest claim is "no regression detectable here", not "zero
+cost proven". A regression would in any case be surprising: every poll
+site short-circuits on an `Option::is_some` branch and touches no atomic
+when unarmed.
 
 ```
 
 ## Recent Decisions
-guard. Under `cargo llvm-cov` the build is unoptimized *and* carries
-per-region counters, and the factor misses the budget:
 
-    test dirichlet120_parallel_factor_does_not_deadlock ... FAILED
-    panicked at tests/issue102_intrafront_deadlock.rs:72:13:
-    issue #102 regression: ... did not finish in 120 s
-    test result: FAILED. 0 passed; 1 failed; finished in 123.25s
-    real 3m4.912s   user 11m14.718s
+**The flag lives on `BunchKaufmanParams`, not `NumericParams`.** It is
+not a Bunch-Kaufman parameter in spirit, and `NumericParams` is where a
+reader would look first. But the multifrontal drivers hold
+`params.bk` and the dense frontal factor is handed *only*
+`&BunchKaufmanParams`, so one field there is readable from every poll
+site with no sync step, while a field on `NumericParams` would need
+copying into `bk` — exactly the shape that left `NumericParams::fma` a
+silent no-op until finding N1 (`dev/research/repo-review-2026-06-09.md`).
+`BunchKaufmanParams` already carries execution knobs of this kind
+(`intrafront_parallel`, `fma`), so this is consistent with what the
+struct had become. Cost of the choice: discoverability, mitigated by
+`Solver::with_interrupt` / `set_interrupt` / `interrupt` being the
+documented entry points.
 
-The same test passes under `cargo test` and under `cargo test --release`
-in the same tree. So this is instrumentation overhead, and had the
-workflow shipped without the skip the coverage job would have been red
-from its first run in a way that reads like issue #102 came back.
+**`Interrupted` is a `FeralError` variant, so both drivers cancel for
+free.** The sequential driver already propagates errors out of its
+supernode loop with `?`; the parallel driver already funnels them into
+`first_error`, whose fast-exit at the top of `run_parallel_task` drains
+the scope without starting further work. Raising the interrupt as an
+ordinary error reuses both, so cancellation added no new control flow to
+either driver — including the several-tasks-in-flight case. The
+alternative, a distinct early-return channel, would have duplicated the
+parallel driver's unwind for no benefit.
 
-The alternative — raising the 120 s budget so it survives instrumentation
-— is loosening a tolerance, which needs human approval, and it would
-weaken the guard everywhere to accommodate one job. Skipping in the
-coverage job only leaves the assertion at 120 s in ci.yml's `check` job,
-which runs on every push and PR. The guard keeps its teeth; coverage
-just does not measure that path. An audit found no other test that needs
-the same treatment: `large_matrix_smoke` and `rook_rescue_kkt` time
-themselves but assert nothing about the elapsed time, so
-`issue102_intrafront_deadlock` is the tree's only wall-clock assertion.
-
-**How to read the number.** Fixture-gated tests SKIP-and-pass when their
-gitignored fixtures are absent, so on CI every path they guard reads as
-uncovered while being covered locally. The coverage job prints the skip
-list to the run summary — the same step ci.yml has — so a low number in
-those modules can be checked against it before being treated as a real
-gap.
+**Consequence for the API.** `FactorStatus` and `FeralError` each gain a
+variant, so every exhaustive `match` over them in the tree, in
+`feral-diagnostics` and in the Python bindings needed a new arm. All were
+given explicit arms rather than wildcards, deliberately: the next variant
+should break the same builds rather than be silently absorbed.
 
 ## Recent Tried-and-Rejected
 total factor time** on a matrix whose paying bucket is 91% of that time. Moving
@@ -272,6 +299,7 @@ tests/issue128_supernode_nrow.rs
 tests/issue177_parallel_entry_point_core.rs
 tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
+tests/issue194_factor_interrupt.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
@@ -320,16 +348,5 @@ tests/profiler_smoke.rs
 tests/property_tests.rs
 tests/refined_solve_core_stability.rs
 tests/rook_rescue.rs
-tests/rook_rescue_kkt.rs
-tests/small_leaf_parity.rs
-tests/solver_with_ordering.rs
-tests/sparse_postorder.rs
-tests/sparse_refined.rs
-tests/sqd_fast_path.rs
-tests/static_assembly_maps.rs
-tests/stress_tests.rs
-tests/symbolic_profiler.rs
-tests/task_plan_parity.rs
-tests/threshold_consistency.rs
-tests/tiny_fast_path.rs
-```
+
+(truncated from 363 lines to 350 line budget)
