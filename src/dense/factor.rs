@@ -691,6 +691,58 @@ pub struct BunchKaufmanParams {
     /// fronts (the FMA path is one ULP per accumulate off nofma; see
     /// `schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps`).
     pub fma_min_front_rows: Option<usize>,
+
+    /// Cooperative cancellation flag (issue #194). `None` (default) is
+    /// the uninterruptible path: every poll site short-circuits on an
+    /// `Option::is_some` branch and no atomic is ever touched.
+    ///
+    /// When `Some(flag)`, the factorization polls `flag` with
+    /// [`Ordering::Relaxed`](std::sync::atomic::Ordering::Relaxed) and
+    /// aborts with [`FeralError::Interrupted`] the first time it reads
+    /// `true`. Polling happens at supernode boundaries in both
+    /// multifrontal drivers and, within a supernode, at dense panel
+    /// boundaries in the frontal factor — coarse enough to stay off the
+    /// inner kernels (each poll guards at least `O(nrow)` of work),
+    /// frequent enough that the overshoot is one panel rather than one
+    /// front. Supernode boundaries alone would not be enough: a
+    /// delayed-pivot cascade concentrates the cost of a whole
+    /// factorization into a handful of very wide fronts (issue #8
+    /// measured 118k delayed pivots landing in three ~14k-column
+    /// expanded fronts).
+    ///
+    /// Relaxed is the right ordering: the flag carries no data
+    /// dependency — nothing else the setter wrote is read here — and a
+    /// missed observation costs one more panel before the next poll.
+    ///
+    /// The flag is **caller-owned and read-only to feral**: feral never
+    /// sets or clears it, so re-arming after an interrupt is the
+    /// caller's `store(false)`. On interrupt no factors are produced and
+    /// no partial result is promised. Arm it on a `Solver` with
+    /// [`Solver::with_interrupt`](crate::Solver::with_interrupt) or
+    /// [`Solver::set_interrupt`](crate::Solver::set_interrupt).
+    ///
+    /// This lives on `BunchKaufmanParams` rather than on
+    /// [`NumericParams`](crate::NumericParams) so that the one field is
+    /// visible to *both* the multifrontal driver loops (which read
+    /// `params.bk`) and the dense frontal factor (which is handed only
+    /// `&BunchKaufmanParams`), with no cross-struct sync step of the
+    /// kind that made [`fma`](Self::fma) a silent no-op before finding
+    /// N1. Deadline policy — wall vs CPU vs budget — stays with the
+    /// caller; feral holds no clock.
+    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl BunchKaufmanParams {
+    /// Has the caller requested cancellation? `false` — via a
+    /// perfectly-predicted branch, with no atomic access — whenever
+    /// [`interrupt`](Self::interrupt) is unarmed. Issue #194.
+    #[inline]
+    pub fn interrupt_requested(&self) -> bool {
+        match &self.interrupt {
+            Some(flag) => flag.load(std::sync::atomic::Ordering::Relaxed),
+            None => false,
+        }
+    }
 }
 
 /// Minimum trailing-update area `(nrow - j_start) * n_elim` below which
@@ -885,6 +937,8 @@ impl Default for BunchKaufmanParams {
             static_pivot_floor: 0.0,
             intrafront_parallel: false,
             fma_min_front_rows: None,
+            // Issue #194: uninterruptible by default. See the field doc.
+            interrupt: None,
         }
     }
 }
@@ -1818,6 +1872,14 @@ fn factor_frontal_in_place_with_scratch_impl(
     // Factor only the first ncol columns. Pivot search is restricted to
     // [k, ncol_eff); `ncol_eff` shrinks as stuck columns are delayed.
     while k < ncol_eff {
+        // Issue #194: cooperative cancellation poll. One perfectly-
+        // predicted branch when unarmed; one relaxed load when armed.
+        // Guards at least `O(nrow)` of work (`scalar_pivot_step` scans
+        // and updates the trailing columns), so this is well off the
+        // inner kernels.
+        if params.interrupt_requested() {
+            return Err(FeralError::Interrupted);
+        }
         match scalar_pivot_step(
             a,
             nrow,
@@ -2223,6 +2285,18 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     // delays, so `ncol_eff` then stays `== ncol`.
     let mut ncol_eff = ncol;
     while k < ncol_eff {
+        // Issue #194: cooperative cancellation poll, once per panel (or
+        // once per scalar-tail pivot). Each iteration below performs at
+        // least `O(nrow)` work — a panel factor plus its deferred Schur
+        // update is far more — so the poll is one level out from the hot
+        // kernels, which is what makes a ~14k-column cascade front
+        // (issue #8) interruptible at all. `pack_pool` was moved out of
+        // `scratch` above; returning here drops it, and the next call
+        // re-allocates once, exactly as the other early error returns in
+        // this function do.
+        if params.interrupt_requested() {
+            return Err(FeralError::Interrupted);
+        }
         let remaining = ncol_eff - k;
         // Scalar tail engages when too few columns are left to amortize
         // the deferred-Schur dispatch. With W-1 the first panel may

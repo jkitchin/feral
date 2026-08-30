@@ -130,6 +130,10 @@ fn run_case(case: &Case) -> Outcome {
             pass: false,
             detail: format!("FAIL FatalError({e:?})  factor={dt:.3}s"),
         },
+        FactorStatus::Interrupted => Outcome {
+            pass: false,
+            detail: format!("FAIL Interrupted  factor={dt:.3}s"),
+        },
     }
 }
 

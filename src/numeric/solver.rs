@@ -32,6 +32,7 @@ use crate::symbolic::{
     symbolic_factorize_with_method, OrderingMethod, SymbolicFactorization, SymbolicProfileReport,
     SymbolicProfiler,
 };
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// Snapshot of per-`factor()` diagnostic state for issue #52
@@ -97,6 +98,20 @@ pub enum FactorStatus {
     /// Unrecoverable error (dimension mismatch, alloc failure,
     /// symbolic-analysis failure).
     FatalError(FeralError),
+    /// The caller-armed interrupt flag was observed set, and the
+    /// factorization stopped where it stood (issue #194).
+    ///
+    /// Contract: the `Solver`'s factors are left invalid, exactly as
+    /// after any failed factor — `inertia()` is `None` and `solve()`
+    /// returns [`FeralError::NoFactor`]. No partial result is promised,
+    /// and there is no guarantee about *when* within a dense panel the
+    /// check fires. Once the caller clears its flag, a subsequent
+    /// `factor()` re-runs cleanly.
+    ///
+    /// Only reachable when the caller armed a flag via
+    /// [`Solver::with_interrupt`] / [`Solver::set_interrupt`]; an
+    /// unarmed `Solver` never returns this.
+    Interrupted,
 }
 
 /// Quality-escalation state. Mirrors Ipopt's two-stage
@@ -573,6 +588,78 @@ impl Solver {
         self
     }
 
+    /// Arm cooperative cancellation for subsequent [`factor`](Self::factor)
+    /// calls (issue #194).
+    ///
+    /// A host enforcing a wall-clock budget cannot enforce it across a
+    /// single `factor` call: it never regains control to check its own
+    /// deadline. Arming a shared `AtomicBool` gives it a way to ask.
+    /// While armed, `factor` polls the flag at supernode boundaries and,
+    /// within a supernode, at dense panel boundaries; the first
+    /// observation of `true` aborts the factorization and `factor`
+    /// returns [`FactorStatus::Interrupted`].
+    ///
+    /// **Contract.** On `Interrupted` the `Solver`'s factors are left
+    /// invalid, exactly as after any failed factor: [`inertia`](Self::inertia)
+    /// is `None` and [`solve`](Self::solve) returns
+    /// [`FeralError::NoFactor`]. No partial results are promised, and
+    /// there is no guarantee about *when* within a panel the check
+    /// fires. Once the caller clears the flag, a subsequent `factor`
+    /// re-runs cleanly — the reused symbolic cache, permute cache and
+    /// numeric workspace all survive an interrupt.
+    ///
+    /// The flag is caller-owned: feral only ever *reads* it, never sets
+    /// or clears it, so re-arming after an interrupt is the caller's
+    /// `store(false, Relaxed)`.
+    ///
+    /// **Not covered.** Only the numeric factorization is polled. The
+    /// symbolic analysis on the first `factor` of a new pattern (and any
+    /// ordering escalation that re-runs it) is not interruptible; for an
+    /// IPM refactoring a fixed pattern this is a cache hit and costs
+    /// nothing, which is the case the flag exists for.
+    ///
+    /// feral holds no clock. Wall-vs-CPU-vs-budget policy stays with the
+    /// caller — this deliberately takes a flag, not a deadline.
+    ///
+    /// ```
+    /// use std::sync::atomic::{AtomicBool, Ordering};
+    /// use std::sync::Arc;
+    /// use feral::{FactorStatus, Solver};
+    ///
+    /// let cancel = Arc::new(AtomicBool::new(false));
+    /// let mut solver = Solver::new().with_interrupt(Arc::clone(&cancel));
+    /// // ... a watchdog elsewhere: cancel.store(true, Ordering::Relaxed);
+    /// # let a = feral::CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0]).unwrap();
+    /// if let FactorStatus::Interrupted = solver.factor(&a, None) {
+    ///     cancel.store(false, Ordering::Relaxed); // caller re-arms
+    /// }
+    /// ```
+    ///
+    /// See also [`set_interrupt`](Self::set_interrupt), which arms
+    /// through a `&mut` borrow and can disarm.
+    pub fn with_interrupt(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.numeric_params.bk.interrupt = Some(flag);
+        self
+    }
+
+    /// Arm or disarm cooperative cancellation through a `&mut` borrow
+    /// (issue #194). `None` disarms, restoring the zero-overhead
+    /// uninterruptible path.
+    ///
+    /// Same contract as [`with_interrupt`](Self::with_interrupt), which
+    /// this is the non-consuming form of. A backend that owns its
+    /// `Solver` behind `&mut self` cannot call a consuming builder, and
+    /// nothing else can take the flag back off.
+    pub fn set_interrupt(&mut self, flag: Option<Arc<AtomicBool>>) {
+        self.numeric_params.bk.interrupt = flag;
+    }
+
+    /// The interrupt flag this `Solver` is armed with, if any (issue
+    /// #194). `None` on a fresh `Solver`.
+    pub fn interrupt(&self) -> Option<&Arc<AtomicBool>> {
+        self.numeric_params.bk.interrupt.as_ref()
+    }
+
     /// Toggle the FMA opt-in dispatch on dense trailing-update and
     /// panel-update kernels. Default `false` keeps the bit-exact
     /// `*_nofma` path; pass `true` to dispatch through the FMA
@@ -927,6 +1014,17 @@ impl Solver {
     /// without invalidating the stored factor (caller may still
     /// `solve` against it). See plan §`factor()` flow.
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
+        // Issue #194: if the caller has already asked to stop, say so
+        // before doing any work at all — including the O(nnz) finite
+        // scan below and the (uninterruptible) symbolic analysis. A
+        // no-op when unarmed.
+        if self.numeric_params.bk.interrupt_requested() {
+            self.last_factors = None;
+            self.last_inertia = None;
+            self.last_nnz_a = None;
+            self.last_pattern_reused = None;
+            return FactorStatus::Interrupted;
+        }
         // Step 0: reject non-finite input. A single +∞ / -∞ / NaN
         // entry sends the BK pivot-search loop into pathological
         // behavior (every threshold test fails against the inf
@@ -1571,6 +1669,18 @@ impl Solver {
                 self.last_nnz_a = None;
                 self.last_pattern_reused = None;
                 FactorStatus::Singular
+            }
+            // Issue #194: the caller asked to stop. Same invalidation as
+            // any other failed factor — that *is* the published contract
+            // ("factors are left invalid, exactly as after any failed
+            // factor") — but reported distinctly so a host can tell its
+            // own cancellation apart from a real failure.
+            Err(FeralError::Interrupted) => {
+                self.last_factors = None;
+                self.last_inertia = None;
+                self.last_nnz_a = None;
+                self.last_pattern_reused = None;
+                FactorStatus::Interrupted
             }
             Err(e) => {
                 self.last_factors = None;

@@ -79,6 +79,10 @@ class FactorStatus(IntEnum):
     SINGULAR = _feral._STATUS_CODES["SINGULAR"]
     WRONG_INERTIA = _feral._STATUS_CODES["WRONG_INERTIA"]
     NUMERIC_FAILURE = _feral._STATUS_CODES["NUMERIC_FAILURE"]
+    #: Issue #194. Reserved: the Rust core can stop a factorization on a
+    #: caller-armed interrupt flag, but these bindings expose no way to arm
+    #: one, so :meth:`Solver.factor` never returns this today.
+    INTERRUPTED = _feral._STATUS_CODES["INTERRUPTED"]
 
 
 class QualityLevel(IntEnum):

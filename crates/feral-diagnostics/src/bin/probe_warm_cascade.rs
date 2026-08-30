@@ -80,6 +80,7 @@ fn factor_one(
         FactorStatus::WrongInertia { .. } => "WrongInertia",
         FactorStatus::Singular => "Singular",
         FactorStatus::FatalError(_) => "Fatal",
+        FactorStatus::Interrupted => "Interrupted",
     };
     println!("  {label:<8} {secs:>10.3} s  {tag}");
     secs
