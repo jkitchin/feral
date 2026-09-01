@@ -7589,3 +7589,60 @@ unrescued inertia — the one hard constraint in `CLAUDE.md`. The
 `mc64_retry_not_adopted` doc already flags this interaction; it reasons about
 the latch being armed by genuine evidence, and that premise must be enforced
 at every arming site.
+
+## 2026-09-01 — park post-0.17.0 work; develop from the 0.17.0 baseline
+
+**Context.** Forty-two commits landed on `main` between the `v0.17.0` release
+(2fbf9b7, 2026-08-19) and 91ace05 (2026-08-30): issue #190 (`RefineOptions`
+convergence targets and the `RefineOutcome` return), #192
+(`Solver::reset_quality`), #194 (cooperative `factor` cancellation), the
+multi-RHS solve perf work, and the componentwise-refinement default. Review
+against the two consumers that drive feral's requirements — pounce and discopt
+— found that none of it is called by either.
+
+**Decision.** Revert the code tree to the `v0.17.0` baseline and continue
+development from there. The work is parked, not deleted: branch
+`park/post-0.17` and annotated tag `park/post-0.17-tip`, both at 91ace05,
+pushed to `origin`.
+
+**Why park rather than keep.** The features are not merely unused — #190
+changed the `*_refined_into` return type, so the unused capability is also a
+breaking change against 0.17.0. Keeping it obliges us to maintain a wider API
+surface, and to carry that break into the next release, for behaviour no
+caller exercises. The cost of recovering it later is one `git checkout`; the
+cost of maintaining it indefinitely is not bounded.
+
+**Why a revert commit rather than `reset --hard` + force-push.** Both were
+considered. The revert preserves `main`'s history, so the ~19 outstanding
+`claude/*` and `feat/*` remote branches keep a valid merge base and no
+published history is rewritten. The cost is that re-landing parked work later
+needs a revert-of-revert, which is a known and local inconvenience; a force-push
+would have silently invalidated every branch cut from `main` since 2026-08-19.
+
+**Three carve-outs are deliberately not reverted.**
+
+1. *The clippy 1.98 fixes* (9c5dfac, 216a755). CI resolves
+   `dtolnay/rust-toolchain@stable` to 1.98, which introduced
+   `needless_late_init` and `chunks_exact_to_as_chunks`; the local toolchain is
+   1.93. Reverting them turns CI red on every future PR while the pre-commit
+   hook still passes locally — reintroducing exactly the local/CI drift those
+   commits fixed. The `unknown_lints` guard is part of this: without it the
+   `allow` is itself a hard error under `-D warnings` on any pre-1.98
+   toolchain.
+2. *CI coverage infrastructure* — `.github/workflows/coverage.yml`,
+   `codecov.yml`, the README badge. Infrastructure, not solver code.
+3. *All of `dev/`.* The session checkpoints, journals, and the append-only
+   `decisions.md` / `tried-and-rejected.md` entries are the record of what was
+   tried and learned. Reverting an append-only log to drop entries would
+   violate the protocol in `CLAUDE.md`, and the record is *more* valuable after
+   a park, not less: it documents why the code is on a shelf.
+
+**Evidence.** `cargo test --workspace`: 1191 passed, 0 failed, 25 ignored.
+`git diff v0.17.0..HEAD -- src/ python/ tests/ Cargo.toml` reduces to the
+18-line `schur_kernel.rs` clippy allow and nothing else.
+
+**Standing implication for future work.** The parked features were built to a
+high standard — researched, measured, documented — and still went unused. The
+gap was not quality but demand: none originated in a request from pounce or
+discopt. Feature work on the solver should start from a consumer-demonstrated
+need, not from an improvement that is available to make.

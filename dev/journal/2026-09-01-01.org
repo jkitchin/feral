@@ -1,0 +1,122 @@
+#+TITLE: Session journal 2026-09-01-01
+#+STARTUP: showeverything
+
+* 10:40 :park:release:scope:
+User reports that none of the work landed since the v0.17.0 release is
+needed by either pounce or discopt, and asks to park it and resume
+development from 0.17.0. Measured the gap first: `git rev-list --count
+v0.17.0..main` = 42 commits, `git diff --shortstat` = 79 files, +12384
+/ -340. `git merge-base --is-ancestor v0.17.0 main` = YES, so main is a
+clean fast-forward from the tag and a revert is well-defined. Working
+tree clean, main and origin/main in sync at 91ace05.
+
+* 10:45 :park:decision:
+Two decisions taken with the user rather than assumed.
+
+Mechanism: revert commit on top of main, NOT `reset --hard` +
+force-push. `git branch -a` shows ~19 outstanding remote branches
+(claude/*, feat/*, fix/*, research/*) cut from main; a force-push
+invalidates every merge base silently. The revert costs a
+revert-of-revert if the work is ever re-landed, which is local and
+visible.
+
+Scope: roll back src/, python/, tests/, Cargo.toml, CHANGELOG.md,
+FERAL-PROJECT-SPEC.md, feral_capi.h and the diagnostics probes; keep
+the CI coverage infrastructure and all of dev/.
+
+* 10:52 :park:ci:toolchain:
+Found a trap in the naive rollback. Commits 9c5dfac and 216a755 fix
+clippy 1.98's `needless_late_init` and `chunks_exact_to_as_chunks`,
+which fire in crates/feral-ordering-core and src/dense/schur_kernel.rs.
+CI resolves dtolnay/rust-toolchain@stable to 1.98; `cargo clippy
+--version` here is 0.1.93. Reverting those hunks would leave the
+pre-commit hook green locally and CI red on every future PR -- the
+exact local/CI drift 9c5dfac was written to fix. Carved both out and
+re-applied them onto the reverted tree.
+
+The `#![allow(unknown_lints)]` guard matters independently: without it
+the `chunks_exact_to_as_chunks` allow is itself an unknown-lint warning,
+and under the hook's `-D warnings` that is a hard error on any pre-1.98
+toolchain. Confirmed it came from a later commit (216a755) than the
+allow it guards, so both had to be re-applied, not just 9c5dfac.
+
+* 11:10 :park:build:
+First `cargo check --workspace --all-targets` after the rollback failed:
+
+  package `feral-diagnostics` depends on `feral` with feature
+  `kernel-probe` but `feral` does not have that feature
+
+The `kernel-probe` feature was added to Cargo.toml by the parked
+multi-RHS work, and ten new probe binaries in crates/feral-diagnostics
+were written against the parked APIs. Rolled the diagnostics crate back
+to v0.17.0 and removed those ten binaries; re-applied only the clippy
+fixes to diag_acopr14.rs and diag_schur_parity.rs (confirmed via `git
+log` that 9c5dfac is the only commit to touch those two files since the
+tag, so a checkout from the parked tip is exactly the clippy fix).
+
+Lesson: diagnostics probes are not separable from the feature they
+measure. A rollback of a feature has to take its probes with it.
+
+* 11:30 :park:evidence:
+Post-rollback verification. `cargo check --workspace --all-targets`
+clean. `cargo test --workspace`: 1191 passed, 0 failed, 25 ignored.
+`git diff --stat v0.17.0..HEAD -- src/ python/ tests/ Cargo.toml
+FERAL-PROJECT-SPEC.md feral-ipopt-shim/ CHANGELOG.md` reduces to a
+single entry, the 18-line schur_kernel.rs clippy allow. Pre-commit
+hooks (fmt, clippy -D warnings, clippy -p feral-diagnostics) all passed
+at commit time, which is the real test of the clippy carve-out.
+
+Parked work pushed before touching anything: branch park/post-0.17 and
+annotated tag park/post-0.17-tip, both verified at 91ace05 via `git
+ls-remote`.
+
+* 11:55 :krylov:analysis:preconditioner:
+Separate thread: evaluating ~/Desktop/feral-krylov.org, a proposal to
+add recycled MINRES to feral. Checked its central numerical claim
+before reading any code -- the proposal offers the absolute-value
+factor preconditioner M = P Ds^-1 L |D| L^T Ds^-1 P^T as the SPD
+preconditioner MINRES needs.
+
+Built a 55x55 saddle KKT with a barrier diagonal spanning 1e-6..1e6,
+factored with scipy's Bunch-Kaufman LDL, formed |D| by eigendecomposing
+each 1x1/2x2 pivot block, and examined M^-1 K:
+
+  eigenvalues of M^-1 K: min = -1.000000  max = 1.000000
+  distinct |eigenvalues|: [1.]   (35 at +1, 20 at -1)
+  ||(M^-1 K)^2 - I||_F = 1.5e-10
+
+So M^-1 K = sign-similar to identity: its minimal polynomial has degree
+2 and preconditioned MINRES converges in at most TWO iterations in
+exact arithmetic. Verified against scipy MINRES: 2 iterations at every
+barrier value tested when the factorization is of the current matrix.
+
+Implication for the proposal. With an exact, current-matrix
+factorization the preconditioner is so strong that no Krylov subspace
+of any size is built -- which means there is nothing to extract Ritz
+vectors FROM. Phase 1 (the |D| preconditioner) and Phase 2 (recycling)
+undercut each other; the proposal does not note this.
+
+* 12:05 :krylov:analysis:stale:
+Follow-up: the only regime where the Krylov layer does real work is an
+INEXACT preconditioner, i.e. a factorization frozen at an earlier IPM
+iterate. That is also the only regime with a real prize, since it saves
+factorization time rather than solve time. Tested it -- 80x80 KKT,
+factorization frozen at mu=1e-1, applied to later mu with 12 variables
+driven toward their bounds:
+
+  mu     cond(K)   MINRES its   spectrum of M0^-1 K
+  1e-1   1.99e+05      2        [1.00e+00, 1.00e+00]
+  1e-2   2.66e+04    200+       [1.97e-02, 1.14e+03]
+  1e-3   2.15e+05    200+       [1.47e-02, 9.50e+03]
+  1e-6   5.46e+07    200+       [1.41e-02, 2.50e+06]
+
+Control refactorizing at every mu: 2 iterations throughout.
+
+One frozen factorization is already useless one barrier decade later --
+the spectrum blows from {±1} to five orders of magnitude. CAVEAT: this
+is a synthetic model with an aggressive 10x mu drop per step and a
+harsh active-set model; real consecutive IPM matrices are closer
+together than this. It bounds the sensitivity rather than settling the
+question, and the honest read is that factorization reuse needs
+measurement on captured pounce sequences, not that it is dead. Recorded
+here so the eventual Phase 0 does not re-derive it.

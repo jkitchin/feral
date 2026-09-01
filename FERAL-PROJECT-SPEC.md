@@ -564,16 +564,7 @@ pub enum FactorStatus {
 /// Stage 1: activate enhanced scaling (if not already on).
 /// Stage 2: raise pivot threshold parameter u.
 /// Modeled on Ipopt's IncreaseQuality() — see IpTSymLinearSolver.cpp:432-441.
-/// Persists across factorizations until reset_quality() reverts it.
 pub fn increase_quality(&mut self) -> bool;
-
-/// Revert every escalation applied by increase_quality(), restoring the
-/// configured scaling strategy and pivot threshold and returning to
-/// QualityLevel::Baseline. Returns true if an escalation was undone.
-/// Ipopt has no counterpart: MA57's escalation is monotone in robustness,
-/// FERAL's changes which pivots are taken, so its lifetime has to be
-/// boundable by the caller (issue #192).
-pub fn reset_quality(&mut self) -> bool;
 
 /// Number of negative eigenvalues from last factorization.
 pub fn num_negative_eigenvalues(&self) -> usize;

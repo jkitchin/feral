@@ -127,10 +127,6 @@ fn run_auto(matrix: &CscMatrix) -> (Option<usize>, Option<u64>, String, String) 
         FactorStatus::Singular => "singular",
         FactorStatus::WrongInertia { .. } => "wrong_inertia",
         FactorStatus::FatalError(_) => "fatal",
-        // Issue #194: unreachable here (this probe never arms an
-        // interrupt flag), but labelled rather than wildcarded so a
-        // future variant cannot be silently folded into another.
-        FactorStatus::Interrupted => "interrupted",
     };
     let (resolved, nnz_l) = match solver.factors() {
         Some(f) => (format!("{:?}", f.resolved_method), Some(f.factor_nnz())),

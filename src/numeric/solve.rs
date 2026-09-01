@@ -16,47 +16,6 @@ use crate::sparse::csc::CscMatrix;
 /// setup. See `dev/research/issue-57-blas3-panel.md`.
 const BLAS3_NRHS_THRESHOLD: usize = 32;
 
-/// In-process override for [`BLAS3_NRHS_THRESHOLD`], compiled in only under
-/// the `kernel-probe` feature. It exists so a probe can time the rank-1 and
-/// BLAS-3 multi-RHS kernels at the *same* `nrhs`, interleaved within one
-/// process.
-///
-/// The alternative — building two binaries and alternating runs — was tried
-/// and does not work here: a full sweep takes ~25 minutes, so "adjacent" runs
-/// are 25 minutes apart, and the control (the looped single-RHS path, which is
-/// byte-identical in both builds) drifted by up to 2x between them. The
-/// `nrhs >= 32` rows, where both builds run the *same* kernel and the ratio
-/// must be exactly 1.00, read 0.86-0.90 instead. See
-/// `dev/research/blas3-threshold-refit.md`.
-///
-/// `usize::MAX` means "no override"; the const applies.
-#[cfg(feature = "kernel-probe")]
-static BLAS3_NRHS_OVERRIDE: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(usize::MAX);
-
-/// Override the multi-RHS BLAS-3 dispatch threshold for this process.
-/// Measurement scaffolding only — not part of the supported API, and absent
-/// unless the `kernel-probe` feature is enabled.
-#[cfg(feature = "kernel-probe")]
-#[doc(hidden)]
-pub fn set_blas3_nrhs_threshold(threshold: usize) {
-    BLAS3_NRHS_OVERRIDE.store(threshold, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// The active multi-RHS BLAS-3 dispatch threshold. With `kernel-probe` off
-/// this is the const, inlined — identical codegen to reading it directly.
-#[inline(always)]
-fn blas3_nrhs_threshold() -> usize {
-    #[cfg(feature = "kernel-probe")]
-    {
-        let overridden = BLAS3_NRHS_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
-        if overridden != usize::MAX {
-            return overridden;
-        }
-    }
-    BLAS3_NRHS_THRESHOLD
-}
-
 /// Multi-RHS refinement dispatch crossover (issue #58). At or above this
 /// `nrhs`, `Solver::solve_many_refined` refines through the batched
 /// `solve_sparse_many_refined` (one panel solve per refinement step over
@@ -1453,30 +1412,10 @@ impl SolveManyWorkspace {
         } else {
             n * nrhs
         };
-        // Row stride to allocate at. This must match what
-        // `solve_sparse_core_many_into` computes, since that function
-        // slices these buffers at `n * ldw` / `nrow * ldw` / `ldw`: the
-        // panel path pads to a whole `NR` tile (see `padded_ldw`), the
-        // rank-1 path uses exactly `nrhs`.
-        //
-        // Sizing on the threshold rather than padding unconditionally
-        // matters at the `nrhs` an interior-point host actually uses:
-        // padding `nrhs = 1` allocates 8x the `y` and `w` it will touch,
-        // and `nrhs = 2` (Mehrotra predictor-corrector) 4x, on a
-        // workspace that refinement rebuilds per step.
-        //
-        // Under `kernel-probe` the threshold is a runtime override that
-        // can move between construction and use, so there — and only
-        // there — pad unconditionally.
-        let ldw = if cfg!(feature = "kernel-probe") || nrhs >= blas3_nrhs_threshold() {
-            padded_ldw(nrhs)
-        } else {
-            nrhs
-        };
         Self {
-            y: vec![0.0; n * ldw],
-            w: vec![0.0; max_nrow * ldw],
-            acc: vec![0.0; ldw],
+            y: vec![0.0; n * nrhs],
+            w: vec![0.0; max_nrow * nrhs],
+            acc: vec![0.0; nrhs],
             scaled_rhs: vec![0.0; scaled_rhs_len],
             nrhs,
             n,
@@ -1622,17 +1561,11 @@ fn solve_sparse_core_many_into(
     acc_buf: &mut [f64],
 ) {
     let n = factors.n;
+    let y = &mut y_buf[..n * nrhs];
 
     // Route wide solves through the BLAS-3 panel kernels (issue #57
     // fix #2); narrow solves stay on the bit-identical rank-1 kernels.
-    let use_blas3 = nrhs >= blas3_nrhs_threshold();
-
-    // Row stride of the row-major buffers. Padded to a whole `NR` tile for
-    // the panel path so every row is cache-line aligned (see `padded_ldw`);
-    // left at `nrhs` for the rank-1 path, which gains nothing from the
-    // padding and would only pay for the extra columns.
-    let ldw = if use_blas3 { padded_ldw(nrhs) } else { nrhs };
-    let y = &mut y_buf[..n * ldw];
+    let use_blas3 = nrhs >= BLAS3_NRHS_THRESHOLD;
 
     // Permute the RHS into the **row-major** working layout
     // `y[new*nrhs + c] = rhs[c, perm[new]]`. The caller's `rhs` stays
@@ -1642,10 +1575,7 @@ fn solve_sparse_core_many_into(
     // hot per-supernode loops was the multi-RHS bottleneck, badly so
     // when `n` is a power of two and columns alias in cache).
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
-        let dst = new_idx * ldw;
-        for c in nrhs..ldw {
-            y[dst + c] = 0.0;
-        }
+        let dst = new_idx * nrhs;
         for c in 0..nrhs {
             y[dst + c] = rhs[c * n + old_idx];
         }
@@ -1663,10 +1593,10 @@ fn solve_sparse_core_many_into(
 
         // Gather the supernode's rows from `y` into `w` (both row-major):
         // w[i, :] = y[row_indices[perm[i]], :], a contiguous memcpy.
-        let w = &mut w_buf[..nrow * ldw];
+        let w = &mut w_buf[..nrow * nrhs];
         for i in 0..nrow {
-            let src = node.row_indices[ff.perm[i]] * ldw;
-            w[i * ldw..(i + 1) * ldw].copy_from_slice(&y[src..src + ldw]);
+            let src = node.row_indices[ff.perm[i]] * nrhs;
+            w[i * nrhs..(i + 1) * nrhs].copy_from_slice(&y[src..src + nrhs]);
         }
 
         // L-solve. At small `nrhs` the row-major rank-1 cascade runs
@@ -1674,9 +1604,9 @@ fn solve_sparse_core_many_into(
         // BLAS3_NRHS_THRESHOLD` the register-blocked panel kernel runs
         // (TRSM on L_11 + GEMM on L_21, issue #57 fix #2).
         if use_blas3 {
-            fwd_blas3(w, &ff.l, nrow, nelim, ldw);
+            fwd_blas3(w, &ff.l, nrow, nelim, nrhs);
         } else {
-            fwd_rank1(w, &ff.l, nrow, nelim, ldw);
+            fwd_rank1(w, &ff.l, nrow, nelim, nrhs);
         }
 
         // D-block solve, fused into the forward pass. A node's
@@ -1684,18 +1614,18 @@ fn solve_sparse_core_many_into(
         // completes — ancestors only ever touch its separator rows — so
         // D⁻¹ can be applied here instead of in a second postorder pass,
         // saving one gather/scatter round trip per supernode (issue #57).
-        dsolve_node(w, ff, nelim, ldw);
+        dsolve_node(w, ff, nelim, nrhs);
 
         // Scatter back into `y` (both row-major), undoing the BK
         // permutation: y[row_indices[perm[i]], :] = w[i, :].
         for i in 0..nrow {
-            let dst = node.row_indices[ff.perm[i]] * ldw;
-            y[dst..dst + ldw].copy_from_slice(&w[i * ldw..(i + 1) * ldw]);
+            let dst = node.row_indices[ff.perm[i]] * nrhs;
+            y[dst..dst + nrhs].copy_from_slice(&w[i * nrhs..(i + 1) * nrhs]);
         }
     }
 
     // Phase 3: Backward substitution (reverse postorder).
-    let acc = &mut acc_buf[..ldw];
+    let acc = &mut acc_buf[..nrhs];
     for node in factors.node_factors.iter().rev() {
         let ff = &node.frontal_factors;
         let nelim = ff.nelim;
@@ -1704,24 +1634,24 @@ fn solve_sparse_core_many_into(
             continue;
         }
 
-        let w = &mut w_buf[..nrow * ldw];
+        let w = &mut w_buf[..nrow * nrhs];
         for i in 0..nrow {
             // y is row-major (`y[node*nrhs + c]`), so each supernode row
             // gathers a contiguous run — a memcpy, not a stride-`n` walk.
-            let src = node.row_indices[ff.perm[i]] * ldw;
-            w[i * ldw..(i + 1) * ldw].copy_from_slice(&y[src..src + ldw]);
+            let src = node.row_indices[ff.perm[i]] * nrhs;
+            w[i * nrhs..(i + 1) * nrhs].copy_from_slice(&y[src..src + nrhs]);
         }
 
         // L^T-solve (mirror of the forward dispatch).
         if use_blas3 {
-            back_blas3(w, &ff.l, nrow, nelim, ldw, acc);
+            back_blas3(w, &ff.l, nrow, nelim, nrhs, acc);
         } else {
-            back_rank1(w, &ff.l, nrow, nelim, ldw, acc);
+            back_rank1(w, &ff.l, nrow, nelim, nrhs, acc);
         }
 
         for i in 0..nrow {
-            let dst = node.row_indices[ff.perm[i]] * ldw;
-            y[dst..dst + ldw].copy_from_slice(&w[i * ldw..(i + 1) * ldw]);
+            let dst = node.row_indices[ff.perm[i]] * nrhs;
+            y[dst..dst + nrhs].copy_from_slice(&w[i * nrhs..(i + 1) * nrhs]);
         }
     }
 
@@ -1729,7 +1659,7 @@ fn solve_sparse_core_many_into(
     // `x_out`: x[c, old] = y[new*nrhs + c]. One-time scatter (mirror of
     // the entry permute).
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
-        let src = new_idx * ldw;
+        let src = new_idx * nrhs;
         for c in 0..nrhs {
             x_out[c * n + old_idx] = y[src + c];
         }
@@ -1911,31 +1841,6 @@ struct PanelBlock<'a> {
     col_stride: usize,
 }
 
-/// Register-tile height for the multi-RHS panel GEMM: 4 output rows held
-/// in registers at once.
-const MR: usize = 4;
-/// Register-tile width: 8 right-hand-side columns per tile.
-const NR: usize = 8;
-
-/// Row stride for the row-major multi-RHS work buffers, rounded up to a
-/// whole `NR`-column tile — i.e. to a multiple of 64 bytes.
-///
-/// The padding is what makes every row of `y`/`w` start on a cache-line
-/// boundary. Measured 2026-08-20 across seven KKT matrices: with the stride
-/// left at a raw `nrhs`, the BLAS-3 solve is ~1.5x slower at every `nrhs`
-/// that is not a multiple of 8. `nrhs = 33` costs 1.59x `nrhs = 32` on
-/// bratu3d (74.2 ms vs 46.6 ms) despite doing 3% *more* work, and it costs
-/// the same as `nrhs = 31` — which has seven tail columns to 33's one. The
-/// tail-column count does not predict the cost; the stride does.
-///
-/// The padded columns carry a zero right-hand side, so they are numerically
-/// inert: every real column's arithmetic, and its order, is untouched.
-/// See `dev/research/blas3-threshold-refit.md`.
-#[inline]
-fn padded_ldw(nrhs: usize) -> usize {
-    nrhs.div_ceil(NR) * NR
-}
-
 /// Register-blocked panel GEMM: `C[m, c] -= sum_k A[m, k] · B[k, c]`,
 /// `C` (`m_dim × nrhs`) and `B` (`k_dim × nrhs`) row-major with leading
 /// dimension `nrhs`, `A` an `m_dim × k_dim` view into the column-major
@@ -1952,6 +1857,8 @@ fn gemm_panel_minus(
     k_dim: usize,
     nrhs: usize,
 ) {
+    const MR: usize = 4;
+    const NR: usize = 8;
     let m_main = m_dim - m_dim % MR;
     let c_main = nrhs - nrhs % NR;
 
@@ -2003,79 +1910,37 @@ fn gemm_panel_minus(
         m0 += MR;
     }
 
-    // Column tail (nrhs % NR) for the MR-tiled rows: one padded full-width
-    // tile per row block, not a scalar sweep.
-    if c_main < nrhs {
-        let live = nrhs - c_main;
-        let mut m0 = 0;
-        while m0 < m_main {
-            gemm_tile::<MR>(c_rows, a, b_rows, m0, c_main, live, k_dim, nrhs);
-            m0 += MR;
-        }
-    }
-    // Row tail (m_dim % MR), full column range, one row at a time.
-    for m in m_main..m_dim {
-        let mut c0 = 0;
-        while c0 < nrhs {
-            let live = NR.min(nrhs - c0);
-            gemm_tile::<1>(c_rows, a, b_rows, m, c0, live, k_dim, nrhs);
-            c0 += NR;
-        }
-    }
+    // Column tail (nrhs % NR) for the MR-tiled rows.
+    gemm_scalar_block(c_rows, a, b_rows, 0, m_main, c_main, nrhs, k_dim, nrhs);
+    // Row tail (m_dim % MR), full column range.
+    gemm_scalar_block(c_rows, a, b_rows, m_main, m_dim, 0, nrhs, k_dim, nrhs);
 }
 
-/// Register-blocked GEMM tile: `R` contiguous output rows starting at row
-/// `m0`, and the `live` columns starting at `c0`.
-///
-/// `live` may be shorter than `NR`. The lanes past it hold zero in both the
-/// accumulator and the `B` buffer, so they compute `0.0 - a·0.0 == 0.0` at
-/// every step and are never stored back. The stored elements are therefore
-/// bit-identical to computing only `live` lanes, and each remains a left
-/// fold over increasing `k` — matching the main kernel above and the rank-1
-/// cascade, so the panel path's parity with the scalar path is unchanged.
-///
-/// Running the tails at full register width is the point. The scalar tail
-/// this replaced re-walked all of `A`'s row and `B`'s column for *every*
-/// output element — strides `col_stride` and `nrhs`, no reuse — which made a
-/// tail column cost 2.0-5.1x a blocked column, measured across seven KKT
-/// matrices on 2026-08-20. That was enough to make `nrhs = 31` slower than
-/// `nrhs = 32` on every one of them despite 3% less work (bratu3d 85.3 ms vs
-/// 47.8 ms). See `dev/research/blas3-threshold-refit.md`.
-#[inline]
+/// Scalar fallback for the GEMM tails: `C[m, c] -= sum_k A[m, k]·B[k, c]`
+/// over `m ∈ [m_lo, m_hi)`, `c ∈ [c_lo, c_hi)`. Accumulates per `(m, c)`
+/// in increasing `k` (left fold), matching the core kernel's order.
 #[allow(clippy::too_many_arguments)]
-fn gemm_tile<const R: usize>(
+fn gemm_scalar_block(
     c_rows: &mut [f64],
     a: &PanelBlock,
     b_rows: &[f64],
-    m0: usize,
-    c0: usize,
-    live: usize,
+    m_lo: usize,
+    m_hi: usize,
+    c_lo: usize,
+    c_hi: usize,
     k_dim: usize,
     nrhs: usize,
 ) {
-    debug_assert!(live > 0 && live <= NR);
-    let mut acc = [[0.0f64; NR]; R];
-    let mut ab = [0usize; R];
-    for r in 0..R {
-        ab[r] = a.base + (m0 + r) * a.row_stride;
-        let off = (m0 + r) * nrhs + c0;
-        acc[r][..live].copy_from_slice(&c_rows[off..off + live]);
-    }
-    let mut bb = [0.0f64; NR];
-    for k in 0..k_dim {
-        let boff = k * nrhs + c0;
-        bb[..live].copy_from_slice(&b_rows[boff..boff + live]);
-        let kc = k * a.col_stride;
-        for r in 0..R {
-            let av = a.l[ab[r] + kc];
-            for s in 0..NR {
-                acc[r][s] -= av * bb[s];
+    for m in m_lo..m_hi {
+        let ab = a.base + m * a.row_stride;
+        let row = &mut c_rows[m * nrhs..(m + 1) * nrhs];
+        for c in c_lo..c_hi {
+            let mut sum = row[c];
+            for k in 0..k_dim {
+                sum -= a.l[ab + k * a.col_stride] * b_rows[k * nrhs + c];
             }
+            row[c] = sum;
         }
-    }
-    for r in 0..R {
-        let off = (m0 + r) * nrhs + c0;
-        c_rows[off..off + live].copy_from_slice(&acc[r][..live]);
     }
 }
 
@@ -2130,321 +1995,29 @@ pub const DEFAULT_REFINE_MAX_STEPS: usize = 10;
 /// same, since the residual matvec is skipped rather than computed and
 /// discarded. (Under the diagnostics entry point the matvec still runs:
 /// `steps[0]` is the point there.)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefineOptions {
     /// Maximum number of correction steps. See the type-level docs.
     pub max_steps: usize,
-    /// What "accurate enough" means. See [`StopCriterion`].
-    pub stop: StopCriterion,
 }
-
-/// The default componentwise target: MUMPS's `CNTL(2)`.
-///
-/// MUMPS sets `CNTL(2) = sqrt(epsilon)` (`ref/mumps/src/dini_defaults.F:1094`)
-/// and stops its `ICNTL(10)` refinement when the Arioli-Demmel-Duff
-/// backward error falls below it. FERAL uses the same number for the
-/// same purpose, so a default-configured `solve_refined` certifies at
-/// least what a default-configured MUMPS does.
-///
-/// `f64::EPSILON` itself -- LAPACK `dgerfs`'s target -- was measured and
-/// rejected: on the seven-matrix large corpus it stagnates or exhausts
-/// the step budget on five of seven under a badly scaled RHS (up to 10
-/// steps) while `sqrt(eps)` converges in at most one. See
-/// `dev/research/issue-190-refine-target.md`.
-pub const DEFAULT_BACKWARD_ERROR_TARGET: f64 = 1.4901161193847656e-8;
 
 impl Default for RefineOptions {
     fn default() -> Self {
         Self {
             max_steps: DEFAULT_REFINE_MAX_STEPS,
-            stop: StopCriterion::EpsSqrtNAndBackwardError(DEFAULT_BACKWARD_ERROR_TARGET),
         }
     }
 }
 
 impl RefineOptions {
-    /// Options capping refinement at `max_steps` correction steps,
-    /// keeping the default
-    /// [`StopCriterion::EpsSqrtNAndBackwardError`].
+    /// Options capping refinement at `max_steps` correction steps.
     ///
     /// `RefineOptions::with_max_steps(1)` is the interior-point host's
     /// case: one correction per call, leaving the convergence decision to
     /// the host's own refinement loop.
     pub fn with_max_steps(max_steps: usize) -> Self {
-        Self {
-            max_steps,
-            ..Self::default()
-        }
+        Self { max_steps }
     }
-
-    /// Options targeting a normwise relative residual of `target`
-    /// (`‖r‖₂/‖b‖₂ ≤ target`), keeping the default step budget.
-    ///
-    /// This is issue #190's ask. See [`StopCriterion::RelativeResidual`]
-    /// for when [`Self::with_backward_error`] is the better measure.
-    pub fn with_target(target: f64) -> Self {
-        Self {
-            stop: StopCriterion::RelativeResidual(target),
-            ..Self::default()
-        }
-    }
-
-    /// Options targeting a componentwise backward error of `target`
-    /// (`ω ≤ target`), keeping the default step budget.
-    ///
-    /// `with_backward_error(f64::EPSILON)` is "stop once the solve is
-    /// backward stable" — the contract an interior-point host assumes of
-    /// its linear backend. See [`StopCriterion::BackwardError`].
-    pub fn with_backward_error(target: f64) -> Self {
-        Self {
-            stop: StopCriterion::BackwardError(target),
-            ..Self::default()
-        }
-    }
-
-    /// Builder: set the step cap, keeping the criterion already chosen.
-    pub fn and_max_steps(self, max_steps: usize) -> Self {
-        Self { max_steps, ..self }
-    }
-
-    /// Builder: set the stopping criterion, keeping the cap already chosen.
-    pub fn and_stop(self, stop: StopCriterion) -> Self {
-        Self { stop, ..self }
-    }
-}
-
-/// What a refinement call is trying to achieve — as distinct from
-/// [`RefineOptions::max_steps`], which only says how long it may try.
-///
-/// # Why this exists (issue #190)
-///
-/// Before #190 the target was hardwired to `ε·√n`. On a large
-/// near-singular KKT system that is not a target, it is an unreachable
-/// one: at `n = 118 276`, `ε·√n ≈ 7.6e-14`, each step improves the
-/// residual slightly so the 2-strike plateau exit never fires, the
-/// divergence guard never fires, and the loop runs to `max_steps` on
-/// every call. The step cap then becomes the *de facto* stopping rule,
-/// and it is a bad one: sweeping a 118-problem corpus, `max_steps` was
-/// not monotone in outcome — one problem returned a false infeasibility
-/// verdict at `k = 1` while succeeding at `k = 0`, `2` and `10`. A knob
-/// behaves that way when it does not control the quantity the caller
-/// cares about.
-///
-/// See `dev/research/issue-190-refine-target.md`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StopCriterion {
-    /// `‖r‖₂ < ε·√n·‖b‖₂` — FERAL's historical rule, and the default
-    /// through 0.17.0. As of 0.18.0 the default is
-    /// [`Self::EpsSqrtNAndBackwardError`]; this variant is what a caller
-    /// opts into to get the pre-0.18.0 behaviour back.
-    ///
-    /// Kept bit-for-bit, including the strict `<`, so a call that opts
-    /// into this variant performs exactly the arithmetic it did before
-    /// #190.
-    EpsSqrtN,
-    /// `‖r‖₂/‖b‖₂ ≤ target` — normwise relative residual.
-    ///
-    /// Simple and cheap, but *normwise*: one number over the whole
-    /// system, dominated by its largest-magnitude rows. On a badly
-    /// scaled system it can read as converged while individual
-    /// equations are badly violated. The worked case in
-    /// `dev/research/issue-190-refine-target.md` has
-    /// `‖r‖₂/‖b‖₂ = 1.0e-36` and `ω = 5.0e-13` for the same iterate.
-    /// Prefer [`Self::BackwardError`] when the caller's real question is
-    /// "is this solve honest?".
-    RelativeResidual(f64),
-    /// `ω ≤ target`, where `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ` is the
-    /// componentwise backward error of Arioli, Demmel & Duff (1989).
-    ///
-    /// `ω ≤ u` certifies that the computed `x` is the *exact* solution
-    /// of `(A+δA)x = b+δb` with `|δA| ≤ ω|A|` and `|δb| ≤ ω|b|`,
-    /// entry by entry. That is the property "a backward-stable `LDLᵀ`"
-    /// names, so unlike a relative-residual target it has a principled
-    /// value — `f64::EPSILON` — and the caller need not invent one.
-    /// It is also what MA57 (`RINFO(6..8)`) and MUMPS (`RINFO(7..8)`)
-    /// report.
-    ///
-    /// Costs one extra pass over `A` per step
-    /// ([`CscMatrix::abs_symv`]) and **no extra solves** — in contrast
-    /// to [`RefinementDiagnostics::kappa_1_est`], which costs 3–5.
-    BackwardError(f64),
-    /// Both at once: `‖r‖₂ < ε·√n·‖b‖₂` **and** `ω ≤ target`.
-    ///
-    /// This is the default, with `target = DEFAULT_BACKWARD_ERROR_TARGET`.
-    ///
-    /// Neither test alone is sufficient. [`Self::EpsSqrtN`] is normwise,
-    /// so it is dominated by the rows carrying the largest right-hand-side
-    /// entries: on a RHS whose entries span 1e-6..1e6 it passes on the
-    /// *raw* solve — `r05_kkt` reaches `‖r‖₂/‖b‖₂ = 2.7e-14` at step 0 —
-    /// while the rows carrying the small entries still sit at
-    /// `ω = 9.5e-5`, nine orders worse than MUMPS on the same system.
-    /// [`Self::BackwardError`] alone fixes that but, being satisfied at
-    /// `√ε`, can stop while `‖r‖₂/‖b‖₂` is still looser than the
-    /// historical rule delivered.
-    ///
-    /// Requiring both means the returned iterate is never worse than
-    /// what `EpsSqrtN` shipped, and additionally carries the
-    /// Arioli-Demmel-Duff certificate. Measured cost on the seven-matrix
-    /// large corpus, both RHS families: at most two correction steps,
-    /// the same bound `EpsSqrtN` already had.
-    EpsSqrtNAndBackwardError(f64),
-}
-
-/// Why a refinement call stopped, and how much it did.
-///
-/// Returned by the `*_into` refinement entry points. Everything here is
-/// computed by the refinement loop anyway; surfacing it costs nothing.
-///
-/// Issue #190 asked for this because back-solve wall time cannot
-/// distinguish "the budget bound" from "refinement bottomed out after
-/// two non-improving steps" — very different diagnoses for a host
-/// deciding what to pass next. The alternative, returning
-/// [`RefinementDiagnostics`], would have dragged in the Hager–Higham
-/// condition estimate and its 3–5 extra solves per call.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RefineOutcome {
-    /// Correction steps actually performed. `0` means the direct solve
-    /// already satisfied the criterion (or that `max_steps` was `0`).
-    ///
-    /// For a multi-RHS call this is the maximum over columns.
-    pub steps: usize,
-    /// `‖r‖₂/‖b‖₂` of the iterate that was returned, or `‖r‖₂` when
-    /// `‖b‖₂ = 0`.
-    ///
-    /// **`NaN` when `max_steps == 0`**: issue #178 requires that setting
-    /// cost exactly what an unrefined solve costs, so no residual is
-    /// formed and there is nothing honest to report. For a multi-RHS
-    /// call this is the maximum over columns.
-    pub relative_residual: f64,
-    /// The Arioli-Demmel-Duff componentwise backward error
-    /// `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ` of the iterate that was
-    /// returned. For a multi-RHS call this is the maximum over columns.
-    ///
-    /// **`NaN` when the criterion did not require ω** — that is, under
-    /// [`StopCriterion::EpsSqrtN`] and [`StopCriterion::RelativeResidual`],
-    /// and under `max_steps == 0`. ω costs an extra `abs_symv` per step,
-    /// so the refiner only forms it when it is being tested against;
-    /// reporting a stale or defaulted number instead would be worse than
-    /// reporting none. Note that `NaN` here means *not measured* and is
-    /// distinct from `INFINITY`, which is a real measurement: a
-    /// non-finite iterate. Test with `is_nan()`, not against a bound.
-    pub backward_error: f64,
-    /// Which exit fired. For a multi-RHS call, the worst over columns in
-    /// the order `MaxSteps > Diverged > Stagnated > Converged` —
-    /// `MaxSteps` ranks first because "did the budget bind?" is the
-    /// question this type exists to answer.
-    pub stop: RefineStop,
-}
-
-/// The four ways [`solve_sparse_refined_core`] can exit. See
-/// [`RefineOutcome::stop`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefineStop {
-    /// The [`StopCriterion`] was satisfied.
-    Converged,
-    /// The step budget was exhausted with the criterion unmet. This is
-    /// the signal that [`RefineOptions::max_steps`] was the binding
-    /// constraint — raise it, or loosen the criterion.
-    MaxSteps,
-    /// Two consecutive steps failed to improve the best `‖r‖₂`.
-    /// Refinement has bottomed out; more steps will not help.
-    Stagnated,
-    /// A step drove `‖r‖₂` past 100× the best seen. The best iterate is
-    /// still what gets returned.
-    Diverged,
-}
-
-impl RefineStop {
-    /// Rank for the multi-RHS aggregation described on
-    /// [`RefineOutcome::stop`]. Higher wins.
-    pub(crate) fn rank(self) -> u8 {
-        match self {
-            RefineStop::Converged => 0,
-            RefineStop::Stagnated => 1,
-            RefineStop::Diverged => 2,
-            RefineStop::MaxSteps => 3,
-        }
-    }
-
-    pub(crate) fn worst(self, other: RefineStop) -> RefineStop {
-        if other.rank() > self.rank() {
-            other
-        } else {
-            self
-        }
-    }
-}
-
-/// Componentwise backward error `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ`,
-/// in the guarded form LAPACK's `dgerfs` uses for `BERR`:
-///
-/// ```text
-/// safe1 = (n+1)·f64::MIN_POSITIVE      safe2 = safe1 / f64::EPSILON
-/// dᵢ = (|A|·|x| + |b|)ᵢ
-/// dᵢ > safe2  →  |rᵢ| / dᵢ
-/// otherwise   →  (|rᵢ| + safe1) / (dᵢ + safe1)
-/// ```
-///
-/// The guard matters: an unguarded ratio on a row whose denominator has
-/// underflowed reports a spuriously enormous `ω` that refinement cannot
-/// reduce, which would make a [`StopCriterion::BackwardError`] target
-/// unreachable — reproducing the exact defect issue #190 reports for
-/// `ε·√n`.
-///
-/// **One deviation from `dgerfs`**, and it is deliberate: a row with
-/// `dᵢ == 0` contributes `0`, where LAPACK's guarded branch yields
-/// `safe1/safe1 = 1`. `dᵢ == 0` forces every `|aᵢⱼ||xⱼ|` and `|bᵢ|` to
-/// be zero, hence `rᵢ = bᵢ − (Ax)ᵢ = 0` exactly — the equation is
-/// satisfied, not violated. Reporting `1` for a structurally empty row
-/// would make any `BackwardError` target unreachable on such a system.
-///
-/// **A non-finite row returns `f64::INFINITY`.** If `x` has overflowed,
-/// `|r|` and `d` both reach `inf` and their ratio is `NaN`; `NaN` loses
-/// every `>` comparison, so skipping such rows would let an all-`NaN`
-/// iterate report `ω = 0.0` and satisfy a
-/// [`StopCriterion::BackwardError`] target on the first test. `inf` is
-/// the only honest answer for an iterate that is not a solution at all.
-///
-/// `scratch` must be `n` long; it receives `|A|·|x|`.
-fn backward_error(
-    matrix: &CscMatrix,
-    x: &[f64],
-    rhs: &[f64],
-    r: &[f64],
-    scratch: &mut [f64],
-) -> f64 {
-    let n = matrix.n;
-    matrix.abs_symv(x, scratch);
-    let safe1 = ((n + 1) as f64) * f64::MIN_POSITIVE;
-    let safe2 = safe1 / f64::EPSILON;
-    let mut omega: f64 = 0.0;
-    for i in 0..n {
-        let d = scratch[i] + rhs[i].abs();
-        // A non-finite row means the iterate itself has blown up: an
-        // overflowed pivot sends `x` to `inf`, so `A*x` and hence both
-        // `r[i]` and `d` reach `inf` and `|r|/d` is `NaN`. `NaN` fails
-        // every `>` comparison, so without this guard the row is
-        // silently skipped -- and an all-`NaN` iterate would return
-        // `omega = 0.0`, i.e. read as *perfectly* backward stable and
-        // stop refinement on its first test. Report the worst possible
-        // backward error instead.
-        if !d.is_finite() || !r[i].is_finite() {
-            return f64::INFINITY;
-        }
-        if d == 0.0 {
-            // r[i] is provably 0 here; see the doc comment.
-            continue;
-        }
-        let term = if d > safe2 {
-            r[i].abs() / d
-        } else {
-            (r[i].abs() + safe1) / (d + safe1)
-        };
-        if term > omega {
-            omega = term;
-        }
-    }
-    omega
 }
 
 /// Solve A·x = rhs using the sparse factorization with iterative refinement.
@@ -2461,14 +2034,8 @@ fn backward_error(
 /// `dx = A⁻¹·r` can amplify error; tracking the best iterate guarantees
 /// the returned `x` is no worse than the unrefined `solve_sparse()` output.
 ///
-/// Convergence test: whichever `StopCriterion` the caller selected, or
-/// after 10 steps. The default is `EpsSqrtNAndBackwardError(√ε)` — stop
-/// once `||r||₂ / ||b||₂ < ε·√n` *and* the componentwise backward error
-/// `ω ≤ √ε`. The normwise half alone is not enough: on a badly-scaled
-/// right-hand side it stops at `||r||₂/||b||₂ ≈ 4e-16` while `ω = 9e-6`
-/// (measured, bratu3d), because it is dominated by the rows carrying
-/// the largest RHS entries. `√ε` is MUMPS's `CNTL(2)`, the same number
-/// its `ICNTL(10)` refinement stops on. 10 comes from FERAL's corpus,
+/// Convergence test: stop when `||r||₂ / ||b||₂ < ε·√n` (we've reached
+/// machine precision) or after 10 steps. 10 comes from FERAL's corpus,
 /// not from MUMPS (whose `ICNTL(10)` default is `0` — no refinement at
 /// all; the comparison harness sets it to `2`): below 10 some
 /// near-rank-deficient KKT matrices
@@ -2525,8 +2092,8 @@ pub fn solve_sparse_refined_into(
     rhs: &[f64],
     x_out: &mut [f64],
     opts: RefineOptions,
-) -> Result<RefineOutcome, FeralError> {
-    let (outcome, _) = solve_sparse_refined_core(
+) -> Result<(), FeralError> {
+    solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2535,7 +2102,7 @@ pub fn solve_sparse_refined_into(
         SolveCore::SharedVector,
         opts,
     )?;
-    Ok(outcome)
+    Ok(())
 }
 
 /// Iterative refinement through the contribution-block solve core (issue
@@ -2639,8 +2206,8 @@ pub fn solve_sparse_refined_auto_into(
     x_out: &mut [f64],
     parallel: bool,
     opts: RefineOptions,
-) -> Result<RefineOutcome, FeralError> {
-    let (outcome, _) = solve_sparse_refined_core(
+) -> Result<(), FeralError> {
+    solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2649,7 +2216,7 @@ pub fn solve_sparse_refined_auto_into(
         SolveCore::Auto { parallel },
         opts,
     )?;
-    Ok(outcome)
+    Ok(())
 }
 
 /// Iterative refinement with tree-parallel execution requested, and the
@@ -2717,8 +2284,8 @@ pub fn solve_sparse_refined_parallel_into(
     rhs: &[f64],
     x_out: &mut [f64],
     opts: RefineOptions,
-) -> Result<RefineOutcome, FeralError> {
-    let (outcome, _) = solve_sparse_refined_core(
+) -> Result<(), FeralError> {
+    solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2727,7 +2294,7 @@ pub fn solve_sparse_refined_parallel_into(
         SolveCore::Auto { parallel: true },
         opts,
     )?;
-    Ok(outcome)
+    Ok(())
 }
 
 /// Per-step diagnostic data emitted by
@@ -2818,7 +2385,7 @@ pub fn solve_sparse_refined_with_diagnostics_opts(
     opts: RefineOptions,
 ) -> Result<(Vec<f64>, RefinementDiagnostics), FeralError> {
     let mut x = vec![0.0; factors.n];
-    let (_outcome, diag) = solve_sparse_refined_core(
+    let diag = solve_sparse_refined_core(
         matrix,
         factors,
         rhs,
@@ -2888,7 +2455,7 @@ fn solve_sparse_refined_core(
     with_diagnostics: bool,
     core: SolveCore,
     opts: RefineOptions,
-) -> Result<(RefineOutcome, Option<RefinementDiagnostics>), FeralError> {
+) -> Result<Option<RefinementDiagnostics>, FeralError> {
     let n = factors.n;
     if rhs.len() != n {
         return Err(FeralError::DimensionMismatch {
@@ -2963,17 +2530,7 @@ fn solve_sparse_refined_core(
     // exception: `steps[0]` carries that residual, so it runs the matvec
     // and then simply skips the loop.
     if opts.max_steps == 0 && !with_diagnostics {
-        return Ok((
-            RefineOutcome {
-                steps: 0,
-                // No residual was formed, so there is nothing honest to
-                // report. See `RefineOutcome::relative_residual`.
-                relative_residual: f64::NAN,
-                backward_error: f64::NAN,
-                stop: RefineStop::MaxSteps,
-            },
-            None,
-        ));
+        return Ok(None);
     }
 
     // `x` is the working iterate the corrections accumulate into;
@@ -3017,67 +2574,18 @@ fn solve_sparse_refined_core(
     let threshold = f64::EPSILON * n_sqrt;
     let divergence_factor = 100.0;
     let b_norm = norm2(rhs);
-    // Issue #190 made the *target* a per-call choice too. `EpsSqrtN`
-    // reproduces the historical rule exactly, strict `<` included, so
-    // callers that do not opt in run the same arithmetic they always
-    // did. The two target variants use `<=`, so `target = 0.0` means
-    // "only an exact zero residual stops you" rather than "unreachable".
-    //
-    // The residual targets are RELATIVE: ||r||/||b||. When ||b|| = 0 the
-    // true answer is x = 0 and r = -A·x; we compare ||r|| directly.
-    // `BackwardError` needs no such special case: its denominator
-    // carries |b| per row already.
-    let reached = |r_norm: f64, omega: f64| -> bool {
-        match opts.stop {
-            StopCriterion::EpsSqrtN => {
-                if b_norm > 0.0 {
-                    r_norm < threshold * b_norm
-                } else {
-                    r_norm < threshold
-                }
-            }
-            StopCriterion::RelativeResidual(t) => {
-                if b_norm > 0.0 {
-                    r_norm <= t * b_norm
-                } else {
-                    r_norm <= t
-                }
-            }
-            StopCriterion::BackwardError(t) => omega <= t,
-            StopCriterion::EpsSqrtNAndBackwardError(t) => {
-                let normwise = if b_norm > 0.0 {
-                    r_norm < threshold * b_norm
-                } else {
-                    r_norm < threshold
-                };
-                normwise && omega <= t
-            }
+    // Target is a RELATIVE residual: ||r||/||b|| < ε·√n. When ||b|| = 0
+    // the true answer is x = 0 and r = -A·x; we target ||r|| < threshold
+    // directly in that case.
+    let relative_reached = |r_norm: f64| -> bool {
+        if b_norm > 0.0 {
+            r_norm < threshold * b_norm
+        } else {
+            r_norm < threshold
         }
     };
 
     let rel_res = |rn: f64| if b_norm > 0.0 { rn / b_norm } else { rn };
-
-    // ω is only formed when it is the criterion; under the other two it
-    // stays `INFINITY` and is never read. One `abs_symv` per step, no
-    // extra solves.
-    let wants_omega = matches!(
-        opts.stop,
-        StopCriterion::BackwardError(_) | StopCriterion::EpsSqrtNAndBackwardError(_)
-    );
-    let mut omega_scratch = if wants_omega {
-        vec![0.0; n]
-    } else {
-        Vec::new()
-    };
-    // Evaluated on the *best* iterate, matching how the residual targets
-    // are tested against `best_r_norm`. Best-iterate selection itself is
-    // unchanged (smallest ||r||₂), so the contract in
-    // `solve_sparse_refined`'s docs holds under every criterion.
-    let mut best_omega = if wants_omega {
-        backward_error(matrix, &x, rhs, &r, &mut omega_scratch)
-    } else {
-        f64::INFINITY
-    };
 
     let mut steps: Vec<RefinementStep> = if with_diagnostics {
         let rr = rel_res(r_norm);
@@ -3093,15 +2601,8 @@ fn solve_sparse_refined_core(
     };
     let mut returned_step: usize = 0;
 
-    // Assume the budget binds; every other exit overwrites this, and a
-    // post-loop re-check catches the case where the final step happened
-    // to land on the target.
-    let mut stop = RefineStop::MaxSteps;
-    let mut steps_taken: usize = 0;
-
     for step in 1..=max_steps {
-        if reached(best_r_norm, best_omega) {
-            stop = RefineStop::Converged;
+        if relative_reached(best_r_norm) {
             break;
         }
 
@@ -3120,17 +2621,10 @@ fn solve_sparse_refined_core(
             r[i] = rhs[i] - r[i];
         }
         r_norm = norm2(&r);
-        steps_taken = step;
-        let omega = if wants_omega {
-            backward_error(matrix, &x, rhs, &r, &mut omega_scratch)
-        } else {
-            f64::INFINITY
-        };
 
         let improved = r_norm < best_r_norm;
         if improved {
             best_r_norm = r_norm;
-            best_omega = omega;
             x_out.copy_from_slice(&x);
             stagnant_count = 0;
             if with_diagnostics {
@@ -3152,7 +2646,6 @@ fn solve_sparse_refined_core(
         }
 
         if r_norm > best_r_norm * divergence_factor {
-            stop = RefineStop::Diverged;
             break;
         }
         // Plateau: `max_stagnant_steps` consecutive non-improving
@@ -3161,29 +2654,9 @@ fn solve_sparse_refined_core(
         // A single non-improving step is allowed because some KKT
         // matrices oscillate into a better basin on the next step.
         if stagnant_count >= max_stagnant_steps {
-            stop = RefineStop::Stagnated;
             break;
         }
     }
-
-    // Exhausting the budget on the step that *reached* the target is not
-    // the budget binding. Without this, `steps == max_steps` would be
-    // ambiguous and the "did it run to the cap?" question issue #190
-    // asks would still not be answerable.
-    if stop == RefineStop::MaxSteps && reached(best_r_norm, best_omega) {
-        stop = RefineStop::Converged;
-    }
-
-    let outcome = RefineOutcome {
-        steps: steps_taken,
-        relative_residual: rel_res(best_r_norm),
-        // Gate on `wants_omega`, not on `best_omega == INFINITY`: under
-        // the normwise criteria `best_omega` is the never-read `INFINITY`
-        // sentinel, but when ω *is* the criterion `INFINITY` is a real
-        // measurement (a non-finite iterate) and must be reported.
-        backward_error: if wants_omega { best_omega } else { f64::NAN },
-        stop,
-    };
 
     let diag = if with_diagnostics {
         Some(RefinementDiagnostics {
@@ -3195,7 +2668,7 @@ fn solve_sparse_refined_core(
     } else {
         None
     };
-    Ok((outcome, diag))
+    Ok(diag)
 }
 
 /// Multi-RHS solve with per-column iterative refinement, batched through
@@ -3205,7 +2678,7 @@ fn solve_sparse_refined_core(
 /// refined solves reach the BLAS-3 panel kernel that fix #2 added.
 ///
 /// The per-column convergence logic mirrors `solve_sparse_refined_core`
-/// exactly (same `max_steps`, 2-strike plateau, `StopCriterion`,
+/// exactly (same `max_steps`, 2-strike plateau, `ε·√n` relative target,
 /// 100× divergence guard, and per-column best-iterate). Each step
 /// **compacts** the active (un-converged) columns into the batched
 /// solve, so the work never exceeds the per-column loop. `rhs` is
@@ -3250,7 +2723,7 @@ pub fn solve_sparse_many_refined_into(
     nrhs: usize,
     x_out: &mut [f64],
     opts: RefineOptions,
-) -> Result<RefineOutcome, FeralError> {
+) -> Result<(), FeralError> {
     let n = factors.n;
     if rhs.len() != n * nrhs {
         return Err(FeralError::DimensionMismatch {
@@ -3266,57 +2739,21 @@ pub fn solve_sparse_many_refined_into(
     }
     if nrhs == 0 || n == 0 {
         x_out.fill(0.0);
-        return Ok(RefineOutcome {
-            steps: 0,
-            relative_residual: 0.0,
-            backward_error: 0.0,
-            stop: RefineStop::Converged,
-        });
+        return Ok(());
     }
 
     // Same constants as the single-RHS refiner (solve_sparse_refined_core),
-    // including the issue #178 per-call step cap and the issue #190
-    // per-call stopping criterion. The criterion is applied per column,
-    // exactly as the `ε·√n` target was.
+    // including the issue #178 per-call step cap.
     let max_steps = opts.max_steps;
     let max_stagnant_steps = 2;
     let threshold = f64::EPSILON * (n as f64).sqrt();
     let divergence_factor = 100.0;
-    let reached = |r_norm: f64, b_norm: f64, omega: f64| -> bool {
-        match opts.stop {
-            StopCriterion::EpsSqrtN => {
-                if b_norm > 0.0 {
-                    r_norm < threshold * b_norm
-                } else {
-                    r_norm < threshold
-                }
-            }
-            StopCriterion::RelativeResidual(t) => {
-                if b_norm > 0.0 {
-                    r_norm <= t * b_norm
-                } else {
-                    r_norm <= t
-                }
-            }
-            StopCriterion::BackwardError(t) => omega <= t,
-            StopCriterion::EpsSqrtNAndBackwardError(t) => {
-                let normwise = if b_norm > 0.0 {
-                    r_norm < threshold * b_norm
-                } else {
-                    r_norm < threshold
-                };
-                normwise && omega <= t
-            }
+    let relative_reached = |r_norm: f64, b_norm: f64| -> bool {
+        if b_norm > 0.0 {
+            r_norm < threshold * b_norm
+        } else {
+            r_norm < threshold
         }
-    };
-    let wants_omega = matches!(
-        opts.stop,
-        StopCriterion::BackwardError(_) | StopCriterion::EpsSqrtNAndBackwardError(_)
-    );
-    let mut om_scratch = if wants_omega {
-        vec![0.0f64; n]
-    } else {
-        Vec::new()
     };
 
     // Initial batched solve, written straight into the caller's buffer:
@@ -3330,22 +2767,11 @@ pub fn solve_sparse_many_refined_into(
     // the same — return before the per-column residual sweep rather than
     // computing residuals nobody will act on.
     if max_steps == 0 {
-        return Ok(RefineOutcome {
-            steps: 0,
-            // No residual formed; see `RefineOutcome::relative_residual`.
-            relative_residual: f64::NAN,
-            backward_error: f64::NAN,
-            stop: RefineStop::MaxSteps,
-        });
+        return Ok(());
     }
 
     let mut best_rn = vec![0.0f64; nrhs];
     let mut bnorm = vec![0.0f64; nrhs];
-    // ω of each column's best iterate; untouched unless it is the criterion.
-    let mut best_om = vec![f64::INFINITY; nrhs];
-    // Per-column exit and correction count, aggregated at the end.
-    let mut col_stop = vec![RefineStop::Converged; nrhs];
-    let mut col_steps = vec![0usize; nrhs];
 
     // Initial per-column residual r_c = b_c - A·x_c into a small reused
     // scratch; build the active set (columns not yet at the target). The
@@ -3364,31 +2790,12 @@ pub fn solve_sparse_many_refined_into(
         }
         bnorm[c] = norm2(&rhs[c * n..(c + 1) * n]);
         best_rn[c] = norm2(&rc);
-        if wants_omega {
-            best_om[c] = backward_error(
-                matrix,
-                &x_out[c * n..(c + 1) * n],
-                &rhs[c * n..(c + 1) * n],
-                &rc,
-                &mut om_scratch,
-            );
-        }
-        if !reached(best_rn[c], bnorm[c], best_om[c]) {
-            // Every column starts out assuming the budget will bind; the
-            // per-column exits below overwrite it.
-            col_stop[c] = RefineStop::MaxSteps;
+        if !relative_reached(best_rn[c], bnorm[c]) {
             active.push(c);
         }
     }
     if active.is_empty() {
-        return Ok(aggregate_outcome(
-            &col_stop,
-            &col_steps,
-            &best_rn,
-            &bnorm,
-            &best_om,
-            wants_omega,
-        ));
+        return Ok(());
     }
 
     // Refinement is needed for at least one column. `x_out` holds the
@@ -3428,22 +2835,9 @@ pub fn solve_sparse_many_refined_into(
                 rc[i] = rhs[c * n + i] - rc[i];
             }
             let rn = norm2(&rc);
-            col_steps[c] += 1;
-            let om = if wants_omega {
-                backward_error(
-                    matrix,
-                    &x[c * n..(c + 1) * n],
-                    &rhs[c * n..(c + 1) * n],
-                    &rc,
-                    &mut om_scratch,
-                )
-            } else {
-                f64::INFINITY
-            };
 
             if rn < best_rn[c] {
                 best_rn[c] = rn;
-                best_om[c] = om;
                 x_out[c * n..(c + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]);
                 stagnant[c] = 0;
             } else {
@@ -3451,76 +2845,18 @@ pub fn solve_sparse_many_refined_into(
             }
 
             // Stop this column on convergence, divergence, or plateau —
-            // identical predicates to the single-RHS refiner, tested in
-            // the same order so the recorded reason matches which one
-            // actually fired first.
-            if reached(best_rn[c], bnorm[c], best_om[c]) {
-                col_stop[c] = RefineStop::Converged;
-            } else if rn > best_rn[c] * divergence_factor {
-                col_stop[c] = RefineStop::Diverged;
-            } else if stagnant[c] >= max_stagnant_steps {
-                col_stop[c] = RefineStop::Stagnated;
-            } else {
+            // identical predicates to the single-RHS refiner.
+            let done = relative_reached(best_rn[c], bnorm[c])
+                || rn > best_rn[c] * divergence_factor
+                || stagnant[c] >= max_stagnant_steps;
+            if !done {
                 still.push(c);
             }
         }
         active = still;
     }
 
-    Ok(aggregate_outcome(
-        &col_stop,
-        &col_steps,
-        &best_rn,
-        &bnorm,
-        &best_om,
-        wants_omega,
-    ))
-}
-
-/// Collapse the per-column refinement record into one [`RefineOutcome`],
-/// as documented on its fields: `steps` and `relative_residual` are
-/// maxima, and `stop` is the worst exit by [`RefineStop::rank`].
-///
-/// Returning a maximum rather than a per-column `Vec` keeps the multi-RHS
-/// refiner allocation-free on this path — the wide buffers it does
-/// allocate are already the dominant cost, and a host asking "did the
-/// budget bind anywhere?" does not need the breakdown.
-fn aggregate_outcome(
-    col_stop: &[RefineStop],
-    col_steps: &[usize],
-    best_rn: &[f64],
-    bnorm: &[f64],
-    best_om: &[f64],
-    wants_omega: bool,
-) -> RefineOutcome {
-    let mut stop = RefineStop::Converged;
-    let mut steps = 0usize;
-    let mut worst_rel = 0.0f64;
-    let mut worst_om = 0.0f64;
-    for c in 0..col_stop.len() {
-        stop = stop.worst(col_stop[c]);
-        steps = steps.max(col_steps[c]);
-        let rel = if bnorm[c] > 0.0 {
-            best_rn[c] / bnorm[c]
-        } else {
-            best_rn[c]
-        };
-        if rel > worst_rel {
-            worst_rel = rel;
-        }
-        if best_om[c] > worst_om {
-            worst_om = best_om[c];
-        }
-    }
-    RefineOutcome {
-        steps,
-        relative_residual: worst_rel,
-        // `best_om` is the untouched `INFINITY` sentinel under the
-        // normwise criteria; report "not measured" rather than a fold
-        // over sentinels. See `RefineOutcome::backward_error`.
-        backward_error: if wants_omega { worst_om } else { f64::NAN },
-        stop,
-    }
+    Ok(())
 }
 
 fn norm2(v: &[f64]) -> f64 {
@@ -4020,139 +3356,6 @@ mod tests {
             }
         }
         CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
-    }
-
-    // --- componentwise backward error ω (issue #190) -----------------
-    //
-    // Oracle: values produced independently in Python from the published
-    // LAPACK `dgerfs` BERR formula (see
-    // `dev/research/issue-190-refine-target.md`), not from this code.
-    // CLAUDE.md forbids writing the implementation and its oracle in the
-    // same session without an external source; the published formula is
-    // that source.
-
-    /// Residual `r = b - A·x`, formed exactly as the refiner forms it.
-    fn residual_of(m: &CscMatrix, x: &[f64], b: &[f64]) -> Vec<f64> {
-        let mut r = vec![0.0; m.n];
-        m.symv(x, &mut r);
-        for i in 0..m.n {
-            r[i] = b[i] - r[i];
-        }
-        r
-    }
-
-    fn omega_of(m: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
-        let r = residual_of(m, x, b);
-        let mut scratch = vec![0.0; m.n];
-        backward_error(m, x, b, &r, &mut scratch)
-    }
-
-    fn assert_close(got: f64, want: f64, what: &str) {
-        if want == 0.0 {
-            assert_eq!(got, 0.0, "{what}: expected exactly 0, got {got:e}");
-            return;
-        }
-        let rel = ((got - want) / want).abs();
-        assert!(
-            rel <= 1e-15,
-            "{what}: got {got:e}, oracle {want:e}, relative difference {rel:e}"
-        );
-    }
-
-    #[test]
-    fn backward_error_matches_the_lapack_oracle_on_a_well_scaled_system() {
-        // A = [[4,1,0],[1,3,1],[0,1,2]], x = [1/2, 1/4, 1/8],
-        // b = A·x with 2⁻⁴⁰ added to row 1. All values exact in binary.
-        let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 1, 2, 2],
-            &[0, 0, 1, 1, 2],
-            &[4.0, 1.0, 3.0, 1.0, 2.0],
-        )
-        .expect("m");
-        let x = [0.5, 0.25, 0.125];
-        let b = [2.25, 1.375 + f64::from_bits(0x3D70000000000000), 0.5];
-        assert_close(
-            omega_of(&m, &x, &b),
-            3.3072534609913724e-13,
-            "well-scaled ω",
-        );
-    }
-
-    #[test]
-    fn backward_error_sees_what_the_normwise_residual_misses() {
-        // The case the research note quotes: A = diag(1e12, 1e-12),
-        // x = [1,1], b perturbed by 1e-24 in the *small* row.
-        // ‖r‖₂/‖b‖₂ = 1.0e-36 — indistinguishable from a perfect solve —
-        // while ω = 5.0e-13, nowhere near machine precision. This is the
-        // whole argument for offering `StopCriterion::BackwardError`, so
-        // both numbers are asserted, not just ω.
-        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1e12, 1e-12]).expect("m");
-        let x = [1.0, 1.0];
-        let b = [1e12, 1e-12 + 1e-24];
-
-        assert_close(
-            omega_of(&m, &x, &b),
-            5.000242179395196e-13,
-            "badly-scaled ω",
-        );
-
-        let r = residual_of(&m, &x, &b);
-        let rel = norm2(&r) / norm2(&b);
-        assert_close(rel, 1.0000484358795394e-36, "badly-scaled ‖r‖/‖b‖");
-        assert!(
-            rel < f64::EPSILON && omega_of(&m, &x, &b) > 1e3 * f64::EPSILON,
-            "the two measures must disagree here, or this test proves nothing"
-        );
-    }
-
-    #[test]
-    fn backward_error_treats_a_structurally_empty_row_as_satisfied() {
-        // LAPACK's guarded branch would return safe1/safe1 = 1 for row 1.
-        // FERAL returns 0: dᵢ == 0 forces rᵢ == 0, so the equation holds.
-        // Reporting 1 would make any `BackwardError` target unreachable
-        // on such a system — the defect #190 reports for `ε·√n`.
-        let m = CscMatrix::from_triplets(2, &[0], &[0], &[1.0]).expect("m");
-        let x = [1.0, 0.0];
-        let b = [1.0, 0.0];
-        assert_eq!(omega_of(&m, &x, &b), 0.0, "empty row must contribute 0");
-    }
-
-    #[test]
-    fn backward_error_reports_infinity_on_a_non_finite_iterate() {
-        // A row where |r| and d are both `inf` makes the ratio `NaN`.
-        // `NaN` fails `term > omega`, so before the finiteness guard
-        // this returned 0.0 — a diverged iterate certifying itself as
-        // exactly backward stable, which would stop
-        // `StopCriterion::BackwardError` refinement on its first test.
-        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1.0, 1.0]).expect("m");
-        let b = [1.0, 1.0];
-        for x in [
-            [f64::INFINITY, 1.0],
-            [f64::NAN, 1.0],
-            [f64::NEG_INFINITY, 1.0],
-        ] {
-            let om = omega_of(&m, &x, &b);
-            assert!(
-                om == f64::INFINITY,
-                "non-finite iterate {x:?} must report inf, got {om:e}"
-            );
-        }
-    }
-
-    #[test]
-    fn backward_error_takes_the_guarded_branch_below_safe2() {
-        // dᵢ ≈ 2e-300, under safe2 ≈ 3.0e-292 for n = 2, so the
-        // `(|rᵢ| + safe1)/(dᵢ + safe1)` form is what runs. An unguarded
-        // ratio here would report ~5e-11 instead.
-        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1e-300, 1.0]).expect("m");
-        let x = [1.0, 0.0];
-        let b = [1e-300 + 1e-310, 0.0];
-        assert_close(
-            omega_of(&m, &x, &b),
-            3.342610678347075e-08,
-            "tiny-denominator ω",
-        );
     }
 
     #[test]
@@ -4656,94 +3859,6 @@ mod tests {
                 x_ser[i].to_bits(),
                 "gate-rejected factor: requesting parallel changed bit {i}"
             );
-        }
-    }
-}
-
-#[cfg(test)]
-mod gemm_tail_tests {
-    use super::*;
-
-    /// Reference GEMM with the summation order the panel kernel documents:
-    /// each `C[m, c]` accumulates over increasing `k` as a left fold. This is
-    /// the specification `gemm_panel_minus` has always claimed to implement
-    /// (see its doc comment and the rank-1 cascade it must stay parity with),
-    /// so equality here is equality with the pre-tail-rewrite kernel too.
-    fn reference(
-        c_rows: &mut [f64],
-        a: &PanelBlock,
-        b_rows: &[f64],
-        m_dim: usize,
-        k_dim: usize,
-        nrhs: usize,
-    ) {
-        for m in 0..m_dim {
-            let ab = a.base + m * a.row_stride;
-            for c in 0..nrhs {
-                let mut sum = c_rows[m * nrhs + c];
-                for k in 0..k_dim {
-                    sum -= a.l[ab + k * a.col_stride] * b_rows[k * nrhs + c];
-                }
-                c_rows[m * nrhs + c] = sum;
-            }
-        }
-    }
-
-    /// Deterministic, sign-varying, non-dyadic values, so a reassociation
-    /// would change the low bits rather than cancel out.
-    fn fill(v: &mut [f64], seed: u64) {
-        let mut x = seed | 1;
-        for e in v.iter_mut() {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            let u = ((x >> 11) as f64) / ((1u64 << 53) as f64);
-            *e = (u - 0.5) * 3.7;
-        }
-    }
-
-    /// Every `nrhs % NR` and `m_dim % MR` residue, including the shapes that
-    /// exercise the column tail, the row tail, and both at once.
-    #[test]
-    fn panel_gemm_is_bit_identical_to_the_reference_on_every_tail_shape() {
-        for &nrhs in &[1, 2, 3, 5, 7, 8, 9, 12, 14, 16, 20, 24, 31, 32, 33, 40] {
-            for &m_dim in &[1, 2, 3, 4, 5, 7, 8, 11, 16, 19] {
-                for &k_dim in &[1, 2, 5, 13, 32] {
-                    // `A` is a strided view, exactly as the solve builds it:
-                    // `row_stride = 1`, `col_stride = nrow`, offset `base`.
-                    let nrow = m_dim + 6;
-                    let base = 3;
-                    let mut lbuf = vec![0.0f64; base + nrow * k_dim + nrow];
-                    fill(&mut lbuf, 0x9E37_79B9_7F4A_7C15 ^ (nrhs as u64) << 8);
-                    let a = PanelBlock {
-                        l: &lbuf,
-                        base,
-                        row_stride: 1,
-                        col_stride: nrow,
-                    };
-
-                    let mut b = vec![0.0f64; k_dim * nrhs];
-                    fill(&mut b, 0xD1B5_4A32_D192_ED03 ^ (m_dim as u64) << 8);
-                    let mut c0 = vec![0.0f64; m_dim * nrhs];
-                    fill(&mut c0, 0xA24B_AED4_963E_E407 ^ (k_dim as u64) << 8);
-
-                    let mut got = c0.clone();
-                    gemm_panel_minus(&mut got, &a, &b, m_dim, k_dim, nrhs);
-                    let mut want = c0;
-                    reference(&mut want, &a, &b, m_dim, k_dim, nrhs);
-
-                    for i in 0..m_dim * nrhs {
-                        assert_eq!(
-                            got[i].to_bits(),
-                            want[i].to_bits(),
-                            "bit mismatch at {i} for nrhs={nrhs} m_dim={m_dim} k_dim={k_dim}: \
-                             {} vs {}",
-                            got[i],
-                            want[i]
-                        );
-                    }
-                }
-            }
         }
     }
 }

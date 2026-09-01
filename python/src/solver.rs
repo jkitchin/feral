@@ -14,8 +14,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::common::{
-    array1_to_vec, ordering_from_str, ordering_to_str, quality_to_int, Inertia,
-    STATUS_INTERRUPTED, STATUS_SINGULAR, STATUS_SUCCESS, STATUS_WRONG_INERTIA,
+    array1_to_vec, ordering_from_str, ordering_to_str, quality_to_int, Inertia, STATUS_SINGULAR,
+    STATUS_SUCCESS, STATUS_WRONG_INERTIA,
 };
 use crate::errors::{
     map_feral_err, DelayBudgetExceeded, NumericFailure, PatternMismatch, SingularError,
@@ -200,11 +200,6 @@ impl Solver {
                 actual,
                 expected: _,
             } => Ok((STATUS_WRONG_INERTIA, Some(actual.into()))),
-            // Issue #194: unreachable from Python — these bindings expose
-            // no way to arm the interrupt flag — but returned as its own
-            // code rather than folded into NUMERIC_FAILURE, so if an
-            // arming API is added later nothing here has to change.
-            RustFactorStatus::Interrupted => Ok((STATUS_INTERRUPTED, None)),
             RustFactorStatus::FatalError(e) => Err(match e {
                 RustFeralError::NumericallyRankDeficient => SingularError::new_err(format!("{e}")),
                 RustFeralError::InvalidInput(s) => PyValueError::new_err(s),
@@ -342,29 +337,10 @@ impl Solver {
             .map_err(map_feral_err)
     }
 
-    /// Two-stage quality escalation. Persists across `factor` calls
-    /// until `reset_quality` reverts it. Returns `False` if both
-    /// stages are exhausted.
+    /// Two-stage quality escalation. Returns `False` if both stages
+    /// are exhausted.
     fn increase_quality(&mut self) -> bool {
         self.inner.increase_quality()
-    }
-
-    /// Revert every escalation applied by `increase_quality`, putting
-    /// the solver back at `QualityLevel.BASELINE` with the scaling
-    /// strategy and pivot threshold it was configured with.
-    ///
-    /// Returns `True` only if a parameter was actually restored to a
-    /// different value; `False` both when the solver was already at
-    /// baseline and when the escalation itself moved nothing. Either
-    /// way the level is re-baselined and the ladder is armed again.
-    ///
-    /// Lets a caller bound the escalation's lifetime -- re-baselining
-    /// at a major iteration, or on entering a restoration
-    /// sub-problem -- instead of letting one hard factorization govern
-    /// the rest of the solve (issue #192). The cached symbolic
-    /// factorization is preserved.
-    fn reset_quality(&mut self) -> bool {
-        self.inner.reset_quality()
     }
 
     // ---- properties ----

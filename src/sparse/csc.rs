@@ -340,34 +340,6 @@ impl CscMatrix {
         }
     }
 
-    /// Absolute symmetric matrix-vector product: `y = |A| * |x|`.
-    ///
-    /// Same traversal as [`symv`](Self::symv) — stored lower triangle,
-    /// symmetry applied implicitly — with `abs` on both factors, so no
-    /// cancellation can occur and every partial sum is non-negative.
-    ///
-    /// This is the denominator of the componentwise backward error
-    /// `ω = maxᵢ |rᵢ| / (|A|·|x| + |b|)ᵢ` used by
-    /// [`StopCriterion::BackwardError`](crate::numeric::solve::StopCriterion::BackwardError).
-    /// It costs one pass over the stored entries and, unlike anything
-    /// derived from a condition-number estimate, **no extra solves**.
-    pub fn abs_symv(&self, x: &[f64], y: &mut [f64]) {
-        for yi in y.iter_mut().take(self.n) {
-            *yi = 0.0;
-        }
-        for j in 0..self.n {
-            let axj = x[j].abs();
-            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
-                let i = self.row_idx[k];
-                let v = self.values[k].abs();
-                y[i] += v * axj;
-                if i != j {
-                    y[j] += v * x[i].abs();
-                }
-            }
-        }
-    }
-
     /// Convert to dense symmetric matrix.
     pub fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix {
         self.to_dense_into(Vec::new())
@@ -405,79 +377,7 @@ impl CscMatrix {
 
 #[cfg(test)]
 mod tests {
-    // --- `abs_symv` (issue #190) -------------------------------------
-    //
-    // `abs_symv` is the denominator of the componentwise backward error.
-    // Two properties pin it down: it agrees with `symv` whenever no sign
-    // can differ, and it does not agree when a sign can — the second is
-    // what would fail if `abs_symv` were accidentally aliased to `symv`.
-
     use super::*;
-
-    /// Lower triangle of [[4, 1, 0], [1, 3, 1], [0, 1, 2]].
-    fn sym3_positive() -> CscMatrix {
-        CscMatrix::from_triplets(
-            3,
-            &[0, 1, 1, 2, 2],
-            &[0, 0, 1, 1, 2],
-            &[4.0, 1.0, 3.0, 1.0, 2.0],
-        )
-        .expect("sym3")
-    }
-
-    #[test]
-    fn abs_symv_equals_symv_when_nothing_can_change_sign() {
-        let m = sym3_positive();
-        let x = [0.5, 0.25, 0.125];
-        let (mut a, mut b) = (vec![0.0; 3], vec![0.0; 3]);
-        m.symv(&x, &mut a);
-        m.abs_symv(&x, &mut b);
-        assert_eq!(a, b, "non-negative A and x: |A||x| must equal Ax");
-    }
-
-    #[test]
-    fn abs_symv_differs_from_symv_when_signs_cancel() {
-        // Same matrix, but x straddles zero so `symv` cancels and
-        // `abs_symv` cannot. This is the assertion that fails if
-        // `abs_symv` forgets either `abs`.
-        let m = sym3_positive();
-        let x = [1.0, -1.0, 1.0];
-        let (mut a, mut b) = (vec![0.0; 3], vec![0.0; 3]);
-        m.symv(&x, &mut a);
-        m.abs_symv(&x, &mut b);
-        // Row 0:  4*1 + 1*(-1) = 3   vs   4*1 + 1*1 = 5
-        assert_eq!(a[0], 3.0);
-        assert_eq!(b[0], 5.0);
-        // Row 1:  1*1 + 3*(-1) + 1*1 = -1  vs  1 + 3 + 1 = 5
-        assert_eq!(a[1], -1.0);
-        assert_eq!(b[1], 5.0);
-        // Row 2:  1*(-1) + 2*1 = 1   vs   1*1 + 2*1 = 3
-        assert_eq!(a[2], 1.0);
-        assert_eq!(b[2], 3.0);
-    }
-
-    #[test]
-    fn abs_symv_negates_both_factors_not_just_one() {
-        // A with negative entries, x non-negative: catches an
-        // implementation that took |x| but not |A|.
-        let m =
-            CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[-2.0, -3.0, -4.0]).expect("neg");
-        let x = [1.0, 1.0];
-        let mut y = vec![0.0; 2];
-        m.abs_symv(&x, &mut y);
-        assert_eq!(y, vec![5.0, 7.0]);
-    }
-
-    #[test]
-    fn abs_symv_handles_an_empty_column() {
-        // Structurally empty row/column 1 — the `d_i == 0` case that
-        // `backward_error` treats specially.
-        let m = CscMatrix::from_triplets(2, &[0], &[0], &[1.0]).expect("empty col");
-        let x = [1.0, 0.0];
-        let mut y = vec![0.0; 2];
-        m.abs_symv(&x, &mut y);
-        assert_eq!(y, vec![1.0, 0.0]);
-    }
 
     fn sample_3x3() -> CscMatrix {
         // [ 2 -1  0 ]

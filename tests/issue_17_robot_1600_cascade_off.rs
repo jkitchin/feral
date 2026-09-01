@@ -112,8 +112,5 @@ fn robot_1600_iter_3_matches_mumps_inertia_with_defaults() {
         }
         FactorStatus::Singular => panic!("robot_1600_0003 reported Singular under defaults"),
         FactorStatus::FatalError(e) => panic!("robot_1600_0003 fatal error: {e:?}"),
-        // Issue #194: unreachable — this Solver is never armed with an
-        // interrupt flag. Matched explicitly rather than by wildcard.
-        FactorStatus::Interrupted => panic!("unexpected Interrupted on an unarmed Solver"),
     }
 }

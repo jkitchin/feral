@@ -46,7 +46,6 @@ fn status_short(s: &FactorStatus) -> String {
             format!("WrongInertia(act {actual:?} exp {expected:?})")
         }
         FactorStatus::FatalError(e) => format!("FatalError({e:?})"),
-        FactorStatus::Interrupted => "Interrupted".to_string(),
     }
 }
 
