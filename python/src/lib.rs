@@ -30,8 +30,7 @@ use pyo3::wrap_pyfunction;
 
 use common::{
     Inertia, QUALITY_BASELINE, QUALITY_EXHAUSTED, QUALITY_PIVOT_RAISED, QUALITY_SCALING_ENABLED,
-    STATUS_INTERRUPTED, STATUS_NUMERIC_FAILURE, STATUS_SINGULAR, STATUS_SUCCESS,
-    STATUS_WRONG_INERTIA,
+    STATUS_NUMERIC_FAILURE, STATUS_SINGULAR, STATUS_SUCCESS, STATUS_WRONG_INERTIA,
 };
 use factors::Factors;
 use introspect::{
@@ -72,7 +71,6 @@ fn _feral(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     status.set_item("SINGULAR", STATUS_SINGULAR)?;
     status.set_item("WRONG_INERTIA", STATUS_WRONG_INERTIA)?;
     status.set_item("NUMERIC_FAILURE", STATUS_NUMERIC_FAILURE)?;
-    status.set_item("INTERRUPTED", STATUS_INTERRUPTED)?;
     m.add("_STATUS_CODES", status)?;
 
     let quality = PyDict::new_bound(py);

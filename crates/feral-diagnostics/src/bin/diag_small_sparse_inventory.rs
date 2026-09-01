@@ -160,7 +160,6 @@ fn run_one(matrix: &CscMatrix, method: OrderingMethod) -> (Option<usize>, Option
         FactorStatus::Singular => "singular",
         FactorStatus::WrongInertia { .. } => "wrong_inertia",
         FactorStatus::FatalError(_) => "fatal",
-        FactorStatus::Interrupted => "interrupted",
     };
     let nnz_l = solver.factors().map(|f| f.factor_nnz());
     let factor_us = if matches!(status, FactorStatus::Success) {

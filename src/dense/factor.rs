@@ -415,61 +415,19 @@ pub(crate) fn ssids_det_floor_fail(d11: f64, d21: f64, d22: f64) -> bool {
 /// 1e6 is a conservative trigger: matrices with growth in [2.78, 1e6]
 /// converge in 1–2 IR steps without being flagged here; matrices above
 /// 1e6 are catastrophic and need IR for any reasonable accuracy.
-/// Multiplier bound used when no pivot threshold is in force.
-///
-/// With `pivot_threshold = 0.0` every non-zero pivot is accepted, so the
-/// factorization makes no promise about `|L_ij|` and there is no
-/// invariant to check. This absolute constant is the fallback: it is a
-/// magnitude, not a growth factor, and it is only as meaningful as the
-/// caller's scaling. Callers that want a real signal should set a pivot
-/// threshold.
 const L_GROWTH_THRESHOLD: f64 = 1e6;
 
-/// Multiplier bound implied by the pivot threshold actually in force.
-///
-/// Threshold partial pivoting accepts a candidate only when it is within
-/// a factor `u` of its column maximum, which bounds the multipliers by
-/// `|L_ij| <= 1/u`. That is the promise the factorization makes, so it
-/// is also the right thing to check it against: exceeding it means the
-/// pivoting did not deliver its own contract on this matrix, which is
-/// exactly when plain substitution is untrustworthy.
-///
-/// The bound moves with the threshold, which is what makes it useful
-/// under an interior-point host: `Solver::increase_quality` walks `u`
-/// from 1e-8 up towards `pivtol_max = 0.5`, tightening the promise at
-/// each step, and the signal tightens with it.
-fn multiplier_bound(params: &BunchKaufmanParams) -> f64 {
-    if params.pivot_threshold > 0.0 {
-        1.0 / params.pivot_threshold
-    } else {
-        L_GROWTH_THRESHOLD
-    }
-}
-
-/// Sets `*needs_refinement = true` when any `|L_ij|` exceeds the
-/// multiplier bound the pivot threshold promised (see
-/// [`multiplier_bound`]). Called at every dense-factor exit path so
-/// callers using plain `Solver::solve` (rather than `solve_refined`) get
-/// a programmatic signal — `factors.needs_refinement` — that the factor
-/// is too unstable for plain forward/back substitution.
-///
-/// This used to compare against a fixed `1e6` regardless of the
-/// threshold in force, which made it a statement about the *magnitude*
-/// of `L` rather than about growth, and therefore about the caller's
-/// scaling rather than about the factorization. A matrix carrying
-/// entries around `1e13` trips a fixed `1e6` on factorizations whose
-/// actual growth factor `max|L| / max|A|` is orders of magnitude *below*
-/// one — `L` entries smaller than the matrix's own — purely because
-/// `1e6` is not a scale-free number. At a caller's `u = 1e-8` the
-/// promised bound is `1e8`, so such an `|L|` is inside the contract and
-/// should not flag. The flag now says so.
-fn flag_growth_for_refinement(l: &[f64], params: &BunchKaufmanParams, needs_refinement: &mut bool) {
+/// Sets `*needs_refinement = true` when any `|L_ij| > L_GROWTH_THRESHOLD`.
+/// Called at every dense-factor exit path so callers using plain
+/// `Solver::solve` (rather than `solve_refined`) get a programmatic
+/// signal — `factors.needs_refinement` — that the factor is too
+/// unstable for plain forward/back substitution.
+fn flag_growth_for_refinement(l: &[f64], needs_refinement: &mut bool) {
     if *needs_refinement {
         return;
     }
-    let bound = multiplier_bound(params);
     for &v in l {
-        if v.abs() > bound {
+        if v.abs() > L_GROWTH_THRESHOLD {
             *needs_refinement = true;
             return;
         }
@@ -733,58 +691,6 @@ pub struct BunchKaufmanParams {
     /// fronts (the FMA path is one ULP per accumulate off nofma; see
     /// `schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps`).
     pub fma_min_front_rows: Option<usize>,
-
-    /// Cooperative cancellation flag (issue #194). `None` (default) is
-    /// the uninterruptible path: every poll site short-circuits on an
-    /// `Option::is_some` branch and no atomic is ever touched.
-    ///
-    /// When `Some(flag)`, the factorization polls `flag` with
-    /// [`Ordering::Relaxed`](std::sync::atomic::Ordering::Relaxed) and
-    /// aborts with [`FeralError::Interrupted`] the first time it reads
-    /// `true`. Polling happens at supernode boundaries in both
-    /// multifrontal drivers and, within a supernode, at dense panel
-    /// boundaries in the frontal factor — coarse enough to stay off the
-    /// inner kernels (each poll guards at least `O(nrow)` of work),
-    /// frequent enough that the overshoot is one panel rather than one
-    /// front. Supernode boundaries alone would not be enough: a
-    /// delayed-pivot cascade concentrates the cost of a whole
-    /// factorization into a handful of very wide fronts (issue #8
-    /// measured 118k delayed pivots landing in three ~14k-column
-    /// expanded fronts).
-    ///
-    /// Relaxed is the right ordering: the flag carries no data
-    /// dependency — nothing else the setter wrote is read here — and a
-    /// missed observation costs one more panel before the next poll.
-    ///
-    /// The flag is **caller-owned and read-only to feral**: feral never
-    /// sets or clears it, so re-arming after an interrupt is the
-    /// caller's `store(false)`. On interrupt no factors are produced and
-    /// no partial result is promised. Arm it on a `Solver` with
-    /// [`Solver::with_interrupt`](crate::Solver::with_interrupt) or
-    /// [`Solver::set_interrupt`](crate::Solver::set_interrupt).
-    ///
-    /// This lives on `BunchKaufmanParams` rather than on
-    /// [`NumericParams`](crate::NumericParams) so that the one field is
-    /// visible to *both* the multifrontal driver loops (which read
-    /// `params.bk`) and the dense frontal factor (which is handed only
-    /// `&BunchKaufmanParams`), with no cross-struct sync step of the
-    /// kind that made [`fma`](Self::fma) a silent no-op before finding
-    /// N1. Deadline policy — wall vs CPU vs budget — stays with the
-    /// caller; feral holds no clock.
-    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-}
-
-impl BunchKaufmanParams {
-    /// Has the caller requested cancellation? `false` — via a
-    /// perfectly-predicted branch, with no atomic access — whenever
-    /// [`interrupt`](Self::interrupt) is unarmed. Issue #194.
-    #[inline]
-    pub fn interrupt_requested(&self) -> bool {
-        match &self.interrupt {
-            Some(flag) => flag.load(std::sync::atomic::Ordering::Relaxed),
-            None => false,
-        }
-    }
 }
 
 /// Minimum trailing-update area `(nrow - j_start) * n_elim` below which
@@ -979,8 +885,6 @@ impl Default for BunchKaufmanParams {
             static_pivot_floor: 0.0,
             intrafront_parallel: false,
             fma_min_front_rows: None,
-            // Issue #194: uninterruptible by default. See the field doc.
-            interrupt: None,
         }
     }
 }
@@ -1421,7 +1325,7 @@ pub fn factor(
 
     let inertia = Inertia::new(pos, neg, zero);
 
-    flag_growth_for_refinement(&l, params, &mut needs_refinement);
+    flag_growth_for_refinement(&l, &mut needs_refinement);
 
     Ok((
         Factors {
@@ -1914,14 +1818,6 @@ fn factor_frontal_in_place_with_scratch_impl(
     // Factor only the first ncol columns. Pivot search is restricted to
     // [k, ncol_eff); `ncol_eff` shrinks as stuck columns are delayed.
     while k < ncol_eff {
-        // Issue #194: cooperative cancellation poll. One perfectly-
-        // predicted branch when unarmed; one relaxed load when armed.
-        // Guards at least `O(nrow)` of work (`scalar_pivot_step` scans
-        // and updates the trailing columns), so this is well off the
-        // inner kernels.
-        if params.interrupt_requested() {
-            return Err(FeralError::Interrupted);
-        }
         match scalar_pivot_step(
             a,
             nrow,
@@ -2041,7 +1937,7 @@ fn factor_frontal_in_place_with_scratch_impl(
         perm_inv[p] = i;
     }
 
-    flag_growth_for_refinement(&l, params, &mut needs_refinement);
+    flag_growth_for_refinement(&l, &mut needs_refinement);
 
     let result = FrontalFactors {
         nrow,
@@ -2327,18 +2223,6 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     // delays, so `ncol_eff` then stays `== ncol`.
     let mut ncol_eff = ncol;
     while k < ncol_eff {
-        // Issue #194: cooperative cancellation poll, once per panel (or
-        // once per scalar-tail pivot). Each iteration below performs at
-        // least `O(nrow)` work — a panel factor plus its deferred Schur
-        // update is far more — so the poll is one level out from the hot
-        // kernels, which is what makes a ~14k-column cascade front
-        // (issue #8) interruptible at all. `pack_pool` was moved out of
-        // `scratch` above; returning here drops it, and the next call
-        // re-allocates once, exactly as the other early error returns in
-        // this function do.
-        if params.interrupt_requested() {
-            return Err(FeralError::Interrupted);
-        }
         let remaining = ncol_eff - k;
         // Scalar tail engages when too few columns are left to amortize
         // the deferred-Schur dispatch. With W-1 the first panel may
@@ -2575,7 +2459,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         perm_inv[p] = i;
     }
 
-    flag_growth_for_refinement(&l, params, &mut needs_refinement);
+    flag_growth_for_refinement(&l, &mut needs_refinement);
 
     // Return the pack pool to the scratch for the next front.
     scratch.pack_pool = pack_pool;
@@ -2812,7 +2696,7 @@ pub fn factor_frontal_diagonal_in_place(
     let perm_inv = perm.clone();
 
     let mut needs_refinement = false;
-    flag_growth_for_refinement(&l, params, &mut needs_refinement);
+    flag_growth_for_refinement(&l, &mut needs_refinement);
 
     Ok(FrontalFactors {
         nrow,
@@ -5855,28 +5739,11 @@ fn set_l_column_identity(a: &mut [f64], n: usize, k: usize) {
 mod growth_flag_tests {
     use super::*;
 
-    /// The old fixed-`1e6` behaviour, which is now what you get only when
-    /// no pivot threshold is in force — i.e. when the factorization made
-    /// no promise and there is no invariant to check.
-    fn no_threshold() -> BunchKaufmanParams {
-        BunchKaufmanParams {
-            pivot_threshold: 0.0,
-            ..BunchKaufmanParams::default()
-        }
-    }
-
-    fn with_threshold(u: f64) -> BunchKaufmanParams {
-        BunchKaufmanParams {
-            pivot_threshold: u,
-            ..BunchKaufmanParams::default()
-        }
-    }
-
     #[test]
     fn growth_below_threshold_does_not_flag() {
         let l = vec![1.0, 2.78, -2.5, 0.0, 100.0, -999_999.0];
         let mut flag = false;
-        flag_growth_for_refinement(&l, &no_threshold(), &mut flag);
+        flag_growth_for_refinement(&l, &mut flag);
         assert!(!flag, "max|L| = 999_999 < 1e6 should not flag");
     }
 
@@ -5884,7 +5751,7 @@ mod growth_flag_tests {
     fn growth_above_threshold_flags() {
         let l = vec![1.0, 2.0, 1.5e6, -3.0];
         let mut flag = false;
-        flag_growth_for_refinement(&l, &no_threshold(), &mut flag);
+        flag_growth_for_refinement(&l, &mut flag);
         assert!(flag, "max|L| = 1.5e6 > 1e6 must flag");
     }
 
@@ -5892,7 +5759,7 @@ mod growth_flag_tests {
     fn catastrophic_growth_flags() {
         let l = vec![1.0, 1.0, 8.06e16, 1.0];
         let mut flag = false;
-        flag_growth_for_refinement(&l, &no_threshold(), &mut flag);
+        flag_growth_for_refinement(&l, &mut flag);
         assert!(flag, "max|L| = 8e16 (bratu3d-class) must flag");
     }
 
@@ -5900,7 +5767,7 @@ mod growth_flag_tests {
     fn negative_large_entry_flags() {
         let l = vec![-2e10, 1.0];
         let mut flag = false;
-        flag_growth_for_refinement(&l, &no_threshold(), &mut flag);
+        flag_growth_for_refinement(&l, &mut flag);
         assert!(flag, "negative large |L| must flag");
     }
 
@@ -5908,7 +5775,7 @@ mod growth_flag_tests {
     fn already_set_flag_is_preserved() {
         let l = vec![0.0, 0.0]; // would not flag on its own
         let mut flag = true; // pre-set by zero-pivot path
-        flag_growth_for_refinement(&l, &no_threshold(), &mut flag);
+        flag_growth_for_refinement(&l, &mut flag);
         assert!(flag, "must not clobber pre-set flag");
     }
 
@@ -5916,7 +5783,7 @@ mod growth_flag_tests {
     fn empty_l_does_not_flag() {
         let l: Vec<f64> = vec![];
         let mut flag = false;
-        flag_growth_for_refinement(&l, &no_threshold(), &mut flag);
+        flag_growth_for_refinement(&l, &mut flag);
         assert!(!flag);
     }
 
@@ -5927,54 +5794,8 @@ mod growth_flag_tests {
         // always also has Inf. This is an explicit doc of behavior.
         let l_inf = vec![1.0, f64::INFINITY];
         let mut flag = false;
-        flag_growth_for_refinement(&l_inf, &no_threshold(), &mut flag);
+        flag_growth_for_refinement(&l_inf, &mut flag);
         assert!(flag, "Inf entry must trigger");
-    }
-
-    /// The bound tracks the threshold rather than a constant. At
-    /// `u = 1e-8` the promise is `|L| <= 1e8`, so an `|L|` of 5.1e7 is
-    /// inside the contract and must not flag, even though it is fifty
-    /// times the old fixed `1e6`.
-    #[test]
-    fn the_bound_follows_the_pivot_threshold() {
-        let inside = vec![1.0, 5.07e7, -2.46e6];
-        let mut flag = false;
-        flag_growth_for_refinement(&inside, &with_threshold(1e-8), &mut flag);
-        assert!(!flag, "|L| = 5.07e7 is inside the 1/u = 1e8 promise");
-
-        // The same L against the old constant: this is the regression
-        // being fixed: a scale-free bound and a fixed one disagree
-        // here, and the fixed one is wrong.
-        let mut flag = false;
-        flag_growth_for_refinement(&inside, &no_threshold(), &mut flag);
-        assert!(flag, "the fallback still uses the absolute constant");
-    }
-
-    /// ...and a genuine violation still flags. A `max|L|` of `4.2e13` at
-    /// `u = 1e-8` is five orders past the promise: the pivoting did not
-    /// deliver its own contract, which is precisely the condition the
-    /// flag exists to report.
-    #[test]
-    fn a_multiplier_past_the_promise_still_flags() {
-        let violating = vec![1.0, 4.24e13];
-        let mut flag = false;
-        flag_growth_for_refinement(&violating, &with_threshold(1e-8), &mut flag);
-        assert!(flag, "|L| = 4.24e13 is five orders past 1/u = 1e8");
-    }
-
-    /// Escalation tightens the promise, so it must tighten the signal.
-    /// `Solver::increase_quality` walks `u` from 1e-8 towards 0.5; the
-    /// same `L` that was acceptable at 1e-8 is a violation at 0.5.
-    #[test]
-    fn raising_the_threshold_tightens_the_signal() {
-        let l = vec![1.0, 1e3];
-        let mut flag = false;
-        flag_growth_for_refinement(&l, &with_threshold(1e-8), &mut flag);
-        assert!(!flag, "|L| = 1e3 is well inside 1/u = 1e8");
-
-        let mut flag = false;
-        flag_growth_for_refinement(&l, &with_threshold(0.5), &mut flag);
-        assert!(flag, "|L| = 1e3 is past 1/u = 2 at MA27-style u = 0.5");
     }
 }
 

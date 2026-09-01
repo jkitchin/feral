@@ -116,7 +116,6 @@ fn status_short(s: &FactorStatus) -> &'static str {
         FactorStatus::Singular => "Singular",
         FactorStatus::WrongInertia { .. } => "WrongInertia",
         FactorStatus::FatalError(_) => "FatalError",
-        FactorStatus::Interrupted => "Interrupted",
     }
 }
 

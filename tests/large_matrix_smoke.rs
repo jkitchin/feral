@@ -239,13 +239,6 @@ fn smoke_one(
             failures.push(format!("{name}: factor fatal: {e}"));
             return SmokeOutcome::Failed;
         }
-        // Issue #194: unreachable — the smoke harness never arms an
-        // interrupt flag — but a silent wildcard here would hide it if
-        // that ever changed.
-        FactorStatus::Interrupted => {
-            failures.push(format!("{name}: factor interrupted on an unarmed Solver"));
-            return SmokeOutcome::Failed;
-        }
     }
 
     let t = Instant::now();

@@ -167,28 +167,6 @@ def test_estimate_condition():
     assert np.isfinite(cond)
 
 
-def test_quality_reset_rebaselines_escalation():
-    """Issue #192: the escalation must be revertible from Python too."""
-    A = spd_3x3()
-    solver = feral.Solver()
-    solver.factor(A)
-    assert solver.quality_level == feral.QualityLevel.BASELINE
-
-    assert solver.increase_quality() is True
-    assert solver.quality_level != feral.QualityLevel.BASELINE
-
-    assert solver.reset_quality() is True
-    assert solver.quality_level == feral.QualityLevel.BASELINE
-
-    # Idempotent: a second reset has nothing to undo.
-    assert solver.reset_quality() is False
-    assert solver.quality_level == feral.QualityLevel.BASELINE
-
-    # The solver is still usable at factory parameters.
-    status, _ = solver.factor(A)
-    assert status == feral.FactorStatus.SUCCESS
-
-
 def test_repr():
     A = spd_3x3()
     assert "n=3" in repr(A)

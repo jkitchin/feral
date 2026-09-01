@@ -162,39 +162,13 @@ The step budget is a per-call parameter. `RefineOptions::with_max_steps(k)`
 caps the *correction* steps at `k` (the initial solve always runs, so a call
 does at most `k + 1` substitution passes); `RefineOptions::default()` is the
 historical budget, `DEFAULT_REFINE_MAX_STEPS = 10`. It is a cap, not a target:
-the convergence test, the divergence guard, and the plateau exit all keep
+the `ε·√n` residual test, the divergence guard, and the plateau exit all keep
 priority, and best-iterate holds under every `k`, so no cap returns an answer
 worse than the unrefined solve. `k = 0` *is* the unrefined solve, and costs the
 same — the residual matvec is skipped rather than computed and discarded. The
 caller that wants this is one running its own refinement loop over the same
 system, an interior-point method being the standard case: without a cap the two
 loops nest and one solve can cost `10 × 11 = 110` passes.
-
-What counts as converged is a per-call parameter too. `RefineOptions::default()`
-keeps FERAL's historical `ε·√n` relative-residual test, which is *normwise*
-and so is dominated by the rows where `|bᵢ|` is largest. On a badly-scaled
-right-hand side it can stop at what looks like a perfect solve while the
-solution is nowhere near backward stable — measured on `bratu3d` with `b`
-spanning `1e-6…1e6`, it converges immediately at `‖r‖₂/‖b‖₂ = 4.1e-16` with a
-componentwise backward error of `9.0e-6`. `RefineOptions::with_target(t)`
-stops at `||r||₂ ≤ t·||b||₂`, and `RefineOptions::with_backward_error(t)` stops at
-the componentwise backward error `maxᵢ |rᵢ| / (|A||x| + |b|)ᵢ ≤ t`
-(Arioli–Demmel–Duff; the quantity MA57 reports in `RINFO(6..8)`). The
-componentwise form is the one with a principled stopping value — `t` of order
-`ε` means "as good as a backward-stable factorization would have returned",
-independent of `n` and of row scaling — and it costs one extra pass over `A`
-per step and no extra solves. The `*_refined_into` entry points return a
-`RefineOutcome { steps, relative_residual, stop }` so the caller can see which
-of `Converged`/`MaxSteps`/`Stagnated`/`Diverged` ended the loop.
-
-This is an accuracy knob, not a speed knob. On seven matrices up to
-`n = 180 900` with a badly-scaled RHS, one `BackwardError` step takes the
-componentwise error from as bad as `9.5e-5` to `~3e-16` and costs about one
-extra solve; with a well-scaled RHS the default already converges in 0–2
-steps, so there are no wasted iterations to reclaim. Note also that a
-componentwise target below what the factorization can deliver overruns just
-as an unreachable normwise one does — on `qap15_kkt`, `1e-14` runs 8 steps to
-`Stagnated` at `4.2e-11` where `1e-10` reaches `4.4e-11` in 3. Read `stop`.
 
 Every entry point has an `_opts` form taking `RefineOptions` and an `_into`
 form writing into a caller-owned buffer instead of allocating —

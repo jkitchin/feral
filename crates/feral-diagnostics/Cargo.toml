@@ -35,16 +35,3 @@ serde_json = "1"
 # Some probes call the SIMD Schur kernel / parallel driver directly.
 pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
 rayon = "1.10"
-
-[features]
-# Forwards to `feral/kernel-probe`, which exposes the in-process multi-RHS
-# dispatch override. Off by default; `probe_blas3_crossover` requires it, so
-# with the feature off Cargo skips that binary entirely (including under
-# `clippy --all-targets`).
-kernel-probe = ["feral/kernel-probe"]
-
-# `autobins = true` picks up every other probe; this one needs an explicit
-# stanza only to carry `required-features`.
-[[bin]]
-name = "probe_blas3_crossover"
-required-features = ["kernel-probe"]

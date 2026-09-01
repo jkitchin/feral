@@ -33,14 +33,6 @@ pub const FERAL_SUCCESS: i32 = 0;
 pub const FERAL_SINGULAR: i32 = 1;
 pub const FERAL_WRONG_INERTIA: i32 = 2;
 pub const FERAL_FATAL: i32 = 3;
-/// Issue #194: the factorization stopped because the caller's
-/// cooperative interrupt flag was set. No factor is stored.
-///
-/// Unreachable through this ABI today — the C surface owns its `Solver`
-/// internally and has no way to arm the flag — but defined and mapped so
-/// the Rust-side `FactorStatus` match stays exhaustive and an interrupt
-/// is never silently reported as `FERAL_FATAL`.
-pub const FERAL_INTERRUPTED: i32 = 4;
 
 /// Opaque handle.
 pub struct FeralSolver {
@@ -416,11 +408,6 @@ pub unsafe extern "C" fn feral_factor(
                 // No valid inertia — invalidate (see Singular branch, X1).
                 s.neg_evals = -1;
                 FERAL_FATAL
-            }
-            FactorStatus::Interrupted => {
-                // No valid inertia — invalidate (see Singular branch, X1).
-                s.neg_evals = -1;
-                FERAL_INTERRUPTED
             }
         }
     }))

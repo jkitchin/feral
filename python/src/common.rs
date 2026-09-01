@@ -39,12 +39,6 @@ pub(crate) const STATUS_SUCCESS: i32 = 0;
 pub(crate) const STATUS_SINGULAR: i32 = 1;
 pub(crate) const STATUS_WRONG_INERTIA: i32 = 2;
 pub(crate) const STATUS_NUMERIC_FAILURE: i32 = 3;
-/// Issue #194: the Rust `FactorStatus::Interrupted`. Mirrored here so the
-/// Rust-side match stays exhaustive and a cancellation is never reported
-/// as a numeric failure. Not observable from Python today — these
-/// bindings expose no way to arm `Solver::with_interrupt`, so the Rust
-/// solver underneath is always unarmed.
-pub(crate) const STATUS_INTERRUPTED: i32 = 4;
 
 // ----------------------------------------------------------------------
 // QualityLevel codes (matching the Python IntEnum).

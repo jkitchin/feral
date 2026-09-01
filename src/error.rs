@@ -33,22 +33,6 @@ pub enum FeralError {
     /// `dev/research/sqd-fast-path.md` and issue #34.
     SqdContractViolated { column: usize, pivot: f64 },
 
-    /// A cooperative interrupt was requested: the caller-armed
-    /// `Arc<AtomicBool>` on
-    /// [`BunchKaufmanParams::interrupt`](crate::BunchKaufmanParams::interrupt)
-    /// was observed set at a supernode boundary, or at a dense panel
-    /// boundary within a supernode. The factorization stopped where it
-    /// stood; no factors are produced and no partial result is promised.
-    ///
-    /// Raised only when the caller armed the flag — an unarmed
-    /// factorization can never return this. `Solver::factor` maps it to
-    /// [`FactorStatus::Interrupted`](crate::FactorStatus::Interrupted),
-    /// clears any stored factor, and a subsequent `factor()` (once the
-    /// caller clears the flag) re-runs cleanly. feral only ever *reads*
-    /// the flag: clearing and re-arming belong to the caller. See issue
-    /// #194 and `dev/research/issue-194-cooperative-interrupt.md`.
-    Interrupted,
-
     /// A supernode received more delayed pivots from its children at
     /// numeric time than the symbolic-analysis phase budgeted for.
     /// Mirrors MUMPS's `INFO(2)` workspace-overflow path: a predictable,
@@ -127,12 +111,6 @@ impl std::fmt::Display for FeralError {
                     "delayed-pivot budget exceeded at supernode {}: \
                      required {} delayed columns, capacity {} (issue #55)",
                     supernode, required, capacity
-                )
-            }
-            FeralError::Interrupted => {
-                write!(
-                    f,
-                    "factorization interrupted by the caller's interrupt flag"
                 )
             }
             FeralError::SingularBasis { column } => {

@@ -19,8 +19,8 @@ use crate::numeric::factorize::{
 };
 use crate::numeric::solve::{
     solve_sparse, solve_sparse_into, solve_sparse_many, solve_sparse_many_into,
-    solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions, RefineOutcome,
-    RefineStop, SolveManyWorkspace, BLAS3_REFINE_THRESHOLD,
+    solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions,
+    SolveManyWorkspace, BLAS3_REFINE_THRESHOLD,
 };
 use crate::scaling::{
     mc64_value_bound_passes, pick_scaling_strategy, precompute_mc64_validity, Mc64CacheValidity,
@@ -32,7 +32,6 @@ use crate::symbolic::{
     symbolic_factorize_with_method, OrderingMethod, SymbolicFactorization, SymbolicProfileReport,
     SymbolicProfiler,
 };
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// Snapshot of per-`factor()` diagnostic state for issue #52
@@ -98,20 +97,6 @@ pub enum FactorStatus {
     /// Unrecoverable error (dimension mismatch, alloc failure,
     /// symbolic-analysis failure).
     FatalError(FeralError),
-    /// The caller-armed interrupt flag was observed set, and the
-    /// factorization stopped where it stood (issue #194).
-    ///
-    /// Contract: the `Solver`'s factors are left invalid, exactly as
-    /// after any failed factor — `inertia()` is `None` and `solve()`
-    /// returns [`FeralError::NoFactor`]. No partial result is promised,
-    /// and there is no guarantee about *when* within a dense panel the
-    /// check fires. Once the caller clears its flag, a subsequent
-    /// `factor()` re-runs cleanly.
-    ///
-    /// Only reachable when the caller armed a flag via
-    /// [`Solver::with_interrupt`] / [`Solver::set_interrupt`]; an
-    /// unarmed `Solver` never returns this.
-    Interrupted,
 }
 
 /// Quality-escalation state. Mirrors Ipopt's two-stage
@@ -126,21 +111,6 @@ pub enum QualityLevel {
     PivotRaised,
     /// Both stages exhausted; `pivot_threshold` is at `pivtol_max`.
     Exhausted,
-}
-
-/// Factory snapshot of the two parameters `increase_quality`
-/// mutates, taken on the transition out of `QualityLevel::Baseline`
-/// so `reset_quality` can restore them exactly (issue #192).
-///
-/// Snapshotted at the start of the ladder rather than at
-/// construction: the `with_*` builders are consuming and run *after*
-/// `with_params`, so a construction-time snapshot would record
-/// pre-builder values and a reset would silently discard the
-/// caller's configuration.
-#[derive(Debug, Clone)]
-struct QualityBaseline {
-    scaling: ScalingStrategy,
-    pivot_threshold: f64,
 }
 
 /// Structural fingerprint used to detect when the cached
@@ -219,10 +189,6 @@ pub struct Solver {
     snode_params: SupernodeParams,
     pivtol_max: f64,
     quality_level: QualityLevel,
-    /// Parameters to restore in `reset_quality`. `None` while at
-    /// `QualityLevel::Baseline`; `Some` for the duration of an
-    /// escalation. See `QualityBaseline`.
-    quality_baseline: Option<QualityBaseline>,
     last_symbolic: Option<SymbolicFactorization>,
     last_factors: Option<SparseFactors>,
     last_inertia: Option<Inertia>,
@@ -457,7 +423,6 @@ impl Solver {
             snode_params: sn,
             pivtol_max: 0.5,
             quality_level: QualityLevel::Baseline,
-            quality_baseline: None,
             last_symbolic: None,
             last_factors: None,
             last_inertia: None,
@@ -606,78 +571,6 @@ impl Solver {
     pub fn with_parallel(mut self, parallel: bool) -> Self {
         self.use_parallel = parallel;
         self
-    }
-
-    /// Arm cooperative cancellation for subsequent [`factor`](Self::factor)
-    /// calls (issue #194).
-    ///
-    /// A host enforcing a wall-clock budget cannot enforce it across a
-    /// single `factor` call: it never regains control to check its own
-    /// deadline. Arming a shared `AtomicBool` gives it a way to ask.
-    /// While armed, `factor` polls the flag at supernode boundaries and,
-    /// within a supernode, at dense panel boundaries; the first
-    /// observation of `true` aborts the factorization and `factor`
-    /// returns [`FactorStatus::Interrupted`].
-    ///
-    /// **Contract.** On `Interrupted` the `Solver`'s factors are left
-    /// invalid, exactly as after any failed factor: [`inertia`](Self::inertia)
-    /// is `None` and [`solve`](Self::solve) returns
-    /// [`FeralError::NoFactor`]. No partial results are promised, and
-    /// there is no guarantee about *when* within a panel the check
-    /// fires. Once the caller clears the flag, a subsequent `factor`
-    /// re-runs cleanly — the reused symbolic cache, permute cache and
-    /// numeric workspace all survive an interrupt.
-    ///
-    /// The flag is caller-owned: feral only ever *reads* it, never sets
-    /// or clears it, so re-arming after an interrupt is the caller's
-    /// `store(false, Relaxed)`.
-    ///
-    /// **Not covered.** Only the numeric factorization is polled. The
-    /// symbolic analysis on the first `factor` of a new pattern (and any
-    /// ordering escalation that re-runs it) is not interruptible; for an
-    /// IPM refactoring a fixed pattern this is a cache hit and costs
-    /// nothing, which is the case the flag exists for.
-    ///
-    /// feral holds no clock. Wall-vs-CPU-vs-budget policy stays with the
-    /// caller — this deliberately takes a flag, not a deadline.
-    ///
-    /// ```
-    /// use std::sync::atomic::{AtomicBool, Ordering};
-    /// use std::sync::Arc;
-    /// use feral::{FactorStatus, Solver};
-    ///
-    /// let cancel = Arc::new(AtomicBool::new(false));
-    /// let mut solver = Solver::new().with_interrupt(Arc::clone(&cancel));
-    /// // ... a watchdog elsewhere: cancel.store(true, Ordering::Relaxed);
-    /// # let a = feral::CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[2.0, 3.0]).unwrap();
-    /// if let FactorStatus::Interrupted = solver.factor(&a, None) {
-    ///     cancel.store(false, Ordering::Relaxed); // caller re-arms
-    /// }
-    /// ```
-    ///
-    /// See also [`set_interrupt`](Self::set_interrupt), which arms
-    /// through a `&mut` borrow and can disarm.
-    pub fn with_interrupt(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.numeric_params.bk.interrupt = Some(flag);
-        self
-    }
-
-    /// Arm or disarm cooperative cancellation through a `&mut` borrow
-    /// (issue #194). `None` disarms, restoring the zero-overhead
-    /// uninterruptible path.
-    ///
-    /// Same contract as [`with_interrupt`](Self::with_interrupt), which
-    /// this is the non-consuming form of. A backend that owns its
-    /// `Solver` behind `&mut self` cannot call a consuming builder, and
-    /// nothing else can take the flag back off.
-    pub fn set_interrupt(&mut self, flag: Option<Arc<AtomicBool>>) {
-        self.numeric_params.bk.interrupt = flag;
-    }
-
-    /// The interrupt flag this `Solver` is armed with, if any (issue
-    /// #194). `None` on a fresh `Solver`.
-    pub fn interrupt(&self) -> Option<&Arc<AtomicBool>> {
-        self.numeric_params.bk.interrupt.as_ref()
     }
 
     /// Toggle the FMA opt-in dispatch on dense trailing-update and
@@ -883,16 +776,6 @@ impl Solver {
     /// `factor()` calls) which already prevents the flap; this builder
     /// is for hosts that want full control of the choice.
     pub fn with_scaling(mut self, scaling: ScalingStrategy) -> Self {
-        // If an escalation is live, this call re-states what the
-        // caller's baseline *is* — so the snapshot `reset_quality`
-        // will restore has to move with it. Without this, pinning a
-        // strategy mid-escalation would be silently undone by the
-        // next reset, which is the issue-#51 escape hatch failing in
-        // exactly the situation it exists for (review finding 2 on
-        // PR #193, test R7).
-        if let Some(baseline) = self.quality_baseline.as_mut() {
-            baseline.scaling = scaling.clone();
-        }
         self.numeric_params.scaling = scaling;
         self
     }
@@ -1044,17 +927,6 @@ impl Solver {
     /// without invalidating the stored factor (caller may still
     /// `solve` against it). See plan §`factor()` flow.
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
-        // Issue #194: if the caller has already asked to stop, say so
-        // before doing any work at all — including the O(nnz) finite
-        // scan below and the (uninterruptible) symbolic analysis. A
-        // no-op when unarmed.
-        if self.numeric_params.bk.interrupt_requested() {
-            self.last_factors = None;
-            self.last_inertia = None;
-            self.last_nnz_a = None;
-            self.last_pattern_reused = None;
-            return FactorStatus::Interrupted;
-        }
         // Step 0: reject non-finite input. A single +∞ / -∞ / NaN
         // entry sends the BK pivot-search loop into pathological
         // behavior (every threshold test fails against the inf
@@ -1460,25 +1332,6 @@ impl Solver {
                         mc64_fallback_adopted = true;
                         Ok((rf, ri))
                     }
-                    // Issue #194: a cancellation is not evidence about
-                    // MC64. The retry never got to finish, so nothing was
-                    // learned about whether the Hungarian matching would
-                    // have improved the zero count. Propagate the
-                    // interrupt (the caller asked to stop, and the
-                    // published contract says the first observation of the
-                    // flag aborts the factorization) and leave
-                    // `mc64_retry_not_adopted` DISARMED.
-                    //
-                    // Arming it here would be a correctness bug, not just
-                    // a lost optimization: the latch is keyed on the
-                    // pattern and cleared only on a pattern change, so in
-                    // an IPM — fixed pattern for the whole solve — one
-                    // cancellation would suppress the issue-#65 rescue for
-                    // every remaining iterate, reporting unrescued inertia
-                    // where it would otherwise have recovered. See the
-                    // `mc64_retry_not_adopted` field doc on exactly that
-                    // interaction with the inertia hard rule.
-                    Err(FeralError::Interrupted) => Err(FeralError::Interrupted),
                     // MC64 did not improve the zero count (e.g. the matrix
                     // is genuinely singular) or it errored — keep the
                     // original factor. N4: latch so subsequent same-pattern
@@ -1719,18 +1572,6 @@ impl Solver {
                 self.last_pattern_reused = None;
                 FactorStatus::Singular
             }
-            // Issue #194: the caller asked to stop. Same invalidation as
-            // any other failed factor — that *is* the published contract
-            // ("factors are left invalid, exactly as after any failed
-            // factor") — but reported distinctly so a host can tell its
-            // own cancellation apart from a real failure.
-            Err(FeralError::Interrupted) => {
-                self.last_factors = None;
-                self.last_inertia = None;
-                self.last_nnz_a = None;
-                self.last_pattern_reused = None;
-                FactorStatus::Interrupted
-            }
             Err(e) => {
                 self.last_factors = None;
                 self.last_inertia = None;
@@ -1838,7 +1679,7 @@ impl Solver {
         rhs: &[f64],
         x_out: &mut [f64],
         opts: RefineOptions,
-    ) -> Result<RefineOutcome, FeralError> {
+    ) -> Result<(), FeralError> {
         let f = match &self.last_factors {
             Some(f) => f,
             None => return Err(FeralError::NoFactor),
@@ -1855,7 +1696,7 @@ impl Solver {
         rhs: &[f64],
         x_out: &mut [f64],
         opts: RefineOptions,
-    ) -> Result<RefineOutcome, FeralError> {
+    ) -> Result<(), FeralError> {
         // Issue #131 Gap A: when parallelism is on, refine through the
         // contribution-block solve core (pooled across the initial +
         // correction solves). Install on this solver's pool (built during
@@ -1987,7 +1828,7 @@ impl Solver {
         nrhs: usize,
         x_out: &mut [f64],
         opts: RefineOptions,
-    ) -> Result<RefineOutcome, FeralError> {
+    ) -> Result<(), FeralError> {
         let factors = match &self.last_factors {
             Some(f) => f,
             None => return Err(FeralError::NoFactor),
@@ -2000,12 +1841,7 @@ impl Solver {
             });
         }
         if nrhs == 0 {
-            return Ok(RefineOutcome {
-                steps: 0,
-                relative_residual: 0.0,
-                backward_error: 0.0,
-                stop: RefineStop::Converged,
-            });
+            return Ok(());
         }
         if rhs.len() != n * nrhs {
             return Err(FeralError::DimensionMismatch {
@@ -2019,46 +1855,12 @@ impl Solver {
         if nrhs >= BLAS3_REFINE_THRESHOLD {
             return solve_sparse_many_refined_into(matrix, factors, rhs, nrhs, x_out, opts);
         }
-        // Aggregate the per-column outcomes the same way the batched
-        // refiner does, so the two dispatch paths report identically
-        // (issue #190). `relative_residual` and `backward_error` are NaN
-        // under `max_steps = 0`, and `NaN > x` is false, so the max fold
-        // leaves them at 0.0 — handled explicitly rather than silently.
-        // `backward_error` is additionally NaN whenever ω is not the
-        // criterion, which is a per-*call* property, so in practice
-        // either every column reports NaN or none does.
-        let mut agg = RefineOutcome {
-            steps: 0,
-            relative_residual: 0.0,
-            backward_error: 0.0,
-            stop: RefineStop::Converged,
-        };
-        let mut any_nan = false;
-        let mut any_om_nan = false;
         for c in 0..nrhs {
             let src = &rhs[c * n..(c + 1) * n];
             let dst = &mut x_out[c * n..(c + 1) * n];
-            let o = self.refine_into(matrix, factors, src, dst, opts)?;
-            agg.steps = agg.steps.max(o.steps);
-            agg.stop = agg.stop.worst(o.stop);
-            if o.relative_residual.is_nan() {
-                any_nan = true;
-            } else if o.relative_residual > agg.relative_residual {
-                agg.relative_residual = o.relative_residual;
-            }
-            if o.backward_error.is_nan() {
-                any_om_nan = true;
-            } else if o.backward_error > agg.backward_error {
-                agg.backward_error = o.backward_error;
-            }
+            self.refine_into(matrix, factors, src, dst, opts)?;
         }
-        if any_nan {
-            agg.relative_residual = f64::NAN;
-        }
-        if any_om_nan {
-            agg.backward_error = f64::NAN;
-        }
-        Ok(agg)
+        Ok(())
     }
 
     /// Estimate `kappa_1(A) = ||A||_1 * ||A^{-1}||_1` via the
@@ -2074,8 +1876,7 @@ impl Solver {
     }
 
     /// Two-stage quality escalation. Persistent across `factor()`
-    /// calls until [`Solver::reset_quality`] reverts it. Returns
-    /// `false` when both stages are exhausted.
+    /// calls. Returns `false` when both stages are exhausted.
     /// Mirrors `IpTSymLinearSolver::IncreaseQuality`.
     ///
     /// Stage 1 (`Baseline → ScalingEnabled`): if scaling strategy
@@ -2102,13 +1903,6 @@ impl Solver {
         match self.quality_level {
             QualityLevel::Exhausted => false,
             QualityLevel::Baseline => {
-                // Leaving Baseline: snapshot what the caller
-                // configured so `reset_quality` can restore it
-                // exactly (issue #192).
-                self.quality_baseline = Some(QualityBaseline {
-                    scaling: self.numeric_params.scaling.clone(),
-                    pivot_threshold: self.numeric_params.bk.pivot_threshold,
-                });
                 // Stage 1: flip Identity → InfNorm if applicable.
                 if matches!(self.numeric_params.scaling, ScalingStrategy::Identity) {
                     self.numeric_params.scaling = ScalingStrategy::InfNorm;
@@ -2142,93 +1936,6 @@ impl Solver {
         } else {
             QualityLevel::PivotRaised
         };
-    }
-
-    /// Revert every escalation applied by [`Solver::increase_quality`]
-    /// and return to `QualityLevel::Baseline`.
-    ///
-    /// Returns `true` only if a parameter was actually restored to a
-    /// different value. It returns `false` both when the solver was
-    /// already at `Baseline` and when the escalation itself moved
-    /// nothing — a rung can fire, and report `true`, without changing
-    /// a parameter: from non-`Identity` scaling with
-    /// `pivot_threshold` already at `pivtol_max`, stage 1 is a no-op
-    /// and stage 2 computes `0.5^0.75 = 0.594`, clamps back to `0.5`,
-    /// and lands on `Exhausted`. A caller keying retry telemetry on
-    /// this return value should not see a phantom undo (review
-    /// finding 3 on PR #193, test R8). In every case the level is
-    /// left at `Baseline` and the ladder is armed again.
-    ///
-    /// Restores the scaling strategy and `bk.pivot_threshold` the
-    /// caller had configured when the ladder started. Valid from any
-    /// level, `Exhausted` included. A `with_scaling` call made while
-    /// an escalation is live re-states that baseline, so a later reset
-    /// restores the strategy pinned last rather than undoing it
-    /// (test R7).
-    ///
-    /// # Guarantees
-    ///
-    /// These are contract, not incidental properties of the current
-    /// implementation. Each is pinned by a named test; a refactor that
-    /// breaks one is a breaking change, not a detail.
-    ///
-    /// 1. **A caller that never calls `reset_quality` sees
-    ///    byte-identical behaviour to before this method existed.**
-    ///    The escalation ladder is untouched — its rungs, the `0.75`
-    ///    exponent, `pivtol_max` — and the snapshot is inert state.
-    ///    Pinned by U1–U5, which predate this method and still pass
-    ///    unchanged. Downstream release processes diff a fixture sweep
-    ///    against a baseline binary and treat any moved line as a
-    ///    trajectory change needing explanation, so this property must
-    ///    not be allowed to drift silently.
-    ///
-    /// 2. **`reset_quality` then `increase_quality` retraces exactly
-    ///    the rungs a freshly constructed `Solver` would.** The round
-    ///    trip is idempotent: the snapshot records a state the solver
-    ///    demonstrably occupied, and is cleared on restore, so the
-    ///    next escalation re-captures and walks the identical ladder.
-    ///    Pinned by R4 (records the traversal before any reset exists
-    ///    and asserts the second traversal equals it) and R6.
-    ///
-    /// 3. **Re-baselining costs no symbolic re-analysis.** The cached
-    ///    `SymbolicFactorization` survives — it is scaling-invariant
-    ///    since scaling moved to the numeric phase — exactly as it
-    ///    survives an escalation. This is a cost guarantee: a caller
-    ///    may reset once per IPM iteration (e.g. on every KKT-matrix
-    ///    change), so a reset that forced re-analysis would become a
-    ///    silent per-iteration cost. Pinned by integration test I9 via
-    ///    `symbolic_call_count`.
-    ///
-    /// Issue #192. Ipopt has no counterpart, because MA57 answers
-    /// `IncreaseQuality` by raising `pivtol` toward `pivtolmax` —
-    /// monotone in robustness, so leaving it raised for the rest of a
-    /// solve can only make later factorizations safer. FERAL's rungs
-    /// (`Identity → InfNorm`, then `pivot_threshold^0.75`) change
-    /// *which pivots are taken*: the factorization is different, not
-    /// uniformly better, and persisting it changes the caller's whole
-    /// remaining trajectory. An escalation that rescues one hard
-    /// system can cost a later one its verdict. This lets a caller
-    /// bound the escalation's lifetime — re-baselining at a major
-    /// iteration, or on entering a restoration sub-problem — without
-    /// FERAL having to know anything about the caller's algorithm.
-    ///
-    /// Touches nothing but the escalated parameters and the level —
-    /// not `last_factors`, not `mc64_scaling_cache`, and none of the
-    /// independent latches (`ordering_escalated`, `auto_arm_latched`,
-    /// `mc64_retry_not_adopted`), mirroring what `increase_quality`
-    /// leaves alone.
-    pub fn reset_quality(&mut self) -> bool {
-        match self.quality_baseline.take() {
-            Some(baseline) => {
-                let moved = self.numeric_params.scaling != baseline.scaling
-                    || self.numeric_params.bk.pivot_threshold != baseline.pivot_threshold;
-                self.numeric_params.scaling = baseline.scaling;
-                self.numeric_params.bk.pivot_threshold = baseline.pivot_threshold;
-                self.quality_level = QualityLevel::Baseline;
-                moved
-            }
-            None => false,
-        }
     }
 
     /// Test/diagnostic accessor for the current pivot threshold.
@@ -3207,217 +2914,6 @@ mod tests {
             assert!(steps < 20, "did not exhaust within 20 steps");
         }
         assert_eq!(s.quality_level(), QualityLevel::Exhausted);
-    }
-
-    /// R1 — `reset_quality` at `Baseline` is a no-op and says so.
-    ///
-    /// Issue #192. A caller that re-baselines unconditionally at a
-    /// loop boundary must be able to do so without first reading
-    /// `quality_level()`, and must be able to tell from the return
-    /// value whether anything was actually undone.
-    #[test]
-    fn r1_reset_quality_at_baseline_is_noop() {
-        let mut s = solver_with_scaling(ScalingStrategy::Identity);
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-
-        assert!(!s.reset_quality(), "nothing to undo at Baseline");
-
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-        assert!(matches!(s.scaling_strategy(), ScalingStrategy::Identity));
-        assert_eq!(s.pivot_threshold(), 0.0);
-    }
-
-    /// R2 — reset undoes the stage-1 `Identity → InfNorm` flip.
-    #[test]
-    fn r2_reset_quality_undoes_stage_one_scaling_flip() {
-        let mut s = solver_with_scaling(ScalingStrategy::Identity);
-        assert!(s.increase_quality());
-        assert_eq!(s.quality_level(), QualityLevel::ScalingEnabled);
-        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
-
-        assert!(s.reset_quality(), "an escalation was undone");
-
-        assert!(matches!(s.scaling_strategy(), ScalingStrategy::Identity));
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-        assert_eq!(s.pivot_threshold(), 0.0, "stage 1 never moved the pivot");
-    }
-
-    /// R3 — reset undoes an arbitrarily deep stage-2 pivot ladder.
-    #[test]
-    fn r3_reset_quality_undoes_pivot_ladder() {
-        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
-        for _ in 0..3 {
-            assert!(s.increase_quality());
-        }
-        assert_ne!(s.pivot_threshold(), 0.0, "ladder actually moved");
-
-        assert!(s.reset_quality());
-
-        assert_eq!(
-            s.pivot_threshold(),
-            0.0,
-            "restores the constructed threshold, not a rung of the ladder"
-        );
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-    }
-
-    /// R4 — reset from `Exhausted` restarts the identical ladder.
-    ///
-    /// Pins the property downstream needs (issue #192): after a reset,
-    /// re-escalating is indistinguishable from escalating a fresh
-    /// `Solver` built with the same parameters. The oracle is the
-    /// first traversal, recorded before any reset exists in the state.
-    #[test]
-    fn r4_reset_quality_from_exhausted_restarts_identical_ladder() {
-        fn walk(s: &mut Solver) -> Vec<(QualityLevel, f64)> {
-            let mut seen = Vec::new();
-            while s.increase_quality() {
-                seen.push((s.quality_level(), s.pivot_threshold()));
-                assert!(seen.len() < 20, "did not exhaust within 20 steps");
-            }
-            seen
-        }
-
-        let mut s = solver_with_scaling(ScalingStrategy::Identity);
-        let first = walk(&mut s);
-        assert_eq!(s.quality_level(), QualityLevel::Exhausted);
-
-        assert!(s.reset_quality(), "reset is valid from Exhausted");
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-        assert!(matches!(s.scaling_strategy(), ScalingStrategy::Identity));
-        assert_eq!(s.pivot_threshold(), 0.0);
-
-        let second = walk(&mut s);
-        assert_eq!(second, first, "re-escalation must retrace the same rungs");
-    }
-
-    /// R5 — reset restores the *caller's* parameters, not
-    /// `NumericParams::default()`.
-    #[test]
-    fn r5_reset_quality_restores_caller_params_not_defaults() {
-        const CALLER_PIVTOL: f64 = 0.25;
-        assert_ne!(
-            NumericParams::default().bk.pivot_threshold,
-            CALLER_PIVTOL,
-            "oracle is only meaningful if it differs from the default"
-        );
-
-        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
-        s.numeric_params.bk.pivot_threshold = CALLER_PIVTOL;
-
-        assert!(s.increase_quality());
-        assert_ne!(s.pivot_threshold(), CALLER_PIVTOL);
-
-        assert!(s.reset_quality());
-        assert_eq!(s.pivot_threshold(), CALLER_PIVTOL);
-    }
-
-    /// R6 — the snapshot is taken when the ladder starts, not at
-    /// construction, so a builder applied after `with_params` is the
-    /// baseline that gets restored.
-    #[test]
-    fn r6_reset_quality_preserves_builder_configured_scaling() {
-        let mut s =
-            solver_with_scaling(ScalingStrategy::InfNorm).with_scaling(ScalingStrategy::Identity);
-
-        assert!(s.increase_quality());
-        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
-
-        assert!(s.reset_quality());
-        assert!(
-            matches!(s.scaling_strategy(), ScalingStrategy::Identity),
-            "must restore the builder-configured strategy, not the \
-             one `with_params` was constructed with"
-        );
-    }
-
-    /// R7 — reconfiguring scaling *after* escalating must not be
-    /// silently undone by a later reset (review finding 2 on PR #193).
-    ///
-    /// `with_scaling` is the documented issue-#51 escape hatch for a
-    /// host that sees the picker flapping. A caller that pins a
-    /// strategy mid-solve and later re-baselines must get the strategy
-    /// it pinned, not the one the snapshot happened to capture. R6
-    /// covers the pre-escalation window; this covers the post one.
-    #[test]
-    fn r7_reset_quality_honors_scaling_pinned_after_escalating() {
-        let mut s = solver_with_scaling(ScalingStrategy::Identity);
-        // Stage 1 (scaling), then stage 2 (pivot) — so the reset has
-        // something to restore independently of the pinned strategy.
-        assert!(s.increase_quality());
-        assert!(s.increase_quality());
-        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
-        assert_eq!(s.pivot_threshold(), 0.01, "stage 2 first-jump rule");
-
-        // Host pins a strategy while the escalation is live.
-        s = s.with_scaling(ScalingStrategy::Mc64Symmetric);
-
-        assert!(s.reset_quality(), "the pivot bump is still undone");
-        assert!(
-            matches!(s.scaling_strategy(), ScalingStrategy::Mc64Symmetric),
-            "reset must restore the strategy the caller pinned last, \
-             not the stale pre-escalation snapshot; got {:?}",
-            s.scaling_strategy()
-        );
-        assert_eq!(s.pivot_threshold(), 0.0, "pivot still re-baselined");
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-    }
-
-    /// R7b — the finding-2 and finding-3 fixes compose: when the only
-    /// escalated parameter is the one the caller then overwrote, the
-    /// reset genuinely has nothing left to undo and says so.
-    #[test]
-    fn r7b_reset_quality_false_when_pin_already_superseded_the_rung() {
-        let mut s = solver_with_scaling(ScalingStrategy::Identity);
-        assert!(s.increase_quality()); // stage 1 only: scaling flip
-        assert_eq!(s.quality_level(), QualityLevel::ScalingEnabled);
-        assert_eq!(s.pivot_threshold(), 0.0, "pivot untouched by stage 1");
-
-        s = s.with_scaling(ScalingStrategy::Mc64Symmetric);
-
-        assert!(
-            !s.reset_quality(),
-            "the pin already superseded the only rung that fired"
-        );
-        assert!(matches!(
-            s.scaling_strategy(),
-            ScalingStrategy::Mc64Symmetric
-        ));
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-    }
-
-    /// R8 — an escalation that moved nothing is not reported as undone
-    /// (review finding 3 on PR #193).
-    ///
-    /// With non-`Identity` scaling and `pivot_threshold` already at
-    /// `pivtol_max`, stage 1 is a no-op and stage 2 computes
-    /// `0.5^0.75 = 0.594`, clamps back to `0.5`, and jumps to
-    /// `Exhausted` — so `increase_quality` returns `true` having
-    /// changed no parameter. A caller keying telemetry on
-    /// `reset_quality()` must not see a phantom undo.
-    #[test]
-    fn r8_reset_quality_reports_false_when_escalation_moved_nothing() {
-        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
-        s.numeric_params.bk.pivot_threshold = 0.5; // == pivtol_max
-
-        assert!(s.increase_quality(), "the rung still fires");
-        assert_eq!(s.quality_level(), QualityLevel::Exhausted);
-        assert_eq!(
-            s.pivot_threshold(),
-            0.5,
-            "0.5^0.75 clamps back to pivtol_max: nothing moved"
-        );
-
-        assert!(
-            !s.reset_quality(),
-            "no parameter moved, so nothing was undone"
-        );
-        // The level is still re-baselined either way.
-        assert_eq!(s.quality_level(), QualityLevel::Baseline);
-        assert_eq!(s.pivot_threshold(), 0.5);
-        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
-        // And the ladder is armed again.
-        assert!(s.increase_quality());
     }
 
     /// F1 — same pattern fingerprints equal, structural hash stable
