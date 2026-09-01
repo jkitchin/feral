@@ -5973,3 +5973,40 @@ run under that load FAILED; the interleaved re-run was 8/8 PASS.
 
 **Rule.** Any background waiter in this repo must `sleep`, never busy-poll.
 Do not trust a single-shot p90 taken under load; interleave A/B.
+
+## 2026-09-01 — recycled MINRES / Krylov subspace recycling (evaluated, not built)
+
+**Considered.** A proposal (`~/Desktop/feral-krylov.org`) to add an optional
+MINRES path to feral with Krylov-subspace recycling across pounce's IPM
+iterations, preconditioned by the "absolute-value factor" preconditioner
+`M = P Ds⁻¹ L |D| Lᵀ Ds⁻¹ Pᵀ`. Four phases, from an offline Lanczos
+persistence study through an adaptive trajectory-changing solve path.
+
+**Why not.** Three reasons, measured rather than argued:
+
+1. `(M⁻¹K)² = I`. The `|D|` preconditioner makes `M⁻¹K` sign-similar to the
+   identity — eigenvalues exactly ±1, `‖(M⁻¹K)² − I‖_F = 1.5e-10` — so
+   preconditioned MINRES converges in **two iterations** and builds no
+   subspace to recycle from. The preconditioner phase and the recycling
+   phase cancel each other by construction, not by bad luck.
+2. The target problem does not occur here. Issue #190 measured refinement at
+   **0–2 steps, never at the cap**, on seven large matrices; issue #30 found
+   4/28 stagnating, and on those MUMPS floors at the same residual — the
+   floor is the matrix, not the iteration. A synthetic head-to-head at equal
+   cost per step had stationary refinement matching or beating preconditioned
+   MINRES at every step count.
+3. Factorization, not back-solve, is the dominant cost
+   (`pounce/dev-notes/performance-engineering.md:149`; 0.1702 s vs 0.0856 s
+   per iteration on the 118k KKT). A Krylov path that still factors for
+   inertia cannot reach it, and pounce's inertia gate reads
+   `check_inertia = neg_curv_test_tol <= 0.0 || !provides_inertia()` — so
+   returning `provides_inertia() -> false` *forces* the check on rather than
+   standing it down.
+
+**Not a verdict on iterative methods generally.** This is the first time the
+question has been raised in this repo — grep for `minres|gmres|krylov|arnoldi`
+returns zero real hits — so there is no prior rejection to inherit. The full
+evaluation, including the falsifiers that would flip the answer and the
+reproduction code for every number above, is in
+`dev/research/krylov-recycling-evaluation-2026-09-01.md`. Read that before
+re-opening the question.
