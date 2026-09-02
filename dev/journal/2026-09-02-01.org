@@ -1,0 +1,68 @@
+#+TITLE: Session journal 2026-09-02-01
+
+* 02:00 :issue-199:review:park:backward-error:api:
+Reviewed issue #199 (pounce asks for a public componentwise backward
+error ω, plus a release carrying it).
+
+Finding: every symbol the issue cites is on =park/post-0.17= (91ace05),
+not on =main=. The line numbers match 91ace05 exactly —
+=src/numeric/solve.rs:2409= is =fn backward_error= there, and
+=src/sparse/csc.rs:354= is =pub fn abs_symv=. On =main= (a303326):
+
+: $ grep -rn "backward_error\|abs_symv\|StopCriterion\|RefineOutcome" src/ --include=*.rs
+: (no matches)
+
+The park revert bb18f0a (PR #197, merged 2026-09-01) took all of it out
+with issue #190's =f547bc5=. So the issue's framing — "everything needed
+already exists on main; none of it is reachable ... unreleased, 43
+commits past v0.17.0" — is wrong in kind, not degree: the code is not
+unreleased-on-main, it is not on main. Actual parked count is 42 commits
+(v0.17.0..91ace05), and main's code tree is byte-identical to v0.17.0
+save the 18-line =schur_kernel.rs= clippy allow.
+
+What survived the park: =dev/research/issue-190-refine-target.md=, since
+all of =dev/= was a deliberate carve-out. The research note backing ω is
+therefore already on main; a restore needs no new note.
+
+* 02:05 :issue-199:scope:semver:
+Scoped the minimal restore. The ω evaluator depends on exactly one thing
+=main= lacks: =CscMatrix::abs_symv=. Restoring
+=abs_symv= + =backward_error= (made public) + their tests is additive and
+small — =git diff v0.17.0 91ace05 -- src/sparse/csc.rs= is 120 lines, and
+=backward_error= carries five unit tests including a LAPACK =dgerfs=
+oracle case, the structurally-empty-row deviation, the sub-=safe2=
+guarded branch, and the non-finite guard added by 47f332e.
+
+Consequence for the release ask: the issue argues "minor bump rather than
+patch" from 978b41e's breaking =*_refined_into= return-type change. That
+break belongs to #190's =RefineOutcome=, which the minimal restore does
+not need. Cherry-picking =f547bc5= wholesale would drag in 1625
+insertions across 12 files and the whole =StopCriterion= / =RefineOutcome=
+/ =RefineStop= surface — precisely the API the 2026-09-01 park decision
+declined to maintain. Restore the evaluator only; the bump is 0.18.0
+under semver (new public API) with zero migration cost for existing
+callers.
+
+* 02:10 :issue-199:pounce880:certification:
+Substantive caveat recorded for the review. ω ≤ u certifies *backward*
+stability; #880's symptom is a materially wrong =x= returned under
+=Optimal=, which is a *forward*-error question, and forward error is
+bounded by κ·ω, not ω. More pointedly, the issue's own instrumented
+evidence shows the existing gate reading =1.470e-06= against a =1e-6= cut
+— "the true error to three digits" — and rejecting all three calls. On
+that instance the estimator measured correctly and the cascade discarded
+its verdict. The analytic rotated-spectrum failure mode is argued but not
+demonstrated on the failing instances, so a differently-founded
+instrument should not be expected to close #880 by itself.
+
+Note: =RefinementDiagnostics::kappa_1_est= (Hager–Higham, 3–5 extra
+solves) is already public *and released* in 0.17.0 — but only via
+=solve_sparse_refined_with_diagnostics=, which pounce does not call, so a
+forward bound would need its own exposure decision.
+
+* 02:12 :tooling:
+=pre-commit= is not installed in this container (=command not found=), so
+the CLAUDE.md hook gate could not be armed. This session's only commit is
+documentation, so fmt/clippy are unaffected; flagged so the next session
+that touches Rust runs =cargo fmt && cargo clippy --all-targets -- -D
+warnings= manually.
