@@ -138,3 +138,124 @@ not timing-derived, and reproduce). It is not a small-front phenomenon
 and not a large-front phenomenon; it is arithmetic/memory efficiency
 across the board, which makes #200 a duplicate of #153 rather than a
 distinct per-supernode-overhead problem.
+
+* 22:30 :issue153:kernel:ceiling:
+Question from the user: what are the *prospects* of actually fixing
+#153? The record (journal agent sweep of =dev/journal=,
+=tried-and-rejected.md=, =dev/research=) says every structural BLAS3
+restructuring tried so far regressed (row-band blocking 0.74-0.95x,
+source-panel packing +11-22%, deferred-update variant +11%,
+=block_size=48= 1.3% of total) and that the only wins were
+micro-kernel-level (packing 22-26x isolated, pulp dispatch fix 2.7x on
+x86) and scheduling-level (intra-front gate 2.68x). It also says the
+one decision-relevant measurement had never been made: *no in-repo
+feral-vs-BLAS number on the same shape exists.* Made it.
+
+Isolated square dense kernel, this machine, 1 thread, min-of-N,
+=sum_{k<ncol}(nrow-k)^2= multiply-adds throughout:
+
+| n   | feral factor_frontal | LAPACK dsytrf | dgemm |
+|-----+----------------------+---------------+-------|
+| 64  |                 7585 |         11180 |     - |
+| 96  |                 9158 |          9985 |     - |
+| 128 |                11226 |         11594 |     - |
+| 192 |                11582 |         13434 |     - |
+| 256 |                10428 |         15713 |     - |
+| 512 |                10897 |         20396 | 27600 |
+
+So on *square* fronts feral's kernel is at dsytrf parity to 1.9x. That
+is the good news and it is also misleading, because the corpus does not
+produce square fronts.
+
+* 22:40 :issue153:headroom:decomposition:
+New binary =diag_153_kernel_headroom=: profile a real factorization,
+group the supernodes by exact =(nrow, ncol)=, re-time =factor_frontal=
+standalone on every distinct shape that occurred, and reconstitute
+=kernel_ns = sum(count * isolated_ns)=. =headroom = loop_ns/kernel_ns=
+is then the factor by which the solver is slower than *its own kernel*
+on the identical shape sequence -- the ceiling on what non-arithmetic
+work can be worth. =extra_elims = sum(ncol) - n = 0= on all five, so no
+delayed pivots inflate the replay.
+
+| matrix     | loop us | kernel us | headroom | prol+epi | % of driver |
+|------------+---------+-----------+----------+----------+-------------|
+| optmass    |   12227 |      6601 |    1.85x |     4083 |         25% |
+| robot_1600 |    5206 |      2745 |    1.90x |     1817 |         26% |
+| steering   |   19342 |     10896 |    1.78x |     7829 |         29% |
+| ex4_2_160  |   56759 |     51086 |    1.11x |     5930 |          9% |
+| arki0009   |    6728 |      6174 |    1.09x |      599 |          8% |
+
+*The deficit splits cleanly into two disjoint populations.* The
+small/medium-front matrices spend ~46% of the supernode loop outside
+their own arithmetic; the large-front matrices spend ~9%. Projecting
+the (unreachable) ceiling headroom -> 1.00 onto the measured
+sequential walls:
+
+| matrix     | now vs MA57 | loop at kernel speed | then vs MA57 |
+|------------+-------------+----------------------+--------------|
+| optmass    |       3.42x |          19081->13455|        2.41x |
+| robot_1600 |       1.62x |            6363->3902|        0.99x |
+| steering   |       1.39x |          30183->21737|        1.00x |
+| ex4_2_160  |       2.05x |          64159->58486|        1.87x |
+| arki0009   |       1.73x |            7345->6791|        1.60x |
+
+robot_1600 and steering_12800 reach MA57 *parity* on solver plumbing
+alone -- no kernel change, no BLAS.
+
+* 22:55 :issue153:blas:shapecomparison:
+Second new probe, =dev/scripts/blas_front.f=: the kernel MA57 actually
+runs -- =dsytrf= on the leading ncol block, =dtrsm=, D-scale, one
+=dsyrk= Schur update -- on the *exact* shapes
+=diag_153_kernel_headroom= reports as dominant. Same OpenBLAS MA57
+links, same flop model, 1 thread, batch-timed with a copy-only loop
+subtracted (SYSTEM_CLOCK's 1 us granularity is longer than a small
+front; the earlier min-of-N version reported 9e9 MMac/s on a 3x3 and
+had to be thrown away).
+
+| nrow | ncol | feral MMac/s | BLAS MMac/s | BLAS/feral |
+|------+------+--------------+-------------+------------|
+|    3 |    1 |          108 |         104 |      0.96x |
+|    4 |    2 |          301 |         249 |      0.83x |
+|   11 |    3 |         1208 |        1700 |      1.41x |
+|   18 |   16 |         2404 |        2989 |      1.24x |
+|   36 |   16 |         5162 |        9450 |      1.83x |
+|   44 |   16 |         6044 |       12022 |      1.99x |
+|   56 |   16 |         6854 |       16018 |      2.34x |
+|   76 |   16 |         7542 |       20320 |      2.69x |
+|  345 |   16 |         8323 |       39349 |      4.73x |
+|  365 |   22 |         8305 |       41161 |      4.96x |
+
+*feral's kernel wins on 3x3 and 4x2 and saturates at ~8300 MMac/s from
+nrow~76 onward, while BLAS keeps scaling to ~41000.* The saturation is
+at fixed =ncol=16= with growing =nrow=, i.e. it is the trailing rank-16
+symmetric update that stops scaling, not the panel. That is a specific,
+diagnosable kernel defect and not "the BLAS-free ceiling": feral's own
+*square* kernel does 11600 at n=192, so the wide-trapezoidal path is
+running 1.4x below feral's own demonstrated capability, before any
+argument about SIMD or FMA.
+
+Caveat recorded rather than buried: the shared =sum(nrow-k)^2= model
+counts the full trailing square where a symmetric update touches only a
+triangle, so absolute MMac/s over-counts by up to ~2x on the wide
+shapes. It over-counts both columns identically, so the ratio column is
+sound; the absolute numbers must not be set against a vendor GFLOP/s.
+
+* 23:05 :issue153:prospects:conclusion:
+Prospects, stated as three separable targets rather than one:
+
+1. *Solver plumbing on small/medium-front matrices.* 1.78-1.90x of the
+   supernode loop, pure Rust, no bit-exactness exposure. Ceiling: MA57
+   parity on robot_1600 and steering_12800, 3.42x -> 2.41x on optmass.
+2. *Prologue + epilogue.* 25-29% of the driver on those same three
+   matrices (8-9% on the large-front two). Never attributed before
+   today. MA57 also permutes and scales, so this is not all recoverable,
+   but a quarter of the wall has not been looked at.
+3. *The wide-trapezoidal trailing update.* Only target that touches
+   arithmetic. Needed: 1.6-1.9x on ex4_2_160/arki0009. Available before
+   matching BLAS: feral's own square kernel is already 1.4x above where
+   the trapezoidal path saturates.
+
+None of the three requires BLAS, FMA, or breaking bit-exactness. The
+2026-05-22 verdict "realistic pure-Rust micro-kernel headroom is ~2-3x"
+stands and is *sufficient* -- #153 needs 1.4-3.4x, and roughly half of
+it turns out not to be micro-kernel work at all.
