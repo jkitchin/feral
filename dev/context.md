@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-09-01T16:00:54Z
+Generated: 2026-09-05T13:13:08Z
 
 ## Latest Session
 File: dev/sessions/2026-09-01-01.md
@@ -59,34 +59,34 @@ discopt.
 
 ## Git Status
 ```
+a303326 Merge pull request #198 from jkitchin/docs/krylov-evaluation
+b412113 docs: record the recycled-MINRES evaluation and why it was not adopted
+6f54680 Merge pull request #197 from jkitchin/revert/park-post-0.17
+de3ade2 docs: session checkpoint 2026-09-01-01 (post-0.17 work parked)
 bb18f0a revert: park post-0.17.0 development, resume from the 0.17.0 baseline
-91ace05 docs: session checkpoint 2026-08-30-02 (#191, #193, #195 reviewed and landed)
-d0b3000 Merge pull request #195 from jkitchin/claude/issue-194-p6gri8
-7b42414 fix(solve): an interrupt during the MC64 retry must not be swallowed
-942d130 Merge origin/main into claude/issue-194-p6gri8
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::solve::tests::issue175_overhead_term_is_scheduling_only ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::solve::tests::issue175_wide_thin_tree_is_not_scheduled_in_parallel ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.84s
+test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 10.00s
 
 ```
 
@@ -128,26 +128,26 @@ discopt. Feature work on the solver should start from a consumer-demonstrated
 need, not from an improvement that is available to make.
 
 ## Recent Tried-and-Rejected
-**Replaced with.** Two fix-independent observables:
-`mc64_retry_attempt_count() == 1` proves factorization #1 returned `Ok(..)`
-(the issue-#65 gate keys on `Ok`, so the flag was set after it completed),
-and `delay < call_elapsed` proves it was set before the call returned.
-Together they pin the flag inside the retry without referencing the status
-being asserted.
+   **0–2 steps, never at the cap**, on seven large matrices; issue #30 found
+   4/28 stagnating, and on those MUMPS floors at the same residual — the
+   floor is the matrix, not the iteration. A synthetic head-to-head at equal
+   cost per step had stationary refinement matching or beating preconditioned
+   MINRES at every step count.
+3. Factorization, not back-solve, is the dominant cost
+   (`pounce/dev-notes/performance-engineering.md:149`; 0.1702 s vs 0.0856 s
+   per iteration on the 118k KKT). A Krylov path that still factors for
+   inertia cannot reach it, and pounce's inertia gate reads
+   `check_inertia = neg_curv_test_tol <= 0.0 || !provides_inertia()` — so
+   returning `provides_inertia() -> false` *forces* the check on rather than
+   standing it down.
 
-## 2026-08-29 — busy-wait shell pollers while a benchmark is live
-
-**Tried.** `until grep -q ...; do :; done` to wait on a background job.
-
-**Symptom.** Pinned a core, pushed load to 15.71 alongside `cargo test --all`
-and a live A/B benchmark, and contaminated the branch arm of round 2. Phase
-2.8.1 p90s are ratios against **on-disk MUMPS oracle sidecars**, so
-contention inflates only feral's numerator — the metric is not
-contention-symmetric and a loaded host reads as a regression. A single-shot
-run under that load FAILED; the interleaved re-run was 8/8 PASS.
-
-**Rule.** Any background waiter in this repo must `sleep`, never busy-poll.
-Do not trust a single-shot p90 taken under load; interleave A/B.
+**Not a verdict on iterative methods generally.** This is the first time the
+question has been raised in this repo — grep for `minres|gmres|krylov|arnoldi`
+returns zero real hits — so there is no prior rejection to inherit. The full
+evaluation, including the falsifiers that would flip the answer and the
+reproduction code for every number above, is in
+`dev/research/krylov-recycling-evaluation-2026-09-01.md`. Read that before
+re-opening the question.
 
 ## Source Files
 ```

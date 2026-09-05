@@ -6010,3 +6010,113 @@ evaluation, including the falsifiers that would flip the answer and the
 reproduction code for every number above, is in
 `dev/research/krylov-recycling-evaluation-2026-09-01.md`. Read that before
 re-opening the question.
+
+---
+
+## 2026-09-04 — Issue #200's "UNATTRIBUTED 33–39%" was the profiler itself
+
+**What was tried.** Issue #200 attributes 33–39% of factor time to an
+UNATTRIBUTED bucket computed as `total − ASSEMBLY − DENSEFACTOR` from
+`phase_timing` counters, and proposes reducing per-supernode overhead on
+that basis. The first hypothesis pursued was that the untimed
+`scalar_pivot_step` loop in `factor_frontal_in_place_with_scratch_impl`
+accounted for the residual, so the loop was instrumented with a new
+`SCALARLOOP_NS` counter plus `FRONTSETUP_NS`, `FRONTTAIL_NS`,
+`SCALARLOOP_FRONTS`, `PANEL_FRONTS`.
+
+**Symptoms.** The scalar loop measured **1.6–4.5%** of factor time, not
+33–39%. The hypothesis was wrong.
+
+**What the residual actually is.** Paired alternating A/B of
+`PHASE_TIMING_ENABLED` off vs on, same warm `Solver`, min of 9,
+`RAYON_NUM_THREADS=1` (`diag_200_probe_tax`):
+
+| matrix | OFF µs | ON µs | ratio | fronts | tax ns/front |
+|---|---|---|---|---|---|
+| optmass_0002 | 23216 | 41181 | **1.77** | 43750 | 411 |
+| robot_1600_0002 | 7483 | 9758 | 1.30 | 5728 | 397 |
+| steering_12800_0002 | 33630 | 44335 | 1.32 | 25055 | 427 |
+| ex4_2_160_0002 | 70632 | 78598 | 1.11 | 22839 | 349 |
+| arki0009_0002 | 8470 | 8930 | 1.05 | 2357 | 195 |
+
+Mechanism: `DENSEFACTOR_NS` brackets the *whole* dense factor, so the cost
+of the inner probes is counted inside DENSEFACTOR but outside
+PANELFACTOR/SCHUR/LEXTRACT/CONTRIBEXTRACT — it lands exactly in
+"densefactor minus its named children," which is the bucket #200 reports.
+On a tree whose median front is 3–7 rows the probe constant is the same
+order as the quantity being attributed.
+
+**Disposition.** The added counters were **reverted** from
+`src/dense/factor.rs`; the hot path is back to its pre-session state.
+Re-running `diag_200_probe_tax` after the revert gives optmass 22394 →
+34151 µs, ratio **1.52**, 269 ns/front — i.e. the five counters this
+session added were themselves costing ~140 ns/front. That is direct
+evidence for the rule below.
+
+**Rule.** `phase_timing` numbers are usable for *ranking* phases on
+matrices with large fronts. They are **not** usable for attributing a
+residual on IPM-KKT trees with tiny fronts, and no per-front counter
+should be added to `src/dense/factor.rs` without first measuring its tax
+with `diag_200_probe_tax`. Front counts are available statically from
+`symbolic_factorize(...).supernodes.len()` and need no runtime counter.
+
+---
+
+## 2026-09-04 — Raising `nemin` to grow fronts (rejected, third time)
+
+**What was tried.** The per-front fixed cost is the dominant term on
+bushy IPM-KKT trees, so the obvious lever is fewer, larger fronts. Swept
+`nemin` ∈ {32, 64, 128, 512} × {`Renumber`, `Adjacency`}
+(`diag_200_amalg_sweep`, uninstrumented min factor time).
+
+**Symptoms — it makes things worse, not better.** Factor-time ratio vs
+the `nemin = 32` default:
+
+| matrix | 32 | 64 | 128 | 512 |
+|---|---|---|---|---|
+| optmass_0002 | 1.00 | 1.37 | 2.58 | **25.70** |
+| robot_1600_0002 | 1.00 | 1.78 | 4.09 | **46.60** |
+| steering_12800_0002 | 1.00 | 1.71 | 3.08 | **39.03** |
+
+Both strategies behave the same. The structure barely moves: optmass goes
+from 41875 to 40052 supernodes (4% fewer) at `nemin` 32→64, and the
+**median front stays at 4 rows through the entire sweep** while the max
+front grows 34 → 514. Amalgamation adds flops to the fronts it merges
+without removing the tiny ones that carry the fixed cost, so the extra
+arithmetic is paid and the overhead is not saved.
+
+This is the third rejection of a `nemin` retune. The prior two were on
+accuracy (MEYER3NE 83× residual at `nemin=4`, VESUVIOU 2789× at
+`nemin=8`, HATFLDG 7 digits lost). This one is on speed, at the opposite
+end of the range. `nemin = 32` is not a parameter with headroom in either
+direction.
+
+---
+
+## 2026-09-04 — Knight-Ruiz scaling: warm-start and iteration-cap cuts
+
+**What was tried.** Scaling is 5.6% (optmass) to 19.9% (steering) of
+factor self-time in the samply profile, and the KR loop runs to its
+`max_iter = 10` cap on three of the five matrices (optmass 2, arki 3,
+robot/steering/ex4_2 all 10). Two reductions were tested: reusing the
+previous factorization's scaling vector as a warm start, and lowering the
+cap.
+
+**Symptoms — warm start.** The scaling vector is not close to the
+previous one. On steering_12800_0002, cold-10 reaches `max_dev` 1.94e-2;
+warm-started runs of 1/2/3 sweeps reach 1.23e0 / 4.59e-1 / 2.40e-1 — one
+to two orders of magnitude *worse* — with `max|d_warm − d_cold|/d_cold =
+4.92e-1`. ex4_2_160_0002: cold-10 = 4.42e-2 vs warm-3 = 7.59e-1, relative
+difference 4.63e-1. A warm start would silently ship a differently scaled
+matrix, changing pivot order and inertia.
+
+**Symptoms — cap reduction.** There is no plateau to cut at. Per-sweep
+`max_dev` on steering_12800_0002: 1.48e6, 9.99e-1, 9.41e-1, 7.33e-1,
+4.74e-1, 2.71e-1, 1.46e-1, 7.54e-2, 3.84e-2, 1.94e-2 — a clean linear
+decay of ~0.5× per sweep that is still improving when the cap hits.
+Cutting to 5 sweeps leaves `max_dev` at 4.7e-1. (optmass converges to
+2.22e-16 by sweep 2 and already exits early; the cap only binds where it
+is doing real work.)
+
+**Why it would not have paid anyway.** Even eliminating scaling entirely
+removes 5.6% of optmass, where the gap to MA57 is 4.17×.
