@@ -25,6 +25,7 @@
 //! Usage:
 //!   cargo run --release -p feral-diagnostics --bin diag_200_front_size_buckets \
 //!     -- [--reps N] <matrix.mtx>...
+use feral::scaling::ScalingStrategy;
 use feral::{read_mtx, NumericParams, Solver};
 use std::time::Instant;
 
@@ -32,12 +33,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut reps = 9usize;
     let mut paths: Vec<String> = Vec::new();
+    // Issue #153: the MA57 harness runs ICNTL(15)=0 (scaling off) on the
+    // stated grounds that feral amortizes its MC64 into analysis. This
+    // flag exists to check that claim against the numeric prologue's own
+    // scaling meter rather than trusting the comment.
+    let mut scaling: Option<ScalingStrategy> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "--reps" {
             if let Some(v) = it.next() {
                 reps = v.parse()?;
             }
+        } else if a == "--scaling" {
+            scaling = match it.next().map(|s| s.as_str()) {
+                Some("identity") => Some(ScalingStrategy::Identity),
+                Some("infnorm") => Some(ScalingStrategy::InfNorm),
+                Some("mc64") => Some(ScalingStrategy::Mc64Symmetric),
+                _ => None,
+            };
         } else {
             paths.push(a.clone());
         }
@@ -51,9 +64,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or("?")
             .to_string();
 
+        let mut base = NumericParams::default();
+        if let Some(sc) = &scaling {
+            base.scaling = sc.clone();
+        }
         // Uninstrumented reference: warm solver, min of `reps`.
-        let mut plain =
-            Solver::with_params(NumericParams::default(), Default::default()).with_parallel(false);
+        let mut plain = Solver::with_params(base.clone(), Default::default()).with_parallel(false);
         for _ in 0..3 {
             let _ = plain.factor(&csc, None);
         }
@@ -65,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Profiled: same warm-solver protocol, `with_profiling(true)`.
-        let mut prof = Solver::with_params(NumericParams::default(), Default::default())
+        let mut prof = Solver::with_params(base.clone(), Default::default())
             .with_parallel(false)
             .with_profiling(true);
         for _ in 0..3 {
@@ -97,6 +113,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "  loop_ns={} prologue_us={} epilogue_us={} total_us={}",
             report.loop_ns, report.prologue_us, report.epilogue_us, report.total_us
+        );
+        // Track B2 question: does the solver-scope MC64 cache actually
+        // spare a warm refactorization the scaling cost? The MA57
+        // harness runs ICNTL(15)=0 on the stated grounds that feral
+        // amortizes scaling into analysis; that is only apples-to-apples
+        // if this line reads ~0 on a warm repeat factorization.
+        let pb = &report.prologue_breakdown;
+        println!(
+            "  prologue: permute={} scaling={} sym_pattern={} setup={}",
+            pb.permute_us, pb.scaling_us, pb.symmetric_pattern_us, pb.setup_us
         );
         println!(
             "  {:<8}{:>10}{:>9}{:>12}{:>10}{:>12}",

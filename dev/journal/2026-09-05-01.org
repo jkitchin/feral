@@ -259,3 +259,136 @@ None of the three requires BLAS, FMA, or breaking bit-exactness. The
 2026-05-22 verdict "realistic pure-Rust micro-kernel headroom is ~2-3x"
 stands and is *sufficient* -- #153 needs 1.4-3.4x, and roughly half of
 it turns out not to be micro-kernel work at all.
+
+* 23:40 :correction:issue-153:instrument-error:
+CORRECTION to the 22:30-23:05 entries. The kernel replay in
+diag_153_kernel_headroom timed =factor_frontal=, not the entry point
+the driver actually calls. =factor_frontal= wraps
+=factor_frontal_blocked_in_place_with_scratch= with a =validate()=
+NaN scan and a =vec![0.0; nrow*nrow]= allocate-and-copy
+(src/dense/factor.rs:1596), both O(nrow^2). The tax therefore scaled
+with the quantity under measurement and hid inside it. The driver
+calls the in-place entry point directly
+(src/numeric/factorize.rs:2674).
+
+Corrected headroom (loop_us / kernel_us), sequential, 1 thread,
+min-of-N, versus what the 22:55 entry recorded:
+
+| matrix         | loop  | kernel | headroom | was published |
+|----------------+-------+--------+----------+---------------|
+| optmass        | 11762 |   8775 |    1.34x |         1.85x |
+| robot_1600     |  4578 |   2412 |    1.90x |         1.90x |
+| steering_12800 | 18908 |  10393 |    1.82x |         1.78x |
+| ex4_2_160      | 53507 |  40350 |    1.33x |         1.11x |
+| arki0009       |  6328 |   4818 |    1.31x |         1.09x |
+
+Also retracted: "the kernel saturates at ~8300 MMac/s from nrow~76
+onward". It does not. Corrected kernel rates climb 77 (3,1) -> 8451
+(76,16) -> 11610 (345,16) -> 13361 (365,22) MMac/s. The plateau was
+the wrapper's O(nrow^2) tax.
+
+Corrected feral-vs-OpenBLAS ratios on identical shapes: 1.36x (3,1),
+1.43x (18,16), 1.78x (36,16), 1.92x (44,16), 2.09x (56,16), 2.40x
+(76,16), 3.39x (345,16), 3.08x (365,22). The gap grows with nrow, so
+it is the wide trapezoidal path specifically.
+
+Posted as a correction on issue #153 (comment 5554911979). The prior
+comment 5554807883 and the 775b8a8 commit message both carry the
+superseded numbers.
+
+* 23:45 :issue-153:headroom:robustness:
+The 1.3-1.9x headroom survives four independent perturbations of the
+replay, so it is not an artifact of the synthetic front:
+
+| variant                    | optmass | robot | steering | ex4  | arki |
+|----------------------------+---------+-------+----------+------+------|
+| dd (diagonally dominant)   |   1.34x | 1.90x |    1.82x | 1.33 | 1.31 |
+| kkt (saddle point)         |   1.36x | 2.04x |    1.76x | 1.34 | 1.34 |
+| cold (64 MB working set)   |   1.34x | 1.92x |    1.83x | 1.32 | 1.32 |
+| may_delay = true           |   1.39x | 1.95x |    1.85x | 1.33 | 1.32 |
+
+Conclusion: pivoting behaviour, cache residency of the input front,
+and delayed pivots are each ruled out as the explanation for the
+residual. What is left is plumbing.
+
+* 23:55 :scaling:infnorm:knight-ruiz:defect:
+Chased the prologue, which the 23:05 entry showed is 62-83% scaling.
+Found a real defect.
+
+src/scaling/infnorm.rs:44 sets max_iter=10, tol=1e-8. That tolerance
+is unreachable on this corpus. Instrumented max_dev per iteration
+(temporary env-gated eprintln, reverted afterwards; src is clean):
+
+  steering n=115201: it=1 1.48e6 -> it=10 1.94e-2
+  ex4      n= 77115: it=1 4.55e10 -> it=10 4.42e-2
+  robot    n= 24000: it=1 9.90e1 -> it=10 1.43e-2
+
+Linear convergence at ~0.5/iteration. Reaching 1e-8 needs ~40 more
+iterations. The cap binds every time on these three; optmass converges
+in 2 and arki in 3. The comment above the loop -- "Most matrices
+converge in 2-4 iterations; a few pathological ones need all 10" --
+is wrong for the KKT corpus: 3 of 5 cap out.
+
+Swept FERAL_KR_MAX (temporary env override, also reverted) to separate
+what the iterations cost from what they buy, numeric phase isolated:
+
+| matrix   | scaling us | numeric @10 | numeric @1 | verdict          |
+|----------+------------+-------------+------------+------------------|
+| robot    |       1056 |        4783 |       4764 | 0% benefit       |
+| steering |       4933 |       23411 |      23961 | 2% for 4.9 ms    |
+| ex4      |       3216 |       57318 |      77906 | 20 ms for 3.2 ms |
+
+So a blanket cap reduction is NOT the fix: ex4 regresses 1.30x. And a
+smarter stopping rule cannot separate the cases -- all three max_dev
+trajectories have the same shape, so the residual carries no signal
+about which matrix needs the iterations.
+
+* 00:05 :scaling:track-b2:cache:issue-153:
+The fix that does work: src/numeric/solver.rs:1485 returns false for
+ScalingStrategy::InfNorm, so the Track-B2 value-bounded cache covers
+MC64 only. InfNorm is recomputed from scratch on every factorization.
+
+Measured on the Solver path (warm solver, min of 7, sequential), via a
+new --scaling flag on diag_200_front_size_buckets:
+
+| matrix   | strategy | plain_us | prologue scaling_us |
+|----------+----------+----------+---------------------|
+| steering | identity |    66631 |                   7 |
+| steering | infnorm  |    29065 |                4874 |
+| steering | mc64     |    23958 |                  13 |
+| ex4      | identity |   176823 |                   5 |
+| ex4      | infnorm  |    61221 |                3211 |
+| ex4      | mc64     |    58916 |                   9 |
+
+Two findings. (1) Scaling is load-bearing, not overhead: Identity is
+2.3-2.9x worse end-to-end. (2) MC64 is 1.21x faster than InfNorm
+end-to-end on steering purely because the cache reduces it to 13 us
+on a warm refactor while InfNorm pays 4874 us every time.
+
+Implication: extend the cache to InfNorm. It needs its own value-bound
+predicate -- mc64_value_bound_passes is a property of the Hungarian
+matching and does not transfer.
+
+This also settles the ICNTL(15)=0 question. ma57_bench.F disables
+MA57's scaling on the stated grounds that feral amortizes MC64 into
+analysis. That is correct for the MC64 path but false for the InfNorm
+path, which the default Auto picks on steering and ex4 and which pays
+in full inside every warm Solver::factor.
+
+* 00:10 :issue-153:plan:
+Posted the consolidated fix plan to #153. Priority order by measured
+lever: (1) extend-add plumbing -- 0.33-0.35 ns/element on every
+matrix, ~70% of the non-kernel loop on large-front matrices, and
+closing it alone projects robot to 1.06x and steering to 0.99x of
+MA57; (2) InfNorm scaling cache -- 1.21x on steering; (3) kernel --
+real 1.4-3.4x gap but the recorded pure-Rust aarch64 ceiling is
+33-35 GFLOPS (40-60% of Accelerate) and ~2x of the remainder is FMA,
+forfeited by the bit-exactness contract, so expectations belong at
+~1.4x not 3x.
+
+Open item carried forward, stated as open rather than resolved: on the
+17-32-row fronts the non-kernel cost is 2.0-3.0 ns/element and the
+named counters explain only ~40% of it -- roughly 800-1200 ns/front is
+unattributed. PHASE_TIMING's 350-430 ns/front probe tax makes it the
+wrong instrument at that size class; a lighter targeted probe is
+needed before anyone optimizes there.
