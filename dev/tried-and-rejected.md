@@ -6179,3 +6179,83 @@ why the error survived review — only the un-averaged side moved.
 **Rejected.** Min-of-N on **both** sides of any cross-solver comparison,
 with N ≥ 9 and the spread reported. Corrected feral/MA57 range on this
 corpus: **1.4×–3.4×**, not 0.06×–4.17×.
+
+---
+
+## 2026-09-05 — Caching the InfNorm scaling vector (third re-proposal of closed KR work)
+
+**What was proposed.** After measuring that InfNorm scaling costs
+4933 µs on steering_12800_0002 and 3216 µs on ex4_2_160_0002 inside
+every warm `Solver::factor`, while MC64 on the same matrices costs ~13 µs
+because the Track-B2 cache covers it, I proposed extending the B2 cache
+to the InfNorm route and published that on #153 (comment 5554911979)
+before searching this file.
+
+**Why it is wrong.** The InfNorm exclusion in `src/numeric/solver.rs`'s
+`mc64_ran` gate is deliberate, not an oversight. `decisions.md`
+2026-05-22 (#49) records that the cache previously *did* capture InfNorm
+vectors — `compute_infnorm` returns a `ScalingInfo::Applied` that is
+byte-identical to MC64's — and re-injected a stale iter-k vector as
+`ScalingStrategy::External` on the next warm factor. On ex4_2 the
+value-bound gate passes anyway, so the stale scaling was silently
+accepted: a latent correctness defect. The `mc64_ran` conjunction exists
+to prevent exactly this, with
+`mc64_cache_does_not_engage_on_infnorm_route_issue_49` enforcing it.
+
+I suggested InfNorm could get "its own value-bound predicate". No such
+predicate can pass. MC64 caches a *matching* — combinatorial,
+pattern-stable, certifiable against value drift. InfNorm's output is a
+pure function of the values, which change every IPM iteration, and the
+2026-08-15 and 2026-09-04 warm-start experiments already measured the
+drift: seeding from the previous iterate's converged `d` is *worse* than
+cold (steering warm-1/2/3 reach `max_dev` 1.23e0 / 4.59e-1 / 2.40e-1
+against cold-10's 1.94e-2). A reuse cache is a warm start with zero
+sweeps and inherits that failure directly.
+
+**Instrument error behind the supporting number.** The 1.21× end-to-end
+"win" I measured for forcing MC64 on steering (23958 vs 29065 µs) came
+from a warm-repeat protocol that factors the *same values* on every rep.
+That protocol makes any values-keyed cache look valuable precisely
+because the values never change, which is not the workload. Same class
+of error as the `factor_frontal` mistake earlier the same session: the
+measurement setup produced the result, not the system.
+
+**Also re-derived rather than discovered.** The "tol = 1e-8 is
+unreachable, the cap always binds, and the code comment is wrong"
+finding is recorded at `tried-and-rejected.md:5051` (2026-08-15) and
+again 2026-09-04. My per-sweep trace reproduced the 2026-09-04 steering
+trajectory digit for digit (1.48e6 … 1.94e-2).
+
+**Process failure.** `tried-and-rejected.md:5494` already records that
+two consecutive sessions spent user goodwill re-proposing closed work,
+and states that the grep belongs before the recommendation. This is the
+third instance, and the first to reach a public issue. CLAUDE.md's
+Normal Session Protocol puts the search before writing code; it needs to
+apply before *publishing a recommendation* too, which is the step that
+actually costs something.
+
+**What survives.** Two downstream-cost results the prior entries did not
+cover, retained on #153 (comment 5555052797):
+
+- Scaling is load-bearing: `ScalingStrategy::Identity` costs steering
+  66631 µs and ex4 176823 µs against 29065 and 61221 with InfNorm —
+  2.3–2.9× worse end-to-end.
+- The 10 KR iterations are waste on two of three cap-bound matrices and
+  pay on the third, with the numeric phase isolated:
+
+  | matrix | scaling µs | numeric @10 | numeric @1 | net |
+  |---|---|---|---|---|
+  | robot_1600 | 1056 | 4783 | 4764 | 0% benefit |
+  | steering_12800 | 4933 | 23411 | 23961 | 2% for 4.9 ms |
+  | ex4_2_160 | 3216 | 57318 | 77906 | 20 ms saved for 3.2 ms |
+
+  This confirms the 2026-09-04 cap rejection from the downstream side
+  rather than the scaling-quality side, and sharpens why the lever is
+  hard: the same cap that is waste on robot/steering is the one ex4
+  needs, and the `max_dev` trajectories are the same shape on all three,
+  so the scaling loop's own state carries no signal to key a per-matrix
+  policy on.
+
+**Rejected.** Scaling is off the #153 actionable list. Caching and
+cap-cutting are both closed; a per-matrix policy is the only remaining
+form and there is no measured signal to drive it.
