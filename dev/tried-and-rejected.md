@@ -6120,3 +6120,62 @@ is doing real work.)
 
 **Why it would not have paid anyway.** Even eliminating scaling entirely
 removes 5.6% of optmass, where the gap to MA57 is 4.17×.
+
+---
+
+## 2026-09-05 — Least-squares `t = a·fronts + b·flops` as an attribution method (#200)
+
+**What was tried.** On 2026-09-04 this branch fitted a two-parameter
+model `t_us = a·fronts + b·flops` over five matrices to split
+factorization time into a fixed per-front term and an arithmetic term.
+It returned `a = 0.713 µs/front`, and that number was published on
+issue #200 as "the fixed-per-front term is 96% of optmass."
+
+**Symptoms.** The model has no `nrow` term, so per-front cost that grows
+with front size had nowhere to go but the intercept. Measured directly
+with feral's own per-front-size profiler (`Solver::with_profiling(true)`
+→ `ProfileReport`, the issue-#52 Phase B instrument, in-tree since
+before this investigation began), optmass's 13.08 ms supernode loop
+splits 49.1% into 39999 fronts of `nrow ≤ 8` at **161 ns each** and
+50.8% into 3748 fronts of `nrow` 17–32 at 1773 ns each. The fitted
+intercept charged those 3748 medium fronts — 6.6 ms — to "fixed
+per-front cost."
+
+The true per-front constant is **161–227 ns** on all five matrices, and
+196 ns on the 351k-row AC-OPF KKT measured independently on the pounce
+side: ~0.2 µs, not 0.71 µs. The `<= 8` bucket is 34% of optmass wall
+(6.43 of 19.08 ms), 17.1% on steering, 15.2% on robot_1600, and
+4.2–4.5% on ex4_2_160/arki0009 — never a majority.
+
+**Why it matters beyond the arithmetic.** Making every `nrow ≤ 8` front
+free takes optmass from 19081 µs to ~12650 µs — 3.42× MA57 down to
+2.27×. The lever the fit pointed at cannot reach parity even in its
+best case, on the matrix chosen to maximise it.
+
+**Rejected.** Fitted attribution over a handful of matrices is not
+admissible for this issue. Bucket by front size with `ProfileReport`,
+which measures the thing directly.
+
+---
+
+## 2026-09-05 — Single-run MA57 timings (#200)
+
+**What was tried.** The 2026-09-04 comparison ran `ma57_bench` once per
+matrix (the harness does one factorization per invocation) while taking
+min-of-9 on the feral side.
+
+**Symptoms.** `ex4_2_160_0002` was recorded at **1 302 836 µs**, from
+which the comment concluded "feral is 18× faster than MA57 here" and
+"the ratio spans 70-fold." Not reproducible. Nine cold runs today:
+32565, 31244, 33088, 32525, 36999, 62353, 48235, 55242, 37053 µs. A
+scaling sweep (`ICNTL(15)` = 0,1,2,3,4) gives 42745 / 42614 / 48992 /
+66640 / 42442 µs. Same binary and same matrix: `INFO(14) = 2757122` and
+`RINFO(4) = 4.4772e8` match the 2026-09-04 run exactly, so it was one
+stalled cold run, not a different configuration.
+
+feral's own numbers reproduced within 10% on all five matrices, which is
+why the error survived review — only the un-averaged side moved.
+
+**Rejected.** Min-of-N on **both** sides of any cross-solver comparison,
+with N ≥ 9 and the spread reported. Corrected feral/MA57 range on this
+corpus: **1.4×–3.4×**, not 0.06×–4.17×.

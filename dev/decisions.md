@@ -7731,3 +7731,60 @@ visible as such.
   answer to "why slower than MA57."
 - Growing fronts is not a shortcut to the fixed cost — see the third
   `nemin` rejection in `tried-and-rejected.md` for the same date.
+
+---
+
+## 2026-09-05 — #200 is a duplicate of #153: the deficit is broad, not per-supernode
+
+**Supersedes the 2026-09-04 decision above**, whose target ("reduce the
+fixed per-supernode cost from ~0.71 µs to ~0.18 µs") rested on a fitted
+intercept that direct measurement refutes. See `tried-and-rejected.md`,
+same date, for both retractions (the least-squares fit and the
+single-run MA57 timing).
+
+**Evidence.** Front-size buckets from `Solver::with_profiling(true)`
+(`diag_200_front_size_buckets`), sequential driver, warm, min of 9:
+
+| matrix | snodes | seq µs | `≤8` % of nodes | `≤8` % of loop | `≤8` avg ns |
+|---|---:|---:|---:|---:|---:|
+| optmass | 43750 | 19081 | 91.4% | 49.1% | 161 |
+| robot_1600 | 5728 | 6363 | 65.4% | 15.2% | 227 |
+| steering_12800 | 25055 | 30183 | 76.6% | 17.1% | 183 |
+| ex4_2_160 | 22839 | 64159 | 60.8% | 4.2% | 177 |
+| arki0009 | 2357 | 7345 | 60.4% | 4.5% | 221 |
+
+Throughput against MA57, both sides min-of-9, same session:
+
+| matrix | feral MFlop/s | MA57 MFlop/s | ratio | time ratio |
+|---|---:|---:|---:|---:|
+| optmass | 444 | 1429 | 3.2× | 3.42× |
+| robot_1600 | 1044 | 2861 | 2.7× | 1.62× |
+| steering_12800 | 917 | 2934 | 3.2× | 1.39× |
+| ex4_2_160 | 5943 | 14329 | 2.4× | 2.05× |
+| arki0009 | 6173 | 9500 | 1.5× | 1.73× |
+
+**Decision.** feral runs at **1.5–3.2× fewer flops per second than MA57
+at every front size**, on 0.44–1.20× the work (the fill and flop-volume
+ratios from 2026-09-04 are symbolic, not timing-derived, and stand).
+That is an arithmetic/memory-throughput deficit spread across the whole
+front-size distribution, not a per-supernode constant. Issue #200 is
+therefore the same defect as #153 ("dtoc1nd: 3.8× MA57, concentrated in
+148 fronts of ncol≈62") and should be worked there.
+
+**Corollaries, binding on future work.**
+- A small-front fast path is capped at 34% of wall on the most
+  favourable matrix in the corpus and 4% on the least. It cannot reach
+  parity on any of them. Do not open one as a #200 fix.
+- The corollaries of the 2026-09-04 decision that do not depend on the
+  fitted intercept still hold: report fill and flops beside any
+  wallclock ratio; ordering, fill and scaling are exonerated as the
+  cause; `nemin` is not a lever (three rejections).
+- `PHASE_TIMING_ENABLED` is unfit for attribution on small-front trees
+  for two independent reasons, both now confirmed: its ~10
+  `Instant::now()` pairs per supernode cost 0.20–0.41 µs/front
+  (`diag_200_probe_tax`), *and* `src/dense/factor.rs:2168` routes
+  `ncol < 8` fronts to `factor_frontal_in_place_with_scratch`, which
+  carries no `PANELFACTOR`/`SCHUR`/`SCALARTAIL` counters — so their
+  arithmetic is uncounted and lands in `DENSEFACTOR`'s unnamed
+  remainder. The second mechanism was identified on the pounce side and
+  verified here in the source. Use `ProfileReport` instead.
