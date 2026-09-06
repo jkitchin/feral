@@ -305,6 +305,22 @@ C     ---- Write result ----
       WRITE(12,'(A,I0)') "factor_us ", FAC_US
       WRITE(12,'(A,I0)') "solve_us ", SOL_US
       WRITE(12,'(A,ES24.16E3)') "rel_res ", REL_RES
+C     Work-volume fields, so a wallclock comparison against another
+C     solver can be normalised by the work actually performed rather
+C     than assumed equal. After MA57BD:
+C       INFO(14)  = number of entries in the factors
+C       INFO(13)  = number of delayed (2x2 / postponed) pivots
+C       RINFO(3)  = flops for the assembly process
+C       RINFO(4)  = flops for the elimination process
+C     After MA57AD (forecasts, kept for reference):
+C       INFO(5)   = forecast reals to hold factors
+C       RINFO(1)  = forecast assembly flops
+C       RINFO(2)  = forecast elimination flops
+      WRITE(12,'(A,I0)') "nnz_factor ", INFO(14)
+      WRITE(12,'(A,I0)') "n_delayed ", INFO(13)
+      WRITE(12,'(A,ES24.16E3)') "flops_assembly ", RINFO(3)
+      WRITE(12,'(A,ES24.16E3)') "flops_elim ", RINFO(4)
+      WRITE(12,'(A,I0)') "forecast_nnz_factor ", INFO(5)
       WRITE(12,'(A,I0)') "info1 ", INFO(1)
       WRITE(12,'(A,I0)') "info24 ", INFO(24)
       WRITE(12,'(A,I0)') "info25 ", INFO(25)

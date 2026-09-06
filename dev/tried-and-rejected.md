@@ -6010,3 +6010,328 @@ evaluation, including the falsifiers that would flip the answer and the
 reproduction code for every number above, is in
 `dev/research/krylov-recycling-evaluation-2026-09-01.md`. Read that before
 re-opening the question.
+
+---
+
+## 2026-09-04 — Issue #200's "UNATTRIBUTED 33–39%" was the profiler itself
+
+**What was tried.** Issue #200 attributes 33–39% of factor time to an
+UNATTRIBUTED bucket computed as `total − ASSEMBLY − DENSEFACTOR` from
+`phase_timing` counters, and proposes reducing per-supernode overhead on
+that basis. The first hypothesis pursued was that the untimed
+`scalar_pivot_step` loop in `factor_frontal_in_place_with_scratch_impl`
+accounted for the residual, so the loop was instrumented with a new
+`SCALARLOOP_NS` counter plus `FRONTSETUP_NS`, `FRONTTAIL_NS`,
+`SCALARLOOP_FRONTS`, `PANEL_FRONTS`.
+
+**Symptoms.** The scalar loop measured **1.6–4.5%** of factor time, not
+33–39%. The hypothesis was wrong.
+
+**What the residual actually is.** Paired alternating A/B of
+`PHASE_TIMING_ENABLED` off vs on, same warm `Solver`, min of 9,
+`RAYON_NUM_THREADS=1` (`diag_200_probe_tax`):
+
+| matrix | OFF µs | ON µs | ratio | fronts | tax ns/front |
+|---|---|---|---|---|---|
+| optmass_0002 | 23216 | 41181 | **1.77** | 43750 | 411 |
+| robot_1600_0002 | 7483 | 9758 | 1.30 | 5728 | 397 |
+| steering_12800_0002 | 33630 | 44335 | 1.32 | 25055 | 427 |
+| ex4_2_160_0002 | 70632 | 78598 | 1.11 | 22839 | 349 |
+| arki0009_0002 | 8470 | 8930 | 1.05 | 2357 | 195 |
+
+Mechanism: `DENSEFACTOR_NS` brackets the *whole* dense factor, so the cost
+of the inner probes is counted inside DENSEFACTOR but outside
+PANELFACTOR/SCHUR/LEXTRACT/CONTRIBEXTRACT — it lands exactly in
+"densefactor minus its named children," which is the bucket #200 reports.
+On a tree whose median front is 3–7 rows the probe constant is the same
+order as the quantity being attributed.
+
+**Disposition.** The added counters were **reverted** from
+`src/dense/factor.rs`; the hot path is back to its pre-session state.
+Re-running `diag_200_probe_tax` after the revert gives optmass 22394 →
+34151 µs, ratio **1.52**, 269 ns/front — i.e. the five counters this
+session added were themselves costing ~140 ns/front. That is direct
+evidence for the rule below.
+
+**Rule.** `phase_timing` numbers are usable for *ranking* phases on
+matrices with large fronts. They are **not** usable for attributing a
+residual on IPM-KKT trees with tiny fronts, and no per-front counter
+should be added to `src/dense/factor.rs` without first measuring its tax
+with `diag_200_probe_tax`. Front counts are available statically from
+`symbolic_factorize(...).supernodes.len()` and need no runtime counter.
+
+---
+
+## 2026-09-04 — Raising `nemin` to grow fronts (rejected, third time)
+
+**What was tried.** The per-front fixed cost is the dominant term on
+bushy IPM-KKT trees, so the obvious lever is fewer, larger fronts. Swept
+`nemin` ∈ {32, 64, 128, 512} × {`Renumber`, `Adjacency`}
+(`diag_200_amalg_sweep`, uninstrumented min factor time).
+
+**Symptoms — it makes things worse, not better.** Factor-time ratio vs
+the `nemin = 32` default:
+
+| matrix | 32 | 64 | 128 | 512 |
+|---|---|---|---|---|
+| optmass_0002 | 1.00 | 1.37 | 2.58 | **25.70** |
+| robot_1600_0002 | 1.00 | 1.78 | 4.09 | **46.60** |
+| steering_12800_0002 | 1.00 | 1.71 | 3.08 | **39.03** |
+
+Both strategies behave the same. The structure barely moves: optmass goes
+from 41875 to 40052 supernodes (4% fewer) at `nemin` 32→64, and the
+**median front stays at 4 rows through the entire sweep** while the max
+front grows 34 → 514. Amalgamation adds flops to the fronts it merges
+without removing the tiny ones that carry the fixed cost, so the extra
+arithmetic is paid and the overhead is not saved.
+
+This is the third rejection of a `nemin` retune. The prior two were on
+accuracy (MEYER3NE 83× residual at `nemin=4`, VESUVIOU 2789× at
+`nemin=8`, HATFLDG 7 digits lost). This one is on speed, at the opposite
+end of the range. `nemin = 32` is not a parameter with headroom in either
+direction.
+
+---
+
+## 2026-09-04 — Knight-Ruiz scaling: warm-start and iteration-cap cuts
+
+**What was tried.** Scaling is 5.6% (optmass) to 19.9% (steering) of
+factor self-time in the samply profile, and the KR loop runs to its
+`max_iter = 10` cap on three of the five matrices (optmass 2, arki 3,
+robot/steering/ex4_2 all 10). Two reductions were tested: reusing the
+previous factorization's scaling vector as a warm start, and lowering the
+cap.
+
+**Symptoms — warm start.** The scaling vector is not close to the
+previous one. On steering_12800_0002, cold-10 reaches `max_dev` 1.94e-2;
+warm-started runs of 1/2/3 sweeps reach 1.23e0 / 4.59e-1 / 2.40e-1 — one
+to two orders of magnitude *worse* — with `max|d_warm − d_cold|/d_cold =
+4.92e-1`. ex4_2_160_0002: cold-10 = 4.42e-2 vs warm-3 = 7.59e-1, relative
+difference 4.63e-1. A warm start would silently ship a differently scaled
+matrix, changing pivot order and inertia.
+
+**Symptoms — cap reduction.** There is no plateau to cut at. Per-sweep
+`max_dev` on steering_12800_0002: 1.48e6, 9.99e-1, 9.41e-1, 7.33e-1,
+4.74e-1, 2.71e-1, 1.46e-1, 7.54e-2, 3.84e-2, 1.94e-2 — a clean linear
+decay of ~0.5× per sweep that is still improving when the cap hits.
+Cutting to 5 sweeps leaves `max_dev` at 4.7e-1. (optmass converges to
+2.22e-16 by sweep 2 and already exits early; the cap only binds where it
+is doing real work.)
+
+**Why it would not have paid anyway.** Even eliminating scaling entirely
+removes 5.6% of optmass, where the gap to MA57 is 4.17×.
+
+---
+
+## 2026-09-05 — Least-squares `t = a·fronts + b·flops` as an attribution method (#200)
+
+**What was tried.** On 2026-09-04 this branch fitted a two-parameter
+model `t_us = a·fronts + b·flops` over five matrices to split
+factorization time into a fixed per-front term and an arithmetic term.
+It returned `a = 0.713 µs/front`, and that number was published on
+issue #200 as "the fixed-per-front term is 96% of optmass."
+
+**Symptoms.** The model has no `nrow` term, so per-front cost that grows
+with front size had nowhere to go but the intercept. Measured directly
+with feral's own per-front-size profiler (`Solver::with_profiling(true)`
+→ `ProfileReport`, the issue-#52 Phase B instrument, in-tree since
+before this investigation began), optmass's 13.08 ms supernode loop
+splits 49.1% into 39999 fronts of `nrow ≤ 8` at **161 ns each** and
+50.8% into 3748 fronts of `nrow` 17–32 at 1773 ns each. The fitted
+intercept charged those 3748 medium fronts — 6.6 ms — to "fixed
+per-front cost."
+
+The true per-front constant is **161–227 ns** on all five matrices, and
+196 ns on the 351k-row AC-OPF KKT measured independently on the pounce
+side: ~0.2 µs, not 0.71 µs. The `<= 8` bucket is 34% of optmass wall
+(6.43 of 19.08 ms), 17.1% on steering, 15.2% on robot_1600, and
+4.2–4.5% on ex4_2_160/arki0009 — never a majority.
+
+**Why it matters beyond the arithmetic.** Making every `nrow ≤ 8` front
+free takes optmass from 19081 µs to ~12650 µs — 3.42× MA57 down to
+2.27×. The lever the fit pointed at cannot reach parity even in its
+best case, on the matrix chosen to maximise it.
+
+**Rejected.** Fitted attribution over a handful of matrices is not
+admissible for this issue. Bucket by front size with `ProfileReport`,
+which measures the thing directly.
+
+---
+
+## 2026-09-05 — Single-run MA57 timings (#200)
+
+**What was tried.** The 2026-09-04 comparison ran `ma57_bench` once per
+matrix (the harness does one factorization per invocation) while taking
+min-of-9 on the feral side.
+
+**Symptoms.** `ex4_2_160_0002` was recorded at **1 302 836 µs**, from
+which the comment concluded "feral is 18× faster than MA57 here" and
+"the ratio spans 70-fold." Not reproducible. Nine cold runs today:
+32565, 31244, 33088, 32525, 36999, 62353, 48235, 55242, 37053 µs. A
+scaling sweep (`ICNTL(15)` = 0,1,2,3,4) gives 42745 / 42614 / 48992 /
+66640 / 42442 µs. Same binary and same matrix: `INFO(14) = 2757122` and
+`RINFO(4) = 4.4772e8` match the 2026-09-04 run exactly, so it was one
+stalled cold run, not a different configuration.
+
+feral's own numbers reproduced within 10% on all five matrices, which is
+why the error survived review — only the un-averaged side moved.
+
+**Rejected.** Min-of-N on **both** sides of any cross-solver comparison,
+with N ≥ 9 and the spread reported. Corrected feral/MA57 range on this
+corpus: **1.4×–3.4×**, not 0.06×–4.17×.
+
+---
+
+## 2026-09-05 — Caching the InfNorm scaling vector (third re-proposal of closed KR work)
+
+**What was proposed.** After measuring that InfNorm scaling costs
+4933 µs on steering_12800_0002 and 3216 µs on ex4_2_160_0002 inside
+every warm `Solver::factor`, while MC64 on the same matrices costs ~13 µs
+because the Track-B2 cache covers it, I proposed extending the B2 cache
+to the InfNorm route and published that on #153 (comment 5554911979)
+before searching this file.
+
+**Why it is wrong.** The InfNorm exclusion in `src/numeric/solver.rs`'s
+`mc64_ran` gate is deliberate, not an oversight. `decisions.md`
+2026-05-22 (#49) records that the cache previously *did* capture InfNorm
+vectors — `compute_infnorm` returns a `ScalingInfo::Applied` that is
+byte-identical to MC64's — and re-injected a stale iter-k vector as
+`ScalingStrategy::External` on the next warm factor. On ex4_2 the
+value-bound gate passes anyway, so the stale scaling was silently
+accepted: a latent correctness defect. The `mc64_ran` conjunction exists
+to prevent exactly this, with
+`mc64_cache_does_not_engage_on_infnorm_route_issue_49` enforcing it.
+
+I suggested InfNorm could get "its own value-bound predicate". No such
+predicate can pass. MC64 caches a *matching* — combinatorial,
+pattern-stable, certifiable against value drift. InfNorm's output is a
+pure function of the values, which change every IPM iteration, and the
+2026-08-15 and 2026-09-04 warm-start experiments already measured the
+drift: seeding from the previous iterate's converged `d` is *worse* than
+cold (steering warm-1/2/3 reach `max_dev` 1.23e0 / 4.59e-1 / 2.40e-1
+against cold-10's 1.94e-2). A reuse cache is a warm start with zero
+sweeps and inherits that failure directly.
+
+**Instrument error behind the supporting number.** The 1.21× end-to-end
+"win" I measured for forcing MC64 on steering (23958 vs 29065 µs) came
+from a warm-repeat protocol that factors the *same values* on every rep.
+That protocol makes any values-keyed cache look valuable precisely
+because the values never change, which is not the workload. Same class
+of error as the `factor_frontal` mistake earlier the same session: the
+measurement setup produced the result, not the system.
+
+**Also re-derived rather than discovered.** The "tol = 1e-8 is
+unreachable, the cap always binds, and the code comment is wrong"
+finding is recorded at `tried-and-rejected.md:5051` (2026-08-15) and
+again 2026-09-04. My per-sweep trace reproduced the 2026-09-04 steering
+trajectory digit for digit (1.48e6 … 1.94e-2).
+
+**Process failure.** `tried-and-rejected.md:5494` already records that
+two consecutive sessions spent user goodwill re-proposing closed work,
+and states that the grep belongs before the recommendation. This is the
+third instance, and the first to reach a public issue. CLAUDE.md's
+Normal Session Protocol puts the search before writing code; it needs to
+apply before *publishing a recommendation* too, which is the step that
+actually costs something.
+
+**What survives.** Two downstream-cost results the prior entries did not
+cover, retained on #153 (comment 5555052797):
+
+- Scaling is load-bearing: `ScalingStrategy::Identity` costs steering
+  66631 µs and ex4 176823 µs against 29065 and 61221 with InfNorm —
+  2.3–2.9× worse end-to-end.
+- The 10 KR iterations are waste on two of three cap-bound matrices and
+  pay on the third, with the numeric phase isolated:
+
+  | matrix | scaling µs | numeric @10 | numeric @1 | net |
+  |---|---|---|---|---|
+  | robot_1600 | 1056 | 4783 | 4764 | 0% benefit |
+  | steering_12800 | 4933 | 23411 | 23961 | 2% for 4.9 ms |
+  | ex4_2_160 | 3216 | 57318 | 77906 | 20 ms saved for 3.2 ms |
+
+  This confirms the 2026-09-04 cap rejection from the downstream side
+  rather than the scaling-quality side, and sharpens why the lever is
+  hard: the same cap that is waste on robot/steering is the one ex4
+  needs, and the `max_dev` trajectories are the same shape on all three,
+  so the scaling loop's own state carries no signal to key a per-matrix
+  policy on.
+
+**Rejected.** Scaling is off the #153 actionable list. Caching and
+cap-cutting are both closed; a per-matrix policy is the only remaining
+form and there is no measured signal to drive it.
+
+## 2026-09-05 — extend_add: fusing the monotone scan into the fill loop
+
+**What was tried.** `extend_add` fills a pooled `pidx` buffer with each
+child row's parent index, then makes a second pass to decide whether the
+indices are strictly increasing (the `monotone` fast path). The second
+pass looked redundant, so it was folded into the fill loop: latch a
+`monotone` flag while writing each slot, no separate scan.
+
+**Why it lost.** The fill has to run to completion regardless, so a fused
+test cannot break out early — whereas the separate scan stops at the first
+violation, and on the matrices where monotonicity fails it usually fails
+early. Measured slower on every matrix in a three-way interleaved campaign
+(base / separate scan / fused, 9 rounds, `--reps 9`,
+`RAYON_NUM_THREADS=1`, per-round paired ratios, median):
+
+| matrix         | separate scan | fused  |
+|----------------|---------------|--------|
+| optmass        | 1.012x        | 0.982x |
+| robot_1600     | 0.998x        | 0.993x |
+| steering_12800 | 0.992x        | 0.985x |
+| ex4_2_160      | 1.063x        | 1.058x |
+| arki0009       | 1.062x        | 1.050x |
+
+Fused is worse on all five. Kept the separate pass.
+
+## 2026-09-05 — extend_add: raising the small-block bypass to SMALL_CDIM = 8
+
+**What was tried.** `extend_add` sends contribution blocks with
+`cdim <= SMALL_CDIM` straight to the original doubly-gathered loop,
+because the `pidx` fill and monotone scan cannot pay for themselves on a
+block of two or three rows. Measured mean `cdim` is 5.3 on
+steering_12800 and 6.0 on robot_1600, both of which showed a ~1% dip at
+`SMALL_CDIM = 4`, so raising the threshold to 8 — putting those two on
+the direct path while leaving ex4_2_160 (9.7) and arki0009 (10.0) on the
+hoisted path — looked like it should recover them.
+
+**Why it lost.** It did not recover them, and it cost the matrices it was
+not supposed to affect. Three-way interleaved campaign (base / t4 / t8, 9
+rounds, per-round paired medians):
+
+| matrix         | t4     | t8     |
+|----------------|--------|--------|
+| optmass        | 1.007x | 0.957x |
+| robot_1600     | 0.993x | 0.987x |
+| steering_12800 | 0.991x | 0.988x |
+| ex4_2_160      | 1.061x | 1.041x |
+| arki0009       | 1.071x | 1.069x |
+
+steering_12800 was not recovered (0.988x vs 0.991x), and ex4_2_160 lost
+2%. Kept `SMALL_CDIM = 4`. The residual ~1% dip on steering_12800 is
+unexplained and is *not* the small-block prologue; it is recorded as an
+open item rather than papered over.
+
+## 2026-09-05 — Attributing an optmass swing to the inner-loop form (instrument error)
+
+**What was claimed, and retracted.** An A/B run appeared to show that
+rewriting `extend_add`'s inner loops from indexed access to the
+slice-and-zip form clippy's `needless_range_loop` asks for cost 10% on
+optmass: 1.080x indexed vs 0.977x zipped. On that basis an
+`#[allow(clippy::needless_range_loop)]` was added to the function with the
+numbers cited as justification.
+
+**Why it was wrong.** The two figures came from *different* interleaved
+campaigns, built at different times. A rerun measured the indexed form at
+0.974x on optmass — statistically the same as the zipped form's 0.977x.
+optmass's "before" minimum ranged 18504-19603 us (6%) across campaigns
+built minutes apart, which swamps the effect being attributed. The
+`allow` and its justification were removed and the idiomatic zipped form
+kept.
+
+**Rule this reinforces.** A ratio between two numbers measured in
+different campaigns is not a measurement. Only per-round paired ratios
+from a single interleaved campaign were used for the threshold and
+loop-form decisions that survived. (Same class of error as the warm-repeat
+cache protocol retracted earlier the same day.)

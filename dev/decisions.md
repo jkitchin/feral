@@ -7646,3 +7646,145 @@ high standard — researched, measured, documented — and still went unused. Th
 gap was not quality but demand: none originated in a request from pounce or
 discopt. Feature work on the solver should start from a consumer-demonstrated
 need, not from an improvement that is available to make.
+
+---
+
+## 2026-09-04 — The feral↔MA57 gap is a per-supernode fixed cost, and it is measured
+
+**Context.** Multiple sessions have profiled feral's factorization looking
+for the source of the reported MA57 gap. Profiling feral in isolation can
+locate feral's time; it cannot explain why there is *more* of it than
+MA57's. That requires knowing whether the two solvers do the same work,
+which nobody had checked.
+
+**What was done.** `external_benchmarks/ma57_oracle/ma57_bench.F` now
+emits work-volume diagnostics alongside its timings: `INFO(14)` (entries
+in the factors), `INFO(13)` (delayed pivots), `RINFO(3)` (assembly
+flops), `RINFO(4)` (elimination flops), `INFO(5)` (forecast reals).
+feral's side comes from `Solver::last_factor_stats().nnz_l` plus a flop
+count taken from the symbolic supernode shapes with the same
+`Σ_{k<ncol}(nrow−k)²` model `RINFO(4)` uses — counted statically, so it
+carries none of the probe distortion documented in
+`tried-and-rejected.md` for the same date.
+
+**Finding 1 — the work is not the problem.** Fill ratio feral/MA57:
+1.01, 0.84, 0.78, 1.07, 1.20. Flop ratio: 1.06, 0.59, 0.44, 0.85, 1.12
+(optmass / robot_1600 / steering_12800 / ex4_2_160 / arki0009, all
+`_0002`). feral never does meaningfully more work; on steering it does
+**2.3× fewer flops and is still 1.65× slower**. Ordering and fill are
+exonerated.
+
+**Finding 2 — the gap is not uniform.** feral:MA57 factor time is 4.17×,
+1.58×, 1.65×, **0.06×**, 1.36×. On ex4_2_160 feral is **18× faster**
+(71.8 ms vs 1.30 s; MA57 manages 344 MFlop/s there with `INFO(13) = 0`,
+so it is not a pivoting blowup). Any statement of the form "feral is
+N× slower than MA57" is a statement about a matrix, not about feral.
+
+**Finding 3 — throughput is a function of flops per front.**
+
+| matrix | flops/front | feral MFlop/s | MA57 MFlop/s | µs/front |
+|---|---|---|---|---|
+| optmass | 194 | 328 | 1284 | 0.591 |
+| steering_12800 | 1105 | 825 | 3127 | 1.339 |
+| robot_1600 | 1159 | 884 | 2354 | 1.311 |
+| ex4_2_160 | 16697 | 5308 | 344 | 3.146 |
+| arki0009 | 19234 | 5902 | 7153 | 3.259 |
+
+feral spans **18×** in throughput across the corpus; MA57 spans 5.6×.
+feral's small-front floor is 328 MFlop/s against MA57's 1284 — **3.9×
+worse**, which is precisely optmass's 4.17× gap. feral loses where, and
+only where, fronts are tiny, by the amount its small-front floor is worse.
+
+Least squares `t_us = a·fronts + b·flops` over the five points gives
+**a = 0.713 µs/front**, b = 1.474e-4 µs/flop (6783 MFlop/s marginal).
+The fit is crude (−35%..+26% residuals; it ignores that per-front cost
+also grows with `nrow`) but the split is not: the fixed term is 96% of
+optmass, ~81% of robot/steering, 20–23% of ex4_2_160/arki0009. At
+0.591 µs/front on optmass, ~2000 cycles at 3.5 GHz go into a 4×4 frontal
+matrix whose arithmetic is 194 flops. Remove the fixed term entirely and
+optmass's arithmetic alone is ~1250 µs against MA57's 6203 — feral would
+be 5× faster.
+
+**Finding 4 — allocation is 14% of it, not all of it.** A counting
+`GlobalAlloc` (`diag_200_alloc_count`) measures **7.9–8.1 heap
+allocations per frontal matrix**, uniform and independent of front size:
+346326 allocations on optmass, one per 24 flops. This cross-checks the
+samply profile exactly (346326 × ~10 ns ≈ 3.5 ms ≈ 13.5% of 25857 µs;
+profile reported `libsystem_malloc` at 13.6%). But it is only ~0.08 µs of
+the 0.591 µs/front: eliminating **every** per-front allocation takes
+optmass to ~22300 µs, still 3.6× MA57.
+
+**Decision.** The optimisation target for issue #200 is stated
+quantitatively and is now falsifiable: **reduce the fixed per-supernode
+cost from ~0.71 µs to ~0.18 µs**, which is MA57 parity on optmass. Any
+proposal for this issue must be evaluated against that number, on
+`diag_200_work_vs_ma57`'s uninstrumented min-of-9 timing, with the
+work-volume columns shown so a "win" that merely moved flops around is
+visible as such.
+
+**Corollaries, binding on future work.**
+- Do not open a performance investigation on this gap with a wallclock
+  ratio alone. Report fill and flops beside it or the number means
+  nothing.
+- The kernels, the ordering, the fill and the scaling are all exonerated
+  as the *cause*. They may still be worth improving; they are not the
+  answer to "why slower than MA57."
+- Growing fronts is not a shortcut to the fixed cost — see the third
+  `nemin` rejection in `tried-and-rejected.md` for the same date.
+
+---
+
+## 2026-09-05 — #200 is a duplicate of #153: the deficit is broad, not per-supernode
+
+**Supersedes the 2026-09-04 decision above**, whose target ("reduce the
+fixed per-supernode cost from ~0.71 µs to ~0.18 µs") rested on a fitted
+intercept that direct measurement refutes. See `tried-and-rejected.md`,
+same date, for both retractions (the least-squares fit and the
+single-run MA57 timing).
+
+**Evidence.** Front-size buckets from `Solver::with_profiling(true)`
+(`diag_200_front_size_buckets`), sequential driver, warm, min of 9:
+
+| matrix | snodes | seq µs | `≤8` % of nodes | `≤8` % of loop | `≤8` avg ns |
+|---|---:|---:|---:|---:|---:|
+| optmass | 43750 | 19081 | 91.4% | 49.1% | 161 |
+| robot_1600 | 5728 | 6363 | 65.4% | 15.2% | 227 |
+| steering_12800 | 25055 | 30183 | 76.6% | 17.1% | 183 |
+| ex4_2_160 | 22839 | 64159 | 60.8% | 4.2% | 177 |
+| arki0009 | 2357 | 7345 | 60.4% | 4.5% | 221 |
+
+Throughput against MA57, both sides min-of-9, same session:
+
+| matrix | feral MFlop/s | MA57 MFlop/s | ratio | time ratio |
+|---|---:|---:|---:|---:|
+| optmass | 444 | 1429 | 3.2× | 3.42× |
+| robot_1600 | 1044 | 2861 | 2.7× | 1.62× |
+| steering_12800 | 917 | 2934 | 3.2× | 1.39× |
+| ex4_2_160 | 5943 | 14329 | 2.4× | 2.05× |
+| arki0009 | 6173 | 9500 | 1.5× | 1.73× |
+
+**Decision.** feral runs at **1.5–3.2× fewer flops per second than MA57
+at every front size**, on 0.44–1.20× the work (the fill and flop-volume
+ratios from 2026-09-04 are symbolic, not timing-derived, and stand).
+That is an arithmetic/memory-throughput deficit spread across the whole
+front-size distribution, not a per-supernode constant. Issue #200 is
+therefore the same defect as #153 ("dtoc1nd: 3.8× MA57, concentrated in
+148 fronts of ncol≈62") and should be worked there.
+
+**Corollaries, binding on future work.**
+- A small-front fast path is capped at 34% of wall on the most
+  favourable matrix in the corpus and 4% on the least. It cannot reach
+  parity on any of them. Do not open one as a #200 fix.
+- The corollaries of the 2026-09-04 decision that do not depend on the
+  fitted intercept still hold: report fill and flops beside any
+  wallclock ratio; ordering, fill and scaling are exonerated as the
+  cause; `nemin` is not a lever (three rejections).
+- `PHASE_TIMING_ENABLED` is unfit for attribution on small-front trees
+  for two independent reasons, both now confirmed: its ~10
+  `Instant::now()` pairs per supernode cost 0.20–0.41 µs/front
+  (`diag_200_probe_tax`), *and* `src/dense/factor.rs:2168` routes
+  `ncol < 8` fronts to `factor_frontal_in_place_with_scratch`, which
+  carries no `PANELFACTOR`/`SCHUR`/`SCALARTAIL` counters — so their
+  arithmetic is uncounted and lands in `DENSEFACTOR`'s unnamed
+  remainder. The second mechanism was identified on the pounce side and
+  verified here in the source. Use `ProfileReport` instead.

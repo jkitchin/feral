@@ -1,0 +1,338 @@
+* 19:40 :issue200:measurement:phase-timing:
+Started issue #200 (IPM-KKT factorization 2.7-2.9x slower than MA57,
+attributed to per-supernode overhead) on branch
+feat/200-per-supernode-overhead. Issue #200's headline is an
+UNATTRIBUTED bucket of 33-39% computed as
+=total - ASSEMBLY - DENSEFACTOR=. Before optimizing anything I tried to
+name that bucket, per the issue's own top recommendation.
+
+First pass: split factor() wallclock into prologue / loop / epilogue with
+the existing =phase_timing= counters plus =ProfileReport=, warm solver,
+=RAYON_NUM_THREADS=1=, min of 7. Prologue collapses to 1.2-12.4% once
+genuinely warm (the permute-value-map cache needs THREE factor calls
+before steady state: call 1 has no symbolic cache and by issue #56 N7
+deliberately builds no value map, call 2 builds it, call 3 is the first
+warm one). So the prologue is not the target and =permute= is 0.3-2.2%.
+
+Residual localized to inside the dense frontal factor: densefactor minus
+(panel+schur+scalartail) was 32-40% of total on small-front matrices
+(optmass, robot_1600, steering_12800; median front nrow 3-6) versus
+17-21% on large-front ones (ex4_2_160, arki0009; max front 461/509).
+
+* 20:05 :issue200:phase-timing:hypothesis-rejected:
+Hypothesis: the scalar in-place path
+=factor_frontal_in_place_with_scratch_impl= (taken when
+=ncol < PANEL_MIN_NCOL=, i.e. 8) has NO phase counter on its
+=scalar_pivot_step= loop -- only LEXTRACT/CONTRIBEXTRACT are timed there,
+and SCALARTAIL_NS covers only the tail inside the *blocked* entry. So on
+tiny-front KKTs the real elimination arithmetic would land in the
+unattributed residual and read as overhead.
+
+Added =SCALARLOOP_NS= plus =SCALARLOOP_FRONTS= / =PANEL_FRONTS=.
+Routing confirmed: 76.6-91.4% of fronts take the scalar path. But the
+time did not: scalar-loop is only 1.6-4.5% of total. Hypothesis rejected
+-- the tiny fronts are numerous but cheap. Unnamed residual still
+5.5-23.7%.
+
+* 20:20 :issue200:measurement:probe-tax:invalidates-issue:
+Normalized the unnamed residual per front:
+
+| matrix     | unnamed us | fronts | ns/front |
+| optmass    |       6918 |  43750 |      158 |
+| robot_1600 |       1948 |   5728 |      340 |
+| steering   |       8033 |  25055 |      321 |
+| ex4_2_160  |       4083 |  22839 |      179 |
+| arki0009   |        559 |   2357 |      237 |
+
+A per-front CONSTANT, independent of matrix. That is issue #200's thesis
+-- but it is also exactly the signature of the measurement apparatus.
+Confirmed directly: bracketing the two remaining untimed regions
+(front entry setup, front exit tail) with two more counter pairs raised
+optmass densefactor-bookkeeping from 35.0% to 41.9% of total, i.e.
++4139 us over 43750 fronts = +95 ns/front, which is 4 extra
+=Instant::now()= calls at ~24 ns each on this machine.
+
+Decisive experiment: =diag_200_probe_tax=, paired alternating A/B on one
+warm Solver, =PHASE_TIMING_ENABLED= off vs on, min_us of 9 pairs:
+
+| matrix     | OFF us | ON us | ratio | fronts | tax ns/front |
+| optmass    |  23216 | 41181 |  1.77 |  43750 |          411 |
+| robot_1600 |   7483 |  9758 |  1.30 |   5728 |          397 |
+| steering   |  33630 | 44335 |  1.32 |  25055 |          427 |
+| ex4_2_160  |  70632 | 78598 |  1.11 |  22839 |          349 |
+| arki0009   |   8470 |  8930 |  1.05 |   2357 |          195 |
+
+CONCLUSION: =phase_timing= costs ~350-430 ns per front and inflates
+optmass factor time by 1.77x. The multifrontal driver brackets ~10
+regions per supernode; on a matrix whose median front is 3x3 that is a
+per-front constant of the same order as the residual being attributed.
+Mechanism for why it lands in the residual specifically: DENSEFACTOR_NS
+brackets the whole dense factor, so the inner probes' own cost IS counted
+inside DENSEFACTOR but is NOT counted inside PANELFACTOR / SCHUR /
+LEXTRACT / CONTRIBEXTRACT -- it appears precisely as
+"densefactor minus its named children".
+
+Issue #200's UNATTRIBUTED 33-39% is therefore not a finding about feral.
+It is the cost of measuring feral. Every percentage in the issue is a
+fraction of a denominator inflated by up to 1.77x. Recorded here before
+any optimization work, because acting on that attribution would have
+meant optimizing the profiler.
+
+* 20:45 :issue200:profiling:samply:
+Switched to a sampling profiler (=samply=, already installed) to get
+attribution with no instrumentation at all. New binary
+=diag_200_hotloop= factors a warm matrix in a loop with every counter
+off. Recorded at 2000 Hz, 300 iterations, =RAYON_NUM_THREADS=1=.
+Symbolized via the =--unstable-presymbolicate= sidecar (function-level;
+no line info).
+
+SELF-time budget on the real, uninstrumented factorization:
+
+| group                              | optmass | robot_1600 | steering | ex4_2_160 |
+| driver self (factor_one_supernode) |   12.4% |      10.1% |    11.4% |     17.0% |
+| dense-entry self (blocked+scalar)  |   16.1% |      13.4% |    14.7% |     14.3% |
+| pivot arithmetic                   |   19.9% |      38.8% |    27.4% |      9.3% |
+| memmove/memset/bzero               |    8.7% |       6.4% |     6.0% |      7.8% |
+| allocator                          |    2.6% |       1.2% |     0.9% |      0.7% |
+| scaling (infnorm)                  |    5.6% |       2.0% |    19.9% |      5.7% |
+| rayon/thread wait                  |    9.9% |      15.0% |     3.1% |      2.3% |
+| unresolved                         |   15.7% |       6.5% |     5.8% |      3.4% |
+| other                              |    9.0% |       6.6% |    10.8% |     39.6% |
+
+Inclusive times on optmass: factor_one_supernode 72.5%,
+factor_frontal_blocked_in_place_with_scratch 47.8%,
+factor_frontal_in_place_with_scratch_impl 21.7%.
+
+Issue #200's THESIS survives its broken measurement: per-front management
+(driver self + dense-entry self, neither of which is arithmetic) is
+24-31% of real factor time, and it is a per-front constant. But the
+target moved -- it is split roughly evenly between the driver's own
+per-supernode code and the two dense-factor entry/exit paths, not
+concentrated in one unattributed bucket.
+
+Unplanned finding: steering_12800 spends 19.9% of factor time in
+=compute_infnorm= / =scaled_matrix_infnorm=. That is prologue scaling
+work, per factor call, not per supernode -- outside issue #200's scope
+and much larger on that matrix than anything the issue describes.
+
+* 21:30 :issue200:amalgamation:rejected:
+Tested the master lever. Every per-front cost issue #200 is about is
+paid once per front, so front SIZE moves all of them at once. Default
+=nemin= is already 32 (SSIDS's value) yet optmass's median front nrow is
+4 and 95.5% of fronts have nrow<=8, so the question was whether the size
+rule =child_ncol < nemin && parent_ncol < nemin= is binding or whether
+the column-adjacency precondition
+(=s_first + s_ncol != p_first => continue=, supernode.rs:395) rejects
+merges before the size rule is consulted.
+
+=diag_200_amalg_sweep=: nemin in {32,64,128,512} x {Renumber,Adjacency},
+warm solver, phase timing OFF, min of 7, residual reported alongside.
+
+optmass_0002 (n=110011):
+| config          | snodes | med | max | %<=8  | us      | ratio | resid   |
+| renumber n=32   |  41875 |   4 |  34 | 95.5% |   30795 |  1.00 | 1.98e-6 |
+| renumber n=64   |  40921 |   4 |  66 | 97.7% |   42199 |  1.37 | 1.90e-6 |
+| renumber n=128  |  40403 |   4 | 130 | 98.8% |   79313 |  2.58 | 2.00e-6 |
+| renumber n=512  |  40052 |   4 | 514 | 99.7% |  791276 | 25.70 | 1.77e-6 |
+| adjacency n=512 |  40122 |   4 | 514 | 99.7% |  979293 | 31.80 | 1.92e-6 |
+
+robot_1600_0002 ratios: 1.00 / 1.78 / 4.09 / 46.60.
+steering_12800_0002 ratios: 1.00 / 1.71 / 3.08 / 39.03.
+
+REJECTED. Raising nemin 32->512 removes only 4% of supernodes
+(41875 -> 40052) and NEVER moves the median front off 4 -- it only lets a
+handful of fronts grow to 514, which are then dense and cost 25-46x. The
+tiny-front regime is a property of these IPM-KKT elimination trees, not a
+tuning choice: the fronts are small because the tree is bushy and the
+column counts are genuinely 2-6, so there is nothing to merge that does
+not immediately create fill. Neither strategy (Renumber or Adjacency)
+changes this. Front size is not an available lever.
+
+* 21:50 :issue200:scaling:knight-ruiz:rejected:
+Chasing the one large non-arithmetic item left: samply says
+=compute_infnorm= is 18.0% of steering_12800's real factor time, called
+straight from =factorize_multifrontal_supernodal_with_workspace=, not
+from =compute_scaling_with_cache=.
+
+Cause (=diag_200_kr_iters=, replica of the KR loop, same tol 1e-8, same
+cap 10): the scaling does not converge on IPM-KKTs and burns the cap
+every call. Sweeps used: optmass 2, arki0009 3, robot_1600 10,
+steering_12800 10, ex4_2_160 10. Scaling cost tracks this exactly
+(optmass 5.6% of factor time, steering 19.9%).
+
+Lever 1, warm-start =d= from the previous IPM iterate's scaling
+(=diag_200_kr_warmstart=). REJECTED -- it is worse, not cheaper:
+
+| matrix              | cold-10 | warm-1 | warm-2 | warm-3 | max|dw-dc|/dc |
+| steering..._0001    | 1.78e-2 | 7.63e0 |7.64e-1 |4.60e-1 |       6.73e-1 |
+| steering..._0002    | 1.94e-2 | 1.23e0 |4.59e-1 |2.40e-1 |       4.92e-1 |
+| ex4_2_160_0002      | 4.42e-2 | 1.70e2 |9.42e-1 |7.59e-1 |       4.63e-1 |
+
+Three warm sweeps land 1-2 orders of magnitude WORSE than ten cold ones,
+and the resulting scaling vector differs from the cold one by up to 170%.
+Consecutive KKTs are not close enough in the KR metric for the previous
+fixed point to be a good start.
+
+Lever 2, lower the 10-sweep cap. REJECTED -- the iteration is not
+plateauing, it is converging linearly at rate ~0.5/sweep, so every sweep
+dropped costs a factor of two in scaling quality. Per-sweep
+=max_i|rowmax_i - 1|= on steering_12800_0002:
+1.48e6, 9.99e-1, 9.41e-1, 7.33e-1, 4.74e-1, 2.71e-1, 1.46e-1, 7.54e-2,
+3.84e-2, 1.94e-2. Cutting the cap to 4 leaves 7.33e-1 instead of 1.94e-2.
+optmass by contrast is at 2.22e-16 by sweep 2, which is why it only uses
+2. The cap is already a deliberate speed/quality tradeoff.
+
+* 22:05 :issue200:verdict:
+Answer to "is there any improvement to be had here": very little, and
+none of it cheap. Ceiling on the remaining candidate, measured not
+estimated -- self time by library on the uninstrumented run:
+
+| library                  | optmass | robot_1600 | steering | ex4_2_160 |
+| binary (feral code)      |   69.5% |      73.6% |    84.4% |     86.6% |
+| libsystem_malloc         |   13.6% |       5.7% |     5.2% |      3.0% |
+| libsystem_platform       |    9.0% |       6.7% |     6.3% |      7.9% |
+| libsystem_kernel         |    5.5% |      13.1% |     4.0% |      2.1% |
+| libsystem_pthread        |    2.3% |       0.8% |     0.0% |      0.4% |
+
+libsystem_kernel is almost entirely =__psynch_cvwait= (optmass 4.44%,
+robot_1600 12.45%) -- rayon workers idling, an artifact of running the
+parallel driver under RAYON_NUM_THREADS=1, not a cost to optimize.
+
+So the only real remaining target is malloc traffic: ~6 owned
+allocations per front (=perm=, =perm_inv=, =l=, =d_diag=, =d_subdiag=,
+plus driver-side =NodeFactors=), which is 13.6% of factor time on the
+worst matrix and 3-6% on the rest. Capturing it means an arena for the
+factor data, because those Vecs are the persistent output (they live
+until solve) and cannot simply be pooled. That is an architectural change
+to =FrontalFactors= / =NodeFactors= for a bounded ~13.6% best case on one
+matrix -- and the prior art here (Phase 2.11 SmallLeafBatch) is a
+"24-27% reduction" that evaporated into ~5% noise on a 5-run repeat.
+Not recommending it without the user deciding the cost is worth it.
+
+* 23:10 :issue200:ma57:workvolume:explanation:
+Stopped profiling feral in isolation and measured *work volume* against
+MA57, which no prior session had done. Patched
+=external_benchmarks/ma57_oracle/ma57_bench.F= to emit INFO(14)
+(nnz in factors), INFO(13) (delayed pivots), RINFO(3) (assembly flops),
+RINFO(4) (elimination flops), INFO(5) (forecast reals); rebuilt and ran
+on the five issue-#200 matrices. feral side via new
+=diag_200_work_vs_ma57= (nnz_L from =Solver::last_factor_stats()=; flops
+counted from the symbolic supernode shapes with the same
+sum_{k<ncol}(nrow-k)^2 model RINFO(4) uses, so no probe distortion).
+
+| matrix     | feral nnzL | MA57 nnzL | fill f/M | feral flops | MA57 flops | work f/M |
+|------------+------------+-----------+----------+-------------+------------+----------|
+| optmass    |     800012 |    795017 |     1.01 |    8.479e+6 |   7.965e+6 |     1.06 |
+| robot_1600 |     379894 |    450225 |     0.84 |    6.641e+6 |   1.122e+7 |     0.59 |
+| steering   |    1884513 |   2420634 |     0.78 |    2.768e+7 |   6.355e+7 |     0.44 |
+| ex4_2_160  |    2959405 |   2757122 |     1.07 |    3.813e+8 |   4.477e+8 |     0.85 |
+| arki0009   |     370387 |    309395 |     1.20 |    4.534e+7 |   4.031e+7 |     1.12 |
+
+*feral never does meaningfully more work.* Fill is 0.78-1.20x MA57's,
+flops 0.44-1.12x. On steering feral does 2.3x FEWER flops and is still
+1.65x slower. So the gap is not ordering, not fill, not extra
+arithmetic. It is arithmetic *efficiency*.
+
+Wallclock (uninstrumented, min of 9, warm, RAYON_NUM_THREADS=1) and the
+resulting rates:
+
+| matrix     | feral us | MA57 us | time f/M | feral MF/s | MA57 MF/s | flops/front | us/front |
+|------------+----------+---------+----------+------------+-----------+-------------+----------|
+| optmass    |    25857 |    6203 |     4.17 |        328 |      1284 |         194 |    0.591 |
+| robot_1600 |     7510 |    4766 |     1.58 |        884 |      2354 |        1159 |    1.311 |
+| steering   |    33552 |   20325 |     1.65 |        825 |      3127 |        1105 |    1.339 |
+| ex4_2_160  |    71844 | 1302836 |     0.06 |       5308 |       344 |       16697 |    3.146 |
+| arki0009   |     7681 |    5636 |     1.36 |       5902 |      7153 |       19234 |    3.259 |
+
+Two things fall out.
+
+1. The "2.7-2.9x slower" premise of issue #200 is wrong. The ratio spans
+   0.06x to 4.17x - a 70-fold spread. On ex4_2_160 feral is *18x faster*
+   than MA57 (71.8ms vs 1.30s; MA57 manages only 344 MFlop/s there with
+   INFO(13)=0 delayed pivots, so it is not a pivoting blowup - unexplained,
+   but it is MA57's problem, not feral's).
+
+2. feral's throughput is a clean monotone function of flops per front:
+   194 -> 328 MF/s, 1105-1159 -> 825-884, 16697-19234 -> 5308-5902. An
+   18x throughput spread across the corpus. MA57 over the same range
+   spans only 5.6x (1284 -> 7153) and its *small-front floor is 3.9x
+   above feral's*. That single fact is the whole gap: wherever feral
+   loses, it loses exactly where fronts are tiny, and by the amount its
+   small-front floor is worse.
+
+Least-squares fit t_us = a*fronts + b*flops over the five points gives
+a = 0.713 us/front, b = 1.474e-4 us/flop (6783 MFlop/s marginal). The fit
+is crude (-35%..+26% residuals; it ignores that per-front cost also grows
+with nrow) but the split it implies is not subtle: the fixed-per-front
+term is 96% of optmass, 81% of robot/steering, and only 20-23% of
+ex4_2_160/arki0009. Strip the fixed term entirely and optmass's
+arithmetic alone would be ~1250 us against MA57's 6203 - feral would be
+5x *faster*. At 0.591 us/front on optmass, ~2000 cycles at 3.5 GHz are
+spent per 4x4 frontal matrix whose actual arithmetic is ~194 flops.
+
+*Conclusion: the answer to "why is feral slower than MA57" is a fixed
+cost of roughly 0.5-0.7 us per supernode, ~4x MA57's, on trees whose
+median front is 3-7 rows.* Nothing about the dense kernels, the ordering,
+or the fill explains any of it.
+
+* 23:25 :issue200:allocation:perfront:
+Quantified one component of the per-front fixed cost directly. New
+=diag_200_alloc_count= installs a counting =GlobalAlloc= wrapper and
+tallies allocations across one warm =factor()=:
+
+| matrix     | fronts | allocs | alloc/front | MB    | bytes/front |
+|------------+--------+--------+-------------+-------+-------------|
+| optmass    |  43750 | 346326 |        7.92 |  74.8 |        1710 |
+| robot_1600 |   5728 |  44975 |        7.85 |  16.9 |        2959 |
+| steering   |  25055 | 175414 |        7.00 |  58.6 |        2341 |
+| ex4_2_160  |  22839 | 183314 |        8.03 | 129.7 |        5679 |
+| arki0009   |   2357 |  18997 |        8.06 |  21.2 |        8995 |
+
+Essentially exactly *8 heap allocations per frontal matrix*, uniformly,
+independent of front size. On optmass that is 346k malloc round trips for
+8.5e6 flops - one allocation per 24 flops.
+
+Cross-checks against the samply profile: libsystem_malloc was 13.6% of
+optmass time; 346326 allocs x ~10ns fast-path = ~3.5ms = 13.5% of
+25857 us. The two independent measurements agree.
+
+But this bounds the prize honestly: allocation is ~14% of the
+0.591 us/front, i.e. ~0.08 us of it. Eliminating *every* per-front
+allocation would take optmass from 25857 to ~22300 us - still 3.6x MA57.
+It is real and worth doing, but it is not the explanation on its own.
+The remaining ~0.5 us/front is spread across driver self-time (12.4%),
+dense-entry self-time (16.1%), memmove/memset (8.7%) and the 15.7%
+that stayed unresolved in the profile.
+
+Known per-front allocations from reading =factor_frontal_*=: =perm=
+(Vec<usize>, nrow), =perm_inv= (Vec<usize>, nrow), =l= (vec![0.0;
+nrow*nelim]), =d_diag=, =d_subdiag= (=subdiag[..nelim].to_vec()=), plus
+pooled =contrib=. That accounts for 5-6 of the 8; the rest are inside
+callees not yet traced.
+
+* 23:50 :issue200:instrumentation:revert:
+Reverted the five =phase_timing= counters added this session
+(SCALARLOOP_NS, FRONTSETUP_NS, FRONTTAIL_NS, SCALARLOOP_FRONTS,
+PANEL_FRONTS, =phase_timing::count=) from =src/dense/factor.rs=, leaving
+=src/= byte-identical to session start. Re-ran =diag_200_probe_tax=
+after the revert:
+
+| matrix   | OFF us | ON us | ratio | fronts | tax ns/front |
+|----------+--------+-------+-------+--------+--------------|
+| optmass  |  22394 | 34151 |  1.52 |  43750 |          269 |
+| arki0009 |   7635 |  8129 |  1.06 |   2357 |          210 |
+
+Before the revert the same measurement read 1.77x / 411 ns on optmass.
+So the five counters were costing ~140 ns/front on their own - added to
+the exact hot path whose fixed per-front cost is the subject of the
+issue. Keeping them would have made every future measurement worse while
+providing nothing obtainable statically: =diag_200_probe_tax= now takes
+its front count from =symbolic_factorize(..).supernodes.len()=, and
+=diag_200_where_is_time= dropped its scalar-loop/setup/tail columns.
+
+Gates: =cargo test --release= all green (0 FAILED across the workspace);
+=cargo clippy --all-targets --release -- -D warnings= clean;
+=cargo fmt --check= clean after one fmt pass on the new diagnostics.
+=cargo run --bin bench --release= unchanged as expected (src untouched):
+sparse small-frontal p90 1.55 PASS, medium p90 1.55 PASS; dense 1.60 and
+2.03 PASS.

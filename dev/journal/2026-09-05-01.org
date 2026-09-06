@@ -1,0 +1,436 @@
+#+TITLE: Session 2026-09-05-01
+#+DATE: 2026-09-05
+
+* 20:20 :issue200:newinfo:
+Reopened #200 because a new comment (2026-09-05, from the pounce/pglib
+side) retracts the issue's own headline using a much larger AC-OPF KKT
+(=case10000_goc=, n=351559, nnz=1052677) than the =case300_ieee= KKT the
+issue was filed from. Its claims, in the order they matter to us:
+
+1. Front-size buckets from feral's own =Solver::with_profiling(true)=:
+   fronts of nrow<=8 are 68% of supernodes but 10.7% of loop time; 85%
+   of loop time is in fronts >=17 rows. A small-front fast path is
+   therefore capped at ~10%.
+2. The issue's "1.5% of time is arithmetic" is an instrument artifact:
+   =dense/factor.rs= routes ncol<8 fronts to
+   =factor_frontal_in_place_with_scratch=, which carries no
+   PANEL/SCHUR/SCALARTAIL counters, so small-front arithmetic is
+   uncounted and lands in DENSEFACTOR's unnamed remainder.
+3. A bump allocator (pointer-bump alloc, no-op free) moves the large
+   AC-OPF factorization by 0.6-7.7% (138.32 -> 134.37 ms), inside
+   run-to-run spread. The 732258 allocations/factor are real and are
+   *not* the cost.
+4. =nemin= has an interior optimum at 8 on that matrix (131.10 ms vs
+   135.70 at the default 16), not the monotone trend the issue reported.
+
+Claims 2 and 3 bear directly on the comment this branch posted
+(2026-09-04), whose candidate list led with "eliminate the 8 per-front
+allocations" and whose §4 attributed 96% of optmass to a fixed
+per-front term.
+
+* 20:24 :issue200:codeinspection:confirmed:
+Verified claim 2 in the source. =src/dense/factor.rs:2168= sets
+=PANEL_MIN_NCOL = 8= and =ncol < PANEL_MIN_NCOL= returns
+=factor_frontal_in_place_with_scratch=. Grepping the counters inside
+=factor_frontal_in_place_with_scratch_impl= (lines 1724-1990) finds
+LEXTRACT_NS, CONTRIBEXTRACT_NS and CONTRIBZEROFILL_NS but *no*
+PANELFACTOR_NS, SCHUR_NS or SCALARTAIL_NS. Confirmed as stated: on a
+tree whose median front is 3-7 rows most arithmetic is uncounted by the
+arithmetic counters.
+
+This is a *second* mechanism feeding the UNATTRIBUTED bucket, additive
+to the probe-tax mechanism this branch reported on 2026-09-04. Our
+explanation was correct but incomplete; theirs identifies the larger
+half.
+
+* 20:40 :issue200:frontsize:refutation:
+Ran their instrument on our matrices. New binary
+=diag_200_front_size_buckets= (feral's own =with_profiling(true)= ->
+=ProfileReport=, whose buckets are exactly the ranges they report; one
+=Instant::now()= pair per supernode, not the ~10 of PHASE_TIMING).
+Sequential driver, warm solver, min of 9, RAYON_NUM_THREADS=1. Probe
+tax measured alongside: 0.96-1.12x, i.e. negligible except on optmass.
+
+| matrix     | snodes | seq us | loop ns  | <=8 nodes | <=8 % loop | <=8 avg ns |
+|------------+--------+--------+----------+-----------+------------+------------|
+| optmass    |  43750 |  19081 | 13081956 |     39999 |      49.1% |        161 |
+| robot_1600 |   5728 |   6363 |  5595600 |      3744 |      15.2% |        227 |
+| steering   |  25055 |  30183 | 20597704 |     19184 |      17.1% |        183 |
+| ex4_2_160  |  22839 |  64159 | 58165882 |     13896 |       4.2% |        177 |
+| arki0009   |   2357 |   7345 |  6980262 |      1424 |       4.5% |        221 |
+
+Where the rest goes: optmass 50.8% in 3748 fronts of 17-32 rows (8.6% of
+nodes, 1773 ns each); steering 82.9% in 5865 fronts of 17-32 (2910 ns);
+robot 76.4% in 939 fronts of 17-32 (4551 ns); ex4_2_160 64.6% in 295
+fronts >128 (127413 ns); arki0009 64.3% in 33 fronts >128 (135995 ns).
+
+*Their finding reproduces on a different matrix class.* Even on
+optmass -- the extreme small-front case, 91.4% of whose supernodes are
+<=8 rows -- half the loop is in the 8.6% of fronts with 17-32 rows, and
+the <=8 bucket is 34% of *wall* (6.43 of 19.08 ms), not 96%.
+
+The =<=8= average is 161-227 ns on all five, against the 196 ns they
+report on a 351k-row AC-OPF KKT. Two corpora, two machines-worth of
+matrices, same constant. *The per-front constant is ~0.2 us, not the
+0.71 us this branch fitted.*
+
+* 20:45 :issue200:retraction:leastsquares:
+So §4 of the 2026-09-04 comment is wrong, and the reason is now clear.
+The fit =t = a*fronts + b*flops= has no nrow term, so the intercept
+absorbed the medium-front work: 3748 optmass fronts x 1773 ns = 6.6 ms
+of the 13.1 ms loop got charged to "fixed per-front cost". The caveat
+was stated in that comment ("it ignores that per-front cost also grows
+with nrow") and then not weighted. Direct per-front-size measurement
+beats a two-parameter fit; it was available in-tree the whole time
+(=Profiler::report()=, issue #52 Phase B).
+
+Ceiling that follows: making *every* <=8-row front free takes optmass
+from 19081 to ~12650 us, i.e. 3.42x MA57 -> 2.27x. Still not parity.
+Small-front work cannot be the answer even where it is 34% of wall.
+
+* 21:05 :issue200:ma57:outlier:retraction:
+Re-ran the MA57 oracle in-session so the ratio table is same-thermal.
+9 cold runs per matrix, min taken, ICNTL(15)=0, OPENBLAS_NUM_THREADS=1.
+feral re-measured today under both drivers, min of 9, warm.
+
+| matrix     | feral par | feral seq | MA57 | seq/MA57 | par (2026-09-04) | MA57 (2026-09-04) |
+|------------+-----------+-----------+------+----------+------------------+-------------------|
+| optmass    |     26129 |     19081 | 5575 |     3.42 |            25857 |              6203 |
+| robot_1600 |      6786 |      6363 | 3922 |     1.62 |             7510 |              4766 |
+| steering   |     30529 |     30183 |21660 |     1.39 |            33552 |             20325 |
+| ex4_2_160  |     65272 |     64159 |31244 |     2.05 |            71844 |           1302836 |
+| arki0009   |      7720 |      7345 | 4243 |     1.73 |             7681 |              5636 |
+
+feral reproduces within 10% on every matrix. MA57 reproduces within 30%
+on four -- and is off by *38x* on ex4_2_160. 1302836 us is not
+reproducible: 9 cold runs today give 32565 31244 33088 32525 36999
+62353 48235 55242 37053 us, and a scaling sweep (ICNTL(15) = 0,1,2,3,4)
+gives 42745 / 42614 / 48992 / 66640 / 42442 -- nothing within an order
+of magnitude. Same binary, same matrix: INFO(14)=2757122 and
+RINFO(4)=4.4772e8 match the 2026-09-04 run exactly.
+
+So the 2026-09-04 comment's "on ex4_2_160 feral is 18x faster than
+MA57" and "the ratio spans 70-fold" are *retracted*: one MA57 datapoint
+was a single cold run that stalled, and the harness does one
+factorization per invocation, so nothing averaged it away. Min-of-N on
+the MA57 side is now mandatory; the 2026-09-04 protocol only applied it
+to feral.
+
+Corrected spread: *1.4x to 3.4x*, which is compatible with the original
+issue's 2.7-2.9x and with the new comment's ~2-3x. There is no regime
+where feral wins on this corpus.
+
+* 21:15 :issue200:efficiency:conclusion:
+Recomputing throughput with today's numbers (feral sequential; flop
+counts unchanged, symbolic-derived):
+
+| matrix     | feral MF/s | MA57 MF/s | ratio |
+|------------+------------+-----------+-------|
+| optmass    |        444 |      1429 |  3.2x |
+| robot_1600 |       1044 |      2861 |  2.7x |
+| steering   |        917 |      2934 |  3.2x |
+| ex4_2_160  |       5943 |     14329 |  2.4x |
+| arki0009   |       6173 |      9500 |  1.5x |
+
+The deficit is *broad*: 1.5-3.2x at every front size, on 0.44-1.20x the
+work (fill and flop ratios from 2026-09-04 stand -- they are symbolic,
+not timing-derived, and reproduce). It is not a small-front phenomenon
+and not a large-front phenomenon; it is arithmetic/memory efficiency
+across the board, which makes #200 a duplicate of #153 rather than a
+distinct per-supernode-overhead problem.
+
+* 22:30 :issue153:kernel:ceiling:
+Question from the user: what are the *prospects* of actually fixing
+#153? The record (journal agent sweep of =dev/journal=,
+=tried-and-rejected.md=, =dev/research=) says every structural BLAS3
+restructuring tried so far regressed (row-band blocking 0.74-0.95x,
+source-panel packing +11-22%, deferred-update variant +11%,
+=block_size=48= 1.3% of total) and that the only wins were
+micro-kernel-level (packing 22-26x isolated, pulp dispatch fix 2.7x on
+x86) and scheduling-level (intra-front gate 2.68x). It also says the
+one decision-relevant measurement had never been made: *no in-repo
+feral-vs-BLAS number on the same shape exists.* Made it.
+
+Isolated square dense kernel, this machine, 1 thread, min-of-N,
+=sum_{k<ncol}(nrow-k)^2= multiply-adds throughout:
+
+| n   | feral factor_frontal | LAPACK dsytrf | dgemm |
+|-----+----------------------+---------------+-------|
+| 64  |                 7585 |         11180 |     - |
+| 96  |                 9158 |          9985 |     - |
+| 128 |                11226 |         11594 |     - |
+| 192 |                11582 |         13434 |     - |
+| 256 |                10428 |         15713 |     - |
+| 512 |                10897 |         20396 | 27600 |
+
+So on *square* fronts feral's kernel is at dsytrf parity to 1.9x. That
+is the good news and it is also misleading, because the corpus does not
+produce square fronts.
+
+* 22:40 :issue153:headroom:decomposition:
+New binary =diag_153_kernel_headroom=: profile a real factorization,
+group the supernodes by exact =(nrow, ncol)=, re-time =factor_frontal=
+standalone on every distinct shape that occurred, and reconstitute
+=kernel_ns = sum(count * isolated_ns)=. =headroom = loop_ns/kernel_ns=
+is then the factor by which the solver is slower than *its own kernel*
+on the identical shape sequence -- the ceiling on what non-arithmetic
+work can be worth. =extra_elims = sum(ncol) - n = 0= on all five, so no
+delayed pivots inflate the replay.
+
+| matrix     | loop us | kernel us | headroom | prol+epi | % of driver |
+|------------+---------+-----------+----------+----------+-------------|
+| optmass    |   12227 |      6601 |    1.85x |     4083 |         25% |
+| robot_1600 |    5206 |      2745 |    1.90x |     1817 |         26% |
+| steering   |   19342 |     10896 |    1.78x |     7829 |         29% |
+| ex4_2_160  |   56759 |     51086 |    1.11x |     5930 |          9% |
+| arki0009   |    6728 |      6174 |    1.09x |      599 |          8% |
+
+*The deficit splits cleanly into two disjoint populations.* The
+small/medium-front matrices spend ~46% of the supernode loop outside
+their own arithmetic; the large-front matrices spend ~9%. Projecting
+the (unreachable) ceiling headroom -> 1.00 onto the measured
+sequential walls:
+
+| matrix     | now vs MA57 | loop at kernel speed | then vs MA57 |
+|------------+-------------+----------------------+--------------|
+| optmass    |       3.42x |          19081->13455|        2.41x |
+| robot_1600 |       1.62x |            6363->3902|        0.99x |
+| steering   |       1.39x |          30183->21737|        1.00x |
+| ex4_2_160  |       2.05x |          64159->58486|        1.87x |
+| arki0009   |       1.73x |            7345->6791|        1.60x |
+
+robot_1600 and steering_12800 reach MA57 *parity* on solver plumbing
+alone -- no kernel change, no BLAS.
+
+* 22:55 :issue153:blas:shapecomparison:
+Second new probe, =dev/scripts/blas_front.f=: the kernel MA57 actually
+runs -- =dsytrf= on the leading ncol block, =dtrsm=, D-scale, one
+=dsyrk= Schur update -- on the *exact* shapes
+=diag_153_kernel_headroom= reports as dominant. Same OpenBLAS MA57
+links, same flop model, 1 thread, batch-timed with a copy-only loop
+subtracted (SYSTEM_CLOCK's 1 us granularity is longer than a small
+front; the earlier min-of-N version reported 9e9 MMac/s on a 3x3 and
+had to be thrown away).
+
+| nrow | ncol | feral MMac/s | BLAS MMac/s | BLAS/feral |
+|------+------+--------------+-------------+------------|
+|    3 |    1 |          108 |         104 |      0.96x |
+|    4 |    2 |          301 |         249 |      0.83x |
+|   11 |    3 |         1208 |        1700 |      1.41x |
+|   18 |   16 |         2404 |        2989 |      1.24x |
+|   36 |   16 |         5162 |        9450 |      1.83x |
+|   44 |   16 |         6044 |       12022 |      1.99x |
+|   56 |   16 |         6854 |       16018 |      2.34x |
+|   76 |   16 |         7542 |       20320 |      2.69x |
+|  345 |   16 |         8323 |       39349 |      4.73x |
+|  365 |   22 |         8305 |       41161 |      4.96x |
+
+*feral's kernel wins on 3x3 and 4x2 and saturates at ~8300 MMac/s from
+nrow~76 onward, while BLAS keeps scaling to ~41000.* The saturation is
+at fixed =ncol=16= with growing =nrow=, i.e. it is the trailing rank-16
+symmetric update that stops scaling, not the panel. That is a specific,
+diagnosable kernel defect and not "the BLAS-free ceiling": feral's own
+*square* kernel does 11600 at n=192, so the wide-trapezoidal path is
+running 1.4x below feral's own demonstrated capability, before any
+argument about SIMD or FMA.
+
+Caveat recorded rather than buried: the shared =sum(nrow-k)^2= model
+counts the full trailing square where a symmetric update touches only a
+triangle, so absolute MMac/s over-counts by up to ~2x on the wide
+shapes. It over-counts both columns identically, so the ratio column is
+sound; the absolute numbers must not be set against a vendor GFLOP/s.
+
+* 23:05 :issue153:prospects:conclusion:
+Prospects, stated as three separable targets rather than one:
+
+1. *Solver plumbing on small/medium-front matrices.* 1.78-1.90x of the
+   supernode loop, pure Rust, no bit-exactness exposure. Ceiling: MA57
+   parity on robot_1600 and steering_12800, 3.42x -> 2.41x on optmass.
+2. *Prologue + epilogue.* 25-29% of the driver on those same three
+   matrices (8-9% on the large-front two). Never attributed before
+   today. MA57 also permutes and scales, so this is not all recoverable,
+   but a quarter of the wall has not been looked at.
+3. *The wide-trapezoidal trailing update.* Only target that touches
+   arithmetic. Needed: 1.6-1.9x on ex4_2_160/arki0009. Available before
+   matching BLAS: feral's own square kernel is already 1.4x above where
+   the trapezoidal path saturates.
+
+None of the three requires BLAS, FMA, or breaking bit-exactness. The
+2026-05-22 verdict "realistic pure-Rust micro-kernel headroom is ~2-3x"
+stands and is *sufficient* -- #153 needs 1.4-3.4x, and roughly half of
+it turns out not to be micro-kernel work at all.
+
+* 23:40 :correction:issue-153:instrument-error:
+CORRECTION to the 22:30-23:05 entries. The kernel replay in
+diag_153_kernel_headroom timed =factor_frontal=, not the entry point
+the driver actually calls. =factor_frontal= wraps
+=factor_frontal_blocked_in_place_with_scratch= with a =validate()=
+NaN scan and a =vec![0.0; nrow*nrow]= allocate-and-copy
+(src/dense/factor.rs:1596), both O(nrow^2). The tax therefore scaled
+with the quantity under measurement and hid inside it. The driver
+calls the in-place entry point directly
+(src/numeric/factorize.rs:2674).
+
+Corrected headroom (loop_us / kernel_us), sequential, 1 thread,
+min-of-N, versus what the 22:55 entry recorded:
+
+| matrix         | loop  | kernel | headroom | was published |
+|----------------+-------+--------+----------+---------------|
+| optmass        | 11762 |   8775 |    1.34x |         1.85x |
+| robot_1600     |  4578 |   2412 |    1.90x |         1.90x |
+| steering_12800 | 18908 |  10393 |    1.82x |         1.78x |
+| ex4_2_160      | 53507 |  40350 |    1.33x |         1.11x |
+| arki0009       |  6328 |   4818 |    1.31x |         1.09x |
+
+Also retracted: "the kernel saturates at ~8300 MMac/s from nrow~76
+onward". It does not. Corrected kernel rates climb 77 (3,1) -> 8451
+(76,16) -> 11610 (345,16) -> 13361 (365,22) MMac/s. The plateau was
+the wrapper's O(nrow^2) tax.
+
+Corrected feral-vs-OpenBLAS ratios on identical shapes: 1.36x (3,1),
+1.43x (18,16), 1.78x (36,16), 1.92x (44,16), 2.09x (56,16), 2.40x
+(76,16), 3.39x (345,16), 3.08x (365,22). The gap grows with nrow, so
+it is the wide trapezoidal path specifically.
+
+Posted as a correction on issue #153 (comment 5554911979). The prior
+comment 5554807883 and the 775b8a8 commit message both carry the
+superseded numbers.
+
+* 23:45 :issue-153:headroom:robustness:
+The 1.3-1.9x headroom survives four independent perturbations of the
+replay, so it is not an artifact of the synthetic front:
+
+| variant                    | optmass | robot | steering | ex4  | arki |
+|----------------------------+---------+-------+----------+------+------|
+| dd (diagonally dominant)   |   1.34x | 1.90x |    1.82x | 1.33 | 1.31 |
+| kkt (saddle point)         |   1.36x | 2.04x |    1.76x | 1.34 | 1.34 |
+| cold (64 MB working set)   |   1.34x | 1.92x |    1.83x | 1.32 | 1.32 |
+| may_delay = true           |   1.39x | 1.95x |    1.85x | 1.33 | 1.32 |
+
+Conclusion: pivoting behaviour, cache residency of the input front,
+and delayed pivots are each ruled out as the explanation for the
+residual. What is left is plumbing.
+
+* 23:55 :scaling:infnorm:knight-ruiz:defect:
+Chased the prologue, which the 23:05 entry showed is 62-83% scaling.
+Found a real defect.
+
+src/scaling/infnorm.rs:44 sets max_iter=10, tol=1e-8. That tolerance
+is unreachable on this corpus. Instrumented max_dev per iteration
+(temporary env-gated eprintln, reverted afterwards; src is clean):
+
+  steering n=115201: it=1 1.48e6 -> it=10 1.94e-2
+  ex4      n= 77115: it=1 4.55e10 -> it=10 4.42e-2
+  robot    n= 24000: it=1 9.90e1 -> it=10 1.43e-2
+
+Linear convergence at ~0.5/iteration. Reaching 1e-8 needs ~40 more
+iterations. The cap binds every time on these three; optmass converges
+in 2 and arki in 3. The comment above the loop -- "Most matrices
+converge in 2-4 iterations; a few pathological ones need all 10" --
+is wrong for the KKT corpus: 3 of 5 cap out.
+
+Swept FERAL_KR_MAX (temporary env override, also reverted) to separate
+what the iterations cost from what they buy, numeric phase isolated:
+
+| matrix   | scaling us | numeric @10 | numeric @1 | verdict          |
+|----------+------------+-------------+------------+------------------|
+| robot    |       1056 |        4783 |       4764 | 0% benefit       |
+| steering |       4933 |       23411 |      23961 | 2% for 4.9 ms    |
+| ex4      |       3216 |       57318 |      77906 | 20 ms for 3.2 ms |
+
+So a blanket cap reduction is NOT the fix: ex4 regresses 1.30x. And a
+smarter stopping rule cannot separate the cases -- all three max_dev
+trajectories have the same shape, so the residual carries no signal
+about which matrix needs the iterations.
+
+* 00:05 :scaling:track-b2:cache:issue-153:
+The fix that does work: src/numeric/solver.rs:1485 returns false for
+ScalingStrategy::InfNorm, so the Track-B2 value-bounded cache covers
+MC64 only. InfNorm is recomputed from scratch on every factorization.
+
+Measured on the Solver path (warm solver, min of 7, sequential), via a
+new --scaling flag on diag_200_front_size_buckets:
+
+| matrix   | strategy | plain_us | prologue scaling_us |
+|----------+----------+----------+---------------------|
+| steering | identity |    66631 |                   7 |
+| steering | infnorm  |    29065 |                4874 |
+| steering | mc64     |    23958 |                  13 |
+| ex4      | identity |   176823 |                   5 |
+| ex4      | infnorm  |    61221 |                3211 |
+| ex4      | mc64     |    58916 |                   9 |
+
+Two findings. (1) Scaling is load-bearing, not overhead: Identity is
+2.3-2.9x worse end-to-end. (2) MC64 is 1.21x faster than InfNorm
+end-to-end on steering purely because the cache reduces it to 13 us
+on a warm refactor while InfNorm pays 4874 us every time.
+
+Implication: extend the cache to InfNorm. It needs its own value-bound
+predicate -- mc64_value_bound_passes is a property of the Hungarian
+matching and does not transfer.
+
+This also settles the ICNTL(15)=0 question. ma57_bench.F disables
+MA57's scaling on the stated grounds that feral amortizes MC64 into
+analysis. That is correct for the MC64 path but false for the InfNorm
+path, which the default Auto picks on steering and ex4 and which pays
+in full inside every warm Solver::factor.
+
+* 00:10 :issue-153:plan:
+Posted the consolidated fix plan to #153. Priority order by measured
+lever: (1) extend-add plumbing -- 0.33-0.35 ns/element on every
+matrix, ~70% of the non-kernel loop on large-front matrices, and
+closing it alone projects robot to 1.06x and steering to 0.99x of
+MA57; (2) InfNorm scaling cache -- 1.21x on steering; (3) kernel --
+real 1.4-3.4x gap but the recorded pure-Rust aarch64 ceiling is
+33-35 GFLOPS (40-60% of Accelerate) and ~2x of the remainder is FMA,
+forfeited by the bit-exactness contract, so expectations belong at
+~1.4x not 3x.
+
+Open item carried forward, stated as open rather than resolved: on the
+17-32-row fronts the non-kernel cost is 2.0-3.0 ns/element and the
+named counters explain only ~40% of it -- roughly 800-1200 ns/front is
+unattributed. PHASE_TIMING's 350-430 ns/front probe tax makes it the
+wrong instrument at that size class; a lighter targeted probe is
+needed before anyone optimizes there.
+
+* 20:38 :issue-153:extend-add:optimization:measurement:
+Implemented the extend-add index-hoist that the revised #153 plan named as
+the only remaining unrejected lever, and tuned it by measurement.
+
+The defect: =extend_add= evaluated =parent_row_map[contrib.row_indices[ci]]=
+— two dependent gathers — inside the =ci= loop, so each child row was
+resolved once per column: cdim*(cdim+1)/2 double-gathers where cdim suffice.
+
+Final form: a pooled =pidx= buffer in =FactorWorkspace=, a monotone fast
+path (=ci >= cj= implies =pidx[ci] >= pidx[cj]=, so the =usize::MAX= test
+and lower-triangle compare/swap drop out of the inner loop), and a
+=SMALL_CDIM = 4= bypass straight to the original doubly-gathered loop.
+
+Measured mean cdim: 2.2 optmass, 5.3 steering_12800, 6.0 robot_1600, 9.7
+ex4_2_160, 10.0 arki0009. Monotone hit rate: 100/60.9/91.4/100/100%.
+
+Result (9-round interleaved A/B, --reps 9, RAYON_NUM_THREADS=1, two
+separately-built binaries, paired per-round ratios):
+
+  ex4_2_160       1.063x median   (all 9 rounds >= 1.02)
+  arki0009        1.062x median
+  optmass         1.012x median   (noisy, effectively neutral)
+  robot_1600      0.998x median
+  steering_12800  0.992x median   (consistent ~1% dip across 3 campaigns)
+
+Correctness: cross-build bitwise digest (FNV-1a over =f64::to_bits()= of
+=ldlt_export()='s canonical global L/D) BIT-IDENTICAL on all 30 successful
+factorizations of data/matrices/kkt-mittelmann/*/*_0002.mtx. 924 tests
+passed, 0 failed. clippy --all-targets -D warnings clean.
+
+Three variants were built and measured against each other rather than
+argued about; two lost. See tried-and-rejected.
+
+Instrument note: an earlier single campaign appeared to show the indexed
+inner loop beating the slice-and-zip form 1.080x vs 0.977x on optmass. A
+three-way interleaved rerun showed both forms at ~0.975x — the 1.080x was
+cross-campaign noise (optmass "before" min ranged 18504-19603 us, 6%,
+across campaigns built at different times). Lesson repeated from earlier
+today: a ratio between two numbers measured in different campaigns is not
+a measurement. Only per-round paired ratios within one interleaved
+campaign were trusted for the threshold decisions above.

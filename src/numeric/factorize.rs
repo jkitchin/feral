@@ -1431,6 +1431,15 @@ pub struct FactorWorkspace {
     /// and across calls. Left empty when ownership is temporarily
     /// borrowed by an in-flight `SymmetricMatrix`.
     frontal_values: Vec<f64>,
+    /// Scratch for `extend_add`: the child contribution block's
+    /// row-to-parent-frontal index map, `pidx[ci] =
+    /// row_map[contrib.row_indices[ci]]`. Hoisted out of the `cj`
+    /// loop so the double indirection is paid `cdim` times per child
+    /// instead of `cdim*(cdim+1)/2` times. Pooled here rather than
+    /// allocated per child because a medium front assembles ~38 of
+    /// them. Contents are rebuilt per child; no invariant is carried
+    /// across calls.
+    extend_add_pidx: Vec<usize>,
     /// Scratch for `build_row_indices`: delayed-column globals
     /// accumulated from children of the current supernode.
     build_delayed: Vec<usize>,
@@ -2591,7 +2600,7 @@ fn factor_one_supernode(
     let _pt_ea = phase_timing::start();
     for &child_idx in &snode.children {
         if let Some(mut contrib) = contrib_blocks[child_idx].take() {
-            extend_add(&contrib, &ws.row_map, &mut frontal);
+            extend_add(&contrib, &ws.row_map, &mut frontal, &mut ws.extend_add_pidx);
             ws.factor_scratch.contrib_pool = Some(std::mem::take(&mut contrib.data));
         }
     }
@@ -4464,25 +4473,138 @@ struct ContribBlock {
 /// `set`/`get` perform on every cell and eliminates one read+write call
 /// frame per cell. With ~38 children per medium front each contributing
 /// up to `cdim*(cdim+1)/2` cells, this trims a measurable per-front cost.
-fn extend_add(contrib: &ContribBlock, parent_row_map: &[usize], frontal: &mut SymmetricMatrix) {
+/// Scatter a child's contribution block into its parent frontal matrix.
+///
+/// `pidx` is a caller-owned scratch buffer (see
+/// `FactorWorkspace::extend_add_pidx`); its contents on entry are
+/// irrelevant and it is only ever grown.
+fn extend_add(
+    contrib: &ContribBlock,
+    parent_row_map: &[usize],
+    frontal: &mut SymmetricMatrix,
+    pidx: &mut Vec<usize>,
+) {
     let cdim = contrib.dim;
+    if cdim == 0 {
+        return;
+    }
     let fn_ = frontal.n;
     let f_data: &mut [f64] = frontal.data.as_mut_slice();
+
+    // Contribution blocks are small: measured mean `cdim` is 2.2
+    // (optmass), 5.3 (steering_12800), 6.0 (robot_1600), 9.7
+    // (ex4_2_160), 10.0 (arki0009). Below `SMALL_CDIM` the setup the
+    // general path does — filling `pidx`, scanning it for monotonicity —
+    // costs more than the redundant gathers it removes, so blocks that
+    // small take the direct doubly-gathered loop instead. Measured: with
+    // no bypass, optmass (mean cdim 2.2) ran 0.974x, i.e. a 2.6%
+    // regression, while the larger-block matrices gained 3%.
+    const SMALL_CDIM: usize = 4;
+    if cdim <= SMALL_CDIM {
+        for cj in 0..cdim {
+            let parent_j = parent_row_map[contrib.row_indices[cj]];
+            if parent_j == usize::MAX {
+                continue;
+            }
+            for ci in cj..cdim {
+                let parent_i = parent_row_map[contrib.row_indices[ci]];
+                if parent_i == usize::MAX {
+                    continue;
+                }
+                let val = contrib.data[cj * cdim + ci];
+                if val == 0.0 {
+                    continue;
+                }
+                let (row, col) = if parent_i >= parent_j {
+                    (parent_i, parent_j)
+                } else {
+                    (parent_j, parent_i)
+                };
+                f_data[col * fn_ + row] += val;
+            }
+        }
+        return;
+    }
+
+    // Hoist the child->parent index map out of the `cj` loop. The
+    // direct form above evaluates `parent_row_map[contrib.row_indices[ci]]`
+    // — two dependent gathers — inside the inner loop, so each child row
+    // is resolved once per column: `cdim*(cdim+1)/2` double-gathers where
+    // `cdim` suffice. Both `pidx[ci]` and `contrib.data[base + ci]` are
+    // then contiguous sequential loads.
+    //
+    // The buffer is pooled across calls (grown, never shrunk) and written
+    // by index rather than `push`, so there is no per-element capacity
+    // check and no per-call allocation.
+    //
+    // Bit-exactness: the `(cj, ci)` iteration order, the `usize::MAX` and
+    // `val == 0.0` skips, and the accumulation order into every `f_data`
+    // cell are all unchanged, so this is a pure strength reduction. (The
+    // `val == 0.0` skip is load-bearing, not an optimisation:
+    // `-0.0 + 0.0 == +0.0`, so adding a zero would flip the sign of a
+    // negative-zero cell that the bitwise parity tests compare.)
+    if pidx.len() < cdim {
+        pidx.resize(cdim, usize::MAX);
+    }
+    let pidx: &mut [usize] = &mut pidx[..cdim];
+
+    // `monotone` holds when the parent indices are strictly increasing
+    // with no unmapped rows, which is the common case: a child's trailing
+    // rows are sorted and map into the parent in order (measured 100% of
+    // calls on optmass/ex4_2_160/arki0009, 91.4% on robot_1600, 60.9% on
+    // steering_12800). When it holds, `ci >= cj` implies
+    // `pidx[ci] >= pidx[cj]`, so the lower-triangle canonicalisation is a
+    // no-op and both the `usize::MAX` test and the compare/swap drop out
+    // of the inner loop.
+    //
+    // Kept as a separate pass with an early `break` rather than folded
+    // into the fill loop that follows. Folding it in was measured slower on
+    // every matrix (steering_12800 0.985x vs 0.992x, arki0009 1.050x vs
+    // 1.062x against the same baseline): the fill has to run to
+    // completion, so a fused test cannot break out, and on the matrices
+    // where monotonicity fails it usually fails early.
+    for (ci, slot) in pidx.iter_mut().enumerate() {
+        *slot = parent_row_map[contrib.row_indices[ci]];
+    }
+    let mut monotone = pidx[0] != usize::MAX;
+    for ci in 1..cdim {
+        if pidx[ci] == usize::MAX || pidx[ci] <= pidx[ci - 1] {
+            monotone = false;
+            break;
+        }
+    }
+
+    if monotone {
+        for cj in 0..cdim {
+            let base = cj * cdim;
+            let colbase = pidx[cj] * fn_;
+            let rows = &pidx[cj..cdim];
+            let vals = &contrib.data[base + cj..base + cdim];
+            for (&parent_i, &val) in rows.iter().zip(vals) {
+                if val == 0.0 {
+                    continue;
+                }
+                f_data[colbase + parent_i] += val;
+            }
+        }
+        return;
+    }
+
     for cj in 0..cdim {
-        let parent_j = parent_row_map[contrib.row_indices[cj]];
+        let parent_j = pidx[cj];
         if parent_j == usize::MAX {
             continue;
         }
-        for ci in cj..cdim {
-            let parent_i = parent_row_map[contrib.row_indices[ci]];
+        let base = cj * cdim;
+        let rows = &pidx[cj..cdim];
+        let vals = &contrib.data[base + cj..base + cdim];
+        for (&parent_i, &val) in rows.iter().zip(vals) {
             if parent_i == usize::MAX {
                 continue;
             }
-            let val = contrib.data[cj * cdim + ci];
             if val == 0.0 {
                 continue;
             }
-            // Canonicalise to lower triangle: ensure row >= col.
             let (row, col) = if parent_i >= parent_j {
                 (parent_i, parent_j)
             } else {

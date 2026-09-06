@@ -1,153 +1,173 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-09-01T16:00:54Z
+Generated: 2026-09-06T00:55:23Z
 
 ## Latest Session
-File: dev/sessions/2026-09-01-01.md
+File: dev/sessions/2026-09-05-01.md
 ```
-# Session 2026-09-01-01
+# Session 2026-09-05-01
 
 ## Benchmark note (read first)
 
-**No benchmark was run this session, and the numbers below are not fresh.**
-This session reverted the code tree to the `v0.17.0` baseline; the resulting
-tree is byte-identical to the tag except for an 18-line clippy `allow`. The
-figures quoted are therefore the ones recorded at the 0.17.0 release
-(`dev/sessions/2026-08-19-05.md`) and are cited, not re-measured. Re-running
-the corpus to confirm that unchanged code produces unchanged numbers would
-have bought nothing. The next session that touches solver code must run the
-bench and report against these.
+**The corpus benchmark was not re-run, and the exit-partition numbers
+below are cited, not measured this session.** `src/` on this branch is
+byte-identical to `main` (`git diff main...HEAD -- src/` is empty), which
+is itself the 0.17.0 baseline; the only Rust added is a diagnostic binary
+under `crates/feral-diagnostics`. The full partition needs the 169,591-
+matrix / 5.4 GB KKT corpus with MUMPS sidecars — a multi-hour run to
+confirm that unchanged solver code produces unchanged numbers.
+
+`cargo run --bin bench --release` was run and is recorded verbatim below;
+`data/benchmark-config.toml` is absent in this clone, so it took its
+synthetic fallback (8 matrices) and emitted no MUMPS ratios.
+
+Cited from `dev/sessions/2026-08-19-05.md` (0.17.0 release):
 
 ```
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
-
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
 small-frontal (<200)     153455     1.58     <= 2.0     PASS
 medium (<500)            153560     1.58     <= 3.0     PASS
 ```
 
+The next session that touches solver code must run the corpus and report
+against these.
+
 ## Goal
 
-Park the post-0.17.0 development on a branch and return `main` to the 0.17.0
-release baseline, after review found that none of it is used by pounce or
-discopt.
+Re-examine issue #200 after a new comment (2026-09-05, from the
+pounce/pglib side) retracted the issue's own headline using a 351k-row
+AC-OPF KKT — a matrix an order of magnitude larger than the one the issue
+was filed from — and stated conclusions incompatible with the comment
+this branch published on 2026-09-04.
 
 ## Accomplished
 
-- **Parked 42 commits.** `v0.17.0` (2fbf9b7) to 91ace05 was 42 commits / 79
-  files / +12384 / -340. Pushed to `origin` as branch `park/post-0.17` and
-  annotated tag `park/post-0.17-tip`, both verified at 91ace05 by
-  `git ls-remote` *before* any rollback began.
+**Their finding reproduces on a different matrix class, and two of my own
+2026-09-04 claims do not survive re-measurement.**
 
-- **Reverted the code tree to 0.17.0** on branch `revert/park-post-0.17`
-  (commit bb18f0a). Undone: #190 (`RefineOptions` targets, `RefineOutcome`),
-  #192 (`Solver::reset_quality`), #194 (cooperative `factor` cancellation),
-  multi-RHS solve perf, and the componentwise-refinement default with its
-  breaking `*_refined_into` return-type change.
+- **Confirmed their §2 in the source.** `src/dense/factor.rs:2168` sets
+  `PANEL_MIN_NCOL = 8` and routes `ncol < 8` to
+  `factor_frontal_in_place_with_scratch`, whose impl (lines 1724–1990)
+  carries `LEXTRACT_NS`/`CONTRIBEXTRACT_NS`/`CONTRIBZEROFILL_NS` but no
+  `PANELFACTOR_NS`/`SCHUR_NS`/`SCALARTAIL_NS`. Small-front arithmetic is
+  uncounted and lands in `DENSEFACTOR`'s unnamed remainder. This is a
+  second mechanism feeding the UNATTRIBUTED bucket, additive to the probe
+  tax I reported, and it is the larger half.
 
-- **Three carve-outs kept**, each for a stated reason: the clippy 1.98 fixes
-  (CI runs `stable` = 1.98, local is 1.93 — reverting them turns CI red on
-  every future PR); the CI coverage infrastructure; and all of `dev/`, whose
-  append-only logs the protocol forbids rewinding.
-
-- **Evidence.** `cargo check --workspace --all-targets` clean.
 ```
 
 ## Git Status
 ```
-bb18f0a revert: park post-0.17.0 development, resume from the 0.17.0 baseline
-91ace05 docs: session checkpoint 2026-08-30-02 (#191, #193, #195 reviewed and landed)
-d0b3000 Merge pull request #195 from jkitchin/claude/issue-194-p6gri8
-7b42414 fix(solve): an interrupt during the MC64 retry must not be swallowed
-942d130 Merge origin/main into claude/issue-194-p6gri8
+90eebf1 perf(numeric): hoist the child->parent index map out of extend_add's inner loop
+c6f106c docs: reject InfNorm scaling-vector caching, a third re-proposal of closed work
+e9a438c fix(diag): time the driver's real kernel entry point, not factor_frontal
+775b8a8 diag(#153): split the MA57 deficit into plumbing, prologue and kernel
+2dcb842 docs: session checkpoint 2026-09-05-01 (#200 retracted and closed as a duplicate of #153)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::solve::tests::issue175_overhead_term_is_scheduling_only ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::solve::tests::issue175_wide_thin_tree_is_not_scheduled_in_parallel ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.84s
+test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.73s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; no session checkpoint with bench)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-09-05-01.md)
+
+
+FERAL benchmark harness
+  ordering: default (symbolic_factorize heuristic)
+  scaling: default (SupernodeParams::default)
+Loading matrices from data/benchmark-config.toml ... not found
+
+name                n   factor(μs)    solve(μs)        inertia
+--------------------------------------------------------------
+spd_10             10          100           42     (10, 0, 0)
+spd_50             50           24            3     (50, 0, 0)
+spd_100           100           82            5    (100, 0, 0)
+spd_200           200          404           18    (200, 0, 0)
+kkt_10_3           13            3            0     (10, 3, 0)
+kkt_30_10          40           21            1    (30, 10, 0)
+kkt_50_15          65           49            2    (50, 15, 0)
+kkt_100_30        130          207            7   (100, 30, 0)
+
+8 matrices benchmarked
+
 ```
 
 ## Recent Decisions
-needs a revert-of-revert, which is a known and local inconvenience; a force-push
-would have silently invalidated every branch cut from `main` since 2026-08-19.
+| robot_1600 | 1044 | 2861 | 2.7× | 1.62× |
+| steering_12800 | 917 | 2934 | 3.2× | 1.39× |
+| ex4_2_160 | 5943 | 14329 | 2.4× | 2.05× |
+| arki0009 | 6173 | 9500 | 1.5× | 1.73× |
 
-**Three carve-outs are deliberately not reverted.**
+**Decision.** feral runs at **1.5–3.2× fewer flops per second than MA57
+at every front size**, on 0.44–1.20× the work (the fill and flop-volume
+ratios from 2026-09-04 are symbolic, not timing-derived, and stand).
+That is an arithmetic/memory-throughput deficit spread across the whole
+front-size distribution, not a per-supernode constant. Issue #200 is
+therefore the same defect as #153 ("dtoc1nd: 3.8× MA57, concentrated in
+148 fronts of ncol≈62") and should be worked there.
 
-1. *The clippy 1.98 fixes* (9c5dfac, 216a755). CI resolves
-   `dtolnay/rust-toolchain@stable` to 1.98, which introduced
-   `needless_late_init` and `chunks_exact_to_as_chunks`; the local toolchain is
-   1.93. Reverting them turns CI red on every future PR while the pre-commit
-   hook still passes locally — reintroducing exactly the local/CI drift those
-   commits fixed. The `unknown_lints` guard is part of this: without it the
-   `allow` is itself a hard error under `-D warnings` on any pre-1.98
-   toolchain.
-2. *CI coverage infrastructure* — `.github/workflows/coverage.yml`,
-   `codecov.yml`, the README badge. Infrastructure, not solver code.
-3. *All of `dev/`.* The session checkpoints, journals, and the append-only
-   `decisions.md` / `tried-and-rejected.md` entries are the record of what was
-   tried and learned. Reverting an append-only log to drop entries would
-   violate the protocol in `CLAUDE.md`, and the record is *more* valuable after
-   a park, not less: it documents why the code is on a shelf.
-
-**Evidence.** `cargo test --workspace`: 1191 passed, 0 failed, 25 ignored.
-`git diff v0.17.0..HEAD -- src/ python/ tests/ Cargo.toml` reduces to the
-18-line `schur_kernel.rs` clippy allow and nothing else.
-
-**Standing implication for future work.** The parked features were built to a
-high standard — researched, measured, documented — and still went unused. The
-gap was not quality but demand: none originated in a request from pounce or
-discopt. Feature work on the solver should start from a consumer-demonstrated
-need, not from an improvement that is available to make.
+**Corollaries, binding on future work.**
+- A small-front fast path is capped at 34% of wall on the most
+  favourable matrix in the corpus and 4% on the least. It cannot reach
+  parity on any of them. Do not open one as a #200 fix.
+- The corollaries of the 2026-09-04 decision that do not depend on the
+  fitted intercept still hold: report fill and flops beside any
+  wallclock ratio; ordering, fill and scaling are exonerated as the
+  cause; `nemin` is not a lever (three rejections).
+- `PHASE_TIMING_ENABLED` is unfit for attribution on small-front trees
+  for two independent reasons, both now confirmed: its ~10
+  `Instant::now()` pairs per supernode cost 0.20–0.41 µs/front
+  (`diag_200_probe_tax`), *and* `src/dense/factor.rs:2168` routes
+  `ncol < 8` fronts to `factor_frontal_in_place_with_scratch`, which
+  carries no `PANELFACTOR`/`SCHUR`/`SCALARTAIL` counters — so their
+  arithmetic is uncounted and lands in `DENSEFACTOR`'s unnamed
+  remainder. The second mechanism was identified on the pounce side and
+  verified here in the source. Use `ProfileReport` instead.
 
 ## Recent Tried-and-Rejected
-**Replaced with.** Two fix-independent observables:
-`mc64_retry_attempt_count() == 1` proves factorization #1 returned `Ok(..)`
-(the issue-#65 gate keys on `Ok`, so the flag was set after it completed),
-and `delay < call_elapsed` proves it was set before the call returned.
-Together they pin the flag inside the retry without referencing the status
-being asserted.
+**What was claimed, and retracted.** An A/B run appeared to show that
+rewriting `extend_add`'s inner loops from indexed access to the
+slice-and-zip form clippy's `needless_range_loop` asks for cost 10% on
+optmass: 1.080x indexed vs 0.977x zipped. On that basis an
+`#[allow(clippy::needless_range_loop)]` was added to the function with the
+numbers cited as justification.
 
-## 2026-08-29 — busy-wait shell pollers while a benchmark is live
+**Why it was wrong.** The two figures came from *different* interleaved
+campaigns, built at different times. A rerun measured the indexed form at
+0.974x on optmass — statistically the same as the zipped form's 0.977x.
+optmass's "before" minimum ranged 18504-19603 us (6%) across campaigns
+built minutes apart, which swamps the effect being attributed. The
+`allow` and its justification were removed and the idiomatic zipped form
+kept.
 
-**Tried.** `until grep -q ...; do :; done` to wait on a background job.
-
-**Symptom.** Pinned a core, pushed load to 15.71 alongside `cargo test --all`
-and a live A/B benchmark, and contaminated the branch arm of round 2. Phase
-2.8.1 p90s are ratios against **on-disk MUMPS oracle sidecars**, so
-contention inflates only feral's numerator — the metric is not
-contention-symmetric and a loaded host reads as a regression. A single-shot
-run under that load FAILED; the interleaved re-run was 8/8 PASS.
-
-**Rule.** Any background waiter in this repo must `sleep`, never busy-poll.
-Do not trust a single-shot p90 taken under load; interleave A/B.
+**Rule this reinforces.** A ratio between two numbers measured in
+different campaigns is not a measurement. Only per-round paired ratios
+from a single interleaved campaign were used for the threshold and
+loop-form decisions that survived. (Same class of error as the warm-repeat
+cache protocol retracted earlier the same day.)
 
 ## Source Files
 ```
