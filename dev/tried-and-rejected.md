@@ -6259,3 +6259,79 @@ cover, retained on #153 (comment 5555052797):
 **Rejected.** Scaling is off the #153 actionable list. Caching and
 cap-cutting are both closed; a per-matrix policy is the only remaining
 form and there is no measured signal to drive it.
+
+## 2026-09-05 — extend_add: fusing the monotone scan into the fill loop
+
+**What was tried.** `extend_add` fills a pooled `pidx` buffer with each
+child row's parent index, then makes a second pass to decide whether the
+indices are strictly increasing (the `monotone` fast path). The second
+pass looked redundant, so it was folded into the fill loop: latch a
+`monotone` flag while writing each slot, no separate scan.
+
+**Why it lost.** The fill has to run to completion regardless, so a fused
+test cannot break out early — whereas the separate scan stops at the first
+violation, and on the matrices where monotonicity fails it usually fails
+early. Measured slower on every matrix in a three-way interleaved campaign
+(base / separate scan / fused, 9 rounds, `--reps 9`,
+`RAYON_NUM_THREADS=1`, per-round paired ratios, median):
+
+| matrix         | separate scan | fused  |
+|----------------|---------------|--------|
+| optmass        | 1.012x        | 0.982x |
+| robot_1600     | 0.998x        | 0.993x |
+| steering_12800 | 0.992x        | 0.985x |
+| ex4_2_160      | 1.063x        | 1.058x |
+| arki0009       | 1.062x        | 1.050x |
+
+Fused is worse on all five. Kept the separate pass.
+
+## 2026-09-05 — extend_add: raising the small-block bypass to SMALL_CDIM = 8
+
+**What was tried.** `extend_add` sends contribution blocks with
+`cdim <= SMALL_CDIM` straight to the original doubly-gathered loop,
+because the `pidx` fill and monotone scan cannot pay for themselves on a
+block of two or three rows. Measured mean `cdim` is 5.3 on
+steering_12800 and 6.0 on robot_1600, both of which showed a ~1% dip at
+`SMALL_CDIM = 4`, so raising the threshold to 8 — putting those two on
+the direct path while leaving ex4_2_160 (9.7) and arki0009 (10.0) on the
+hoisted path — looked like it should recover them.
+
+**Why it lost.** It did not recover them, and it cost the matrices it was
+not supposed to affect. Three-way interleaved campaign (base / t4 / t8, 9
+rounds, per-round paired medians):
+
+| matrix         | t4     | t8     |
+|----------------|--------|--------|
+| optmass        | 1.007x | 0.957x |
+| robot_1600     | 0.993x | 0.987x |
+| steering_12800 | 0.991x | 0.988x |
+| ex4_2_160      | 1.061x | 1.041x |
+| arki0009       | 1.071x | 1.069x |
+
+steering_12800 was not recovered (0.988x vs 0.991x), and ex4_2_160 lost
+2%. Kept `SMALL_CDIM = 4`. The residual ~1% dip on steering_12800 is
+unexplained and is *not* the small-block prologue; it is recorded as an
+open item rather than papered over.
+
+## 2026-09-05 — Attributing an optmass swing to the inner-loop form (instrument error)
+
+**What was claimed, and retracted.** An A/B run appeared to show that
+rewriting `extend_add`'s inner loops from indexed access to the
+slice-and-zip form clippy's `needless_range_loop` asks for cost 10% on
+optmass: 1.080x indexed vs 0.977x zipped. On that basis an
+`#[allow(clippy::needless_range_loop)]` was added to the function with the
+numbers cited as justification.
+
+**Why it was wrong.** The two figures came from *different* interleaved
+campaigns, built at different times. A rerun measured the indexed form at
+0.974x on optmass — statistically the same as the zipped form's 0.977x.
+optmass's "before" minimum ranged 18504-19603 us (6%) across campaigns
+built minutes apart, which swamps the effect being attributed. The
+`allow` and its justification were removed and the idiomatic zipped form
+kept.
+
+**Rule this reinforces.** A ratio between two numbers measured in
+different campaigns is not a measurement. Only per-round paired ratios
+from a single interleaved campaign were used for the threshold and
+loop-form decisions that survived. (Same class of error as the warm-repeat
+cache protocol retracted earlier the same day.)

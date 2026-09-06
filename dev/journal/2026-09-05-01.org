@@ -392,3 +392,45 @@ named counters explain only ~40% of it -- roughly 800-1200 ns/front is
 unattributed. PHASE_TIMING's 350-430 ns/front probe tax makes it the
 wrong instrument at that size class; a lighter targeted probe is
 needed before anyone optimizes there.
+
+* 20:38 :issue-153:extend-add:optimization:measurement:
+Implemented the extend-add index-hoist that the revised #153 plan named as
+the only remaining unrejected lever, and tuned it by measurement.
+
+The defect: =extend_add= evaluated =parent_row_map[contrib.row_indices[ci]]=
+— two dependent gathers — inside the =ci= loop, so each child row was
+resolved once per column: cdim*(cdim+1)/2 double-gathers where cdim suffice.
+
+Final form: a pooled =pidx= buffer in =FactorWorkspace=, a monotone fast
+path (=ci >= cj= implies =pidx[ci] >= pidx[cj]=, so the =usize::MAX= test
+and lower-triangle compare/swap drop out of the inner loop), and a
+=SMALL_CDIM = 4= bypass straight to the original doubly-gathered loop.
+
+Measured mean cdim: 2.2 optmass, 5.3 steering_12800, 6.0 robot_1600, 9.7
+ex4_2_160, 10.0 arki0009. Monotone hit rate: 100/60.9/91.4/100/100%.
+
+Result (9-round interleaved A/B, --reps 9, RAYON_NUM_THREADS=1, two
+separately-built binaries, paired per-round ratios):
+
+  ex4_2_160       1.063x median   (all 9 rounds >= 1.02)
+  arki0009        1.062x median
+  optmass         1.012x median   (noisy, effectively neutral)
+  robot_1600      0.998x median
+  steering_12800  0.992x median   (consistent ~1% dip across 3 campaigns)
+
+Correctness: cross-build bitwise digest (FNV-1a over =f64::to_bits()= of
+=ldlt_export()='s canonical global L/D) BIT-IDENTICAL on all 30 successful
+factorizations of data/matrices/kkt-mittelmann/*/*_0002.mtx. 924 tests
+passed, 0 failed. clippy --all-targets -D warnings clean.
+
+Three variants were built and measured against each other rather than
+argued about; two lost. See tried-and-rejected.
+
+Instrument note: an earlier single campaign appeared to show the indexed
+inner loop beating the slice-and-zip form 1.080x vs 0.977x on optmass. A
+three-way interleaved rerun showed both forms at ~0.975x — the 1.080x was
+cross-campaign noise (optmass "before" min ranged 18504-19603 us, 6%,
+across campaigns built at different times). Lesson repeated from earlier
+today: a ratio between two numbers measured in different campaigns is not
+a measurement. Only per-round paired ratios within one interleaved
+campaign were trusted for the threshold decisions above.
