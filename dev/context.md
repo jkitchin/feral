@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-09-05T20:33:57Z
+Generated: 2026-09-06T00:55:23Z
 
 ## Latest Session
 File: dev/sessions/2026-09-05-01.md
@@ -59,26 +59,26 @@ this branch published on 2026-09-04.
 
 ## Git Status
 ```
-1d13094 diag(#200): bucket the supernode loop by front size, and retract two 2026-09-04 claims
-0f76934 docs: session checkpoint 2026-09-04-01 (#200 explained, three levers rejected)
-5a1a82b diag(#200): measure work volume against MA57, not just feral's own time
-a303326 Merge pull request #198 from jkitchin/docs/krylov-evaluation
-b412113 docs: record the recycled-MINRES evaluation and why it was not adopted
+90eebf1 perf(numeric): hoist the child->parent index map out of extend_add's inner loop
+c6f106c docs: reject InfNorm scaling-vector caching, a third re-proposal of closed work
+e9a438c fix(diag): time the driver's real kernel entry point, not factor_frontal
+775b8a8 diag(#153): split the MA57 deficit into plumbing, prologue and kernel
+2dcb842 docs: session checkpoint 2026-09-05-01 (#200 retracted and closed as a duplicate of #153)
 ```
 
 ## Test Status
 ```
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
@@ -86,7 +86,7 @@ test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.48s
+test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.73s
 
 ```
 
@@ -148,26 +148,26 @@ therefore the same defect as #153 ("dtoc1nd: 3.8× MA57, concentrated in
   verified here in the source. Use `ProfileReport` instead.
 
 ## Recent Tried-and-Rejected
+**What was claimed, and retracted.** An A/B run appeared to show that
+rewriting `extend_add`'s inner loops from indexed access to the
+slice-and-zip form clippy's `needless_range_loop` asks for cost 10% on
+optmass: 1.080x indexed vs 0.977x zipped. On that basis an
+`#[allow(clippy::needless_range_loop)]` was added to the function with the
+numbers cited as justification.
 
-**What was tried.** The 2026-09-04 comparison ran `ma57_bench` once per
-matrix (the harness does one factorization per invocation) while taking
-min-of-9 on the feral side.
+**Why it was wrong.** The two figures came from *different* interleaved
+campaigns, built at different times. A rerun measured the indexed form at
+0.974x on optmass — statistically the same as the zipped form's 0.977x.
+optmass's "before" minimum ranged 18504-19603 us (6%) across campaigns
+built minutes apart, which swamps the effect being attributed. The
+`allow` and its justification were removed and the idiomatic zipped form
+kept.
 
-**Symptoms.** `ex4_2_160_0002` was recorded at **1 302 836 µs**, from
-which the comment concluded "feral is 18× faster than MA57 here" and
-"the ratio spans 70-fold." Not reproducible. Nine cold runs today:
-32565, 31244, 33088, 32525, 36999, 62353, 48235, 55242, 37053 µs. A
-scaling sweep (`ICNTL(15)` = 0,1,2,3,4) gives 42745 / 42614 / 48992 /
-66640 / 42442 µs. Same binary and same matrix: `INFO(14) = 2757122` and
-`RINFO(4) = 4.4772e8` match the 2026-09-04 run exactly, so it was one
-stalled cold run, not a different configuration.
-
-feral's own numbers reproduced within 10% on all five matrices, which is
-why the error survived review — only the un-averaged side moved.
-
-**Rejected.** Min-of-N on **both** sides of any cross-solver comparison,
-with N ≥ 9 and the spread reported. Corrected feral/MA57 range on this
-corpus: **1.4×–3.4×**, not 0.06×–4.17×.
+**Rule this reinforces.** A ratio between two numbers measured in
+different campaigns is not a measurement. Only per-round paired ratios
+from a single interleaved campaign were used for the threshold and
+loop-form decisions that survived. (Same class of error as the warm-repeat
+cache protocol retracted earlier the same day.)
 
 ## Source Files
 ```

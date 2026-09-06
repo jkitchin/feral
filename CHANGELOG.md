@@ -2,6 +2,31 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Changed — faster extend-add on matrices with large contribution blocks (issue #153)
+
+- **What changed.** `extend_add`, which scatters a child's contribution
+  block into its parent frontal matrix, no longer re-resolves each child
+  row's parent index once per column. It resolved
+  `parent_row_map[contrib.row_indices[ci]]` — two dependent gathers —
+  inside the inner loop, doing `cdim*(cdim+1)/2` double-gathers where
+  `cdim` suffice. The map is now built once into a pooled workspace
+  buffer, with a fast path for the common case of strictly-increasing
+  parent indices and a bypass to the original loop for blocks of four
+  rows or fewer, where the setup costs more than the gathers it removes.
+- **Effect.** Sequential factorization, 9-round interleaved A/B,
+  per-round paired medians: ex4_2_160 1.063x, arki0009 1.062x, optmass
+  1.012x, robot_1600 0.998x, steering_12800 0.992x. The gain scales with
+  contribution-block size (mean `cdim` 9.7 and 10.0 on the two matrices
+  that gain, 2.2 on optmass); steering_12800's ~1% regression is
+  consistent across campaigns and unexplained.
+- **Nothing numerical changes.** The iteration order, the unmapped-row
+  and zero-value skips, and the accumulation order into every cell are
+  unchanged. Verified bit-identical across separately-built binaries by
+  hashing the exported global L and D bitwise on all 30 factorizable
+  matrices of the Mittelmann KKT corpus.
+
 ## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)
