@@ -16,8 +16,32 @@ out of the issue; `gen_perm.py` imports it by name from the same directory.
 |---|---|
 | `gen_perm.py` | builds the front-to-back **chain** permutations (`blocked` and `interleaved`) in `OrderingMethod::External` convention |
 | `ma57_analyse.F` | MA57ID + MA57AD analysis only: forecast factor size, max front, elimination flops, and optionally a dump of `KEEP(1:N)` (the pivot order) |
+| `value_kkt.py` | rewrites the pattern with saddle-point values so it can be *factorized*, not just analysed |
 
-The Rust side is `crates/feral-diagnostics/src/bin/issue203_fill_probe.rs`.
+The Rust side is `crates/feral-diagnostics/src/bin/issue203_fill_probe.rs`
+(symbolic) and `issue203_ab.rs` (paired wall-clock A/B across orderings).
+
+## Wall-clock A/B
+
+`kkt_pattern_repro.py` writes diag 4 / off-diag 1. That is fine for symbolic
+analysis and useless for timing: it is not a saddle point, so none of the
+pivoting a real KKT drives ever happens. `value_kkt.py` keeps the pattern and
+assigns block-aware values — `H` strictly diagonally dominant positive (so
+SPD), dual block `-1e-2 I` — which makes the inertia analytically
+`(n_vars, m, 0)` with no rank assumption, since the Schur complement
+`-dI - J H^-1 J^T` is negative definite whatever `J` is. `issue203_ab` gates
+on that oracle before it prints a timing.
+
+```sh
+# n_vars = npt*NS + NC*nk from the reproducer; 111894 at nfe=48
+python3 value_kkt.py mtx/gaslib40T_nseg10_nfe048.mtx valued/nfe048.mtx 111894
+cargo run --release -p feral-diagnostics --bin issue203_ab \
+    -- valued/nfe048.mtx 111894 7
+```
+
+Paired alternating arms, `min` over pairs, exact two-sided sign test, per
+`dev/decisions.md` (2026-08-09). Report `min_factor`: pounce reuses the
+symbolic across IPM iterates, so analysis is paid once.
 
 ## Running
 

@@ -273,3 +273,78 @@ Meanwhile `feral_ordering=metis` is the immediately available path for
 pounce, and it is now worth taking: it was 55% *slower* than the
 default in pounce#947's sweep, and on the same matrices it is now
 1.6-1.7x better than `Auto` in flops at nfe >= 48.
+
+* 19:10 :issue203:wallclock:measure:
+Ran the wall-clock half of "next session item 1" that is runnable here.
+`data/matrices/` holds **2** synthetic matrices on this machine, so the
+corpus-wide re-decision of #67/#73 is still blocked; what *is* runnable
+is the #203 matrix class itself.
+
+The reproducer emits pattern only (diag 4 / offdiag 1), which is not a
+saddle point and so drives none of the pivoting a real KKT drives.
+`value_kkt.py` keeps the pattern and assigns block-aware values:
+`K = [[H, J^T], [J, -dI]]`, `H` strictly diagonally dominant positive
+(SPD), `d = 1e-2`. Inertia is then analytically `(n_vars, m, 0)` with
+**no rank assumption** — the Schur complement `-dI - J H^-1 J^T` is
+negative definite whatever `J` is. That is the correctness gate.
+
+New harness `issue203_ab`: four ordering arms in one process against
+one matrix and one RHS, paired alternating, 7 pairs, `min` per arm,
+exact two-sided sign test, correctness gate printed before any timing.
+All arms hit the inertia oracle exactly at every size, `rel_res` 9e-15
+to 2e-14.
+
+**Numeric factorization, min over 7 pairs:**
+
+| nfe | auto (=Amf) | metis | speedup | wins | p      | flop model said |
+|  24 |     158 ms  | 142 ms|  1.12x  | 6/7  | 0.1250 | Amf 1.67x better |
+|  48 |     698 ms  | 198 ms|  3.52x  | 7/7  | 0.0156 | metis 1.62x      |
+|  96 |    2442 ms  | 660 ms|  3.70x  | 7/7  | 0.0156 | metis 1.74x      |
+
+pounce reuses the symbolic across IPM iterates (feral's
+pattern-fingerprint cache, `pounce-feral/src/lib.rs:17`), so factor is
+the per-iteration cost and analysis is paid once. Reporting factor.
+
+* 19:20 :issue203:wallclock:finding:
+Two things the symbolic work got wrong, both now measured.
+
+1. **The flop model underestimates, badly.** Predicted 1.62x / 1.74x at
+   nfe=48/96; measured 3.52x / 3.70x. `sum_j (c_j-1)^2` is the right
+   shape but not the right magnitude.
+2. **At nfe=24 the flop model has the sign wrong.** It said `Amf`
+   (1.83e9) beats `metis` (3.05e9) by 1.67x. Measured, `metis` is
+   *faster* by 1.12x (6/7, p=0.125 — not significant, but certainly not
+   the 1.67x loss predicted). So `MetisND` is at worst neutral and at
+   best 3.7x at every size measured here.
+
+Third, unlooked-for: **`Amd` beats `Auto`/`Amf` by 1.63x at nfe=96**
+(1496 ms vs 2442 ms, 7/7, p=0.0156) despite 15% *more* fill (53.7M vs
+46.4M). Another instance of the same lesson the repo already recorded
+on nql180 — fill does not predict speed — and a hint that `Auto`'s
+preference for `Amf` over `Amd` at large n is itself unexamined on this
+class.
+
+**What this does and does not license.** It licenses saying the ordering
+fix reaches the clock on the #203 class, with a measured 3.5-3.7x on
+numeric factorization at the sizes pounce runs. It does **not** license
+changing `choose_adaptive`: #67/#73 decided the blanket
+`MetisND -> Amf` reroute over 36+ families on a corpus this machine does
+not have. Three matrices are a counterexample, not a refutation.
+
+But the counterexample matters more than usual, because **#67/#73 were
+measured against the old feral-metis** — the one that was 2.4-3.5x worse
+than it should have been. Their evidence base is not merely incomplete
+for this class; it is stale for every class. Re-running that A/B with
+the new METIS should be treated as required, not optional.
+
+Caveat on all of the above: `H` here is strictly diagonally dominant, so
+pivoting is easy and delayed pivots are rare. A real IPM KKT gets harder
+as mu -> 0. The direction is solid; the magnitude is a hypothesis about
+the real matrices.
+
+Also noticed, not chased: `analyse_us` is 3.7-12.6 s on these matrices,
+10x what the pattern-only fill probe reported for the same orderings.
+The difference is `LdltCompress`, which runs an MC64 matching and is
+therefore value-dependent. Amortized across IPM iterates, so it does not
+affect the numbers above, but 12.6 s of one-time analysis at n=449k is
+worth a look on its own.
