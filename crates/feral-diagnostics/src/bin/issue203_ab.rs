@@ -19,9 +19,22 @@
 //! misses it, or returns `rel_res > 1e-8`, is reported and cannot carry a
 //! timing.
 //!
+//! When `N_VARS` is given the analytic oracle above applies. On any other
+//! matrix pass `-` instead: the gate becomes **cross-arm agreement** —
+//! every arm must return the same inertia as the others, plus
+//! `rel_res <= 1e-8`. That is weaker (all arms could agree and all be
+//! wrong) and is labelled as such in the output.
+//!
+//! Alongside the timings the probe reports the three structural
+//! predictors, so a routing rule can be checked against what actually
+//! happened: `nnz_L`, `flop_proxy` (sum over supernodes of
+//! `ncol * nrow^2`, the definition used in
+//! `dev/research/issue-73-n100k-thin-regime.md`) and `max_front` (the
+//! largest supernode `nrow`).
+//!
 //! Usage:
 //!   cargo run --release -p feral-diagnostics --bin issue203_ab \
-//!       -- MATRIX.mtx N_VARS [PAIRS]
+//!       -- MATRIX.mtx (N_VARS|-) [PAIRS]
 
 use feral::numeric::factorize::{factorize_multifrontal_parallel_with_workspace, FactorWorkspace};
 use feral::numeric::solve::solve_sparse_refined;
@@ -63,6 +76,8 @@ struct Run {
     inertia: (usize, usize, usize),
     rel: f64,
     nnz_l: usize,
+    flop_proxy: f64,
+    max_front: usize,
 }
 
 fn one(
@@ -86,6 +101,14 @@ fn one(
     let x = solve_sparse_refined(csc, &factors, b).ok()?;
     let solve_us = t.elapsed().as_micros();
 
+    let mut flop_proxy = 0.0f64;
+    let mut max_front = 0usize;
+    for sn in &sym.supernodes {
+        let nrow = sn.nrow as f64;
+        flop_proxy += sn.ncol as f64 * nrow * nrow;
+        max_front = max_front.max(sn.nrow);
+    }
+
     Some(Run {
         analyse_us,
         factor_us,
@@ -93,6 +116,8 @@ fn one(
         inertia: (inertia.positive, inertia.negative, inertia.zero),
         rel: rel_res(csc, &x, b),
         nnz_l: sym.factor_nnz_estimate,
+        flop_proxy,
+        max_front,
     })
 }
 
@@ -121,13 +146,16 @@ fn main() {
         eprintln!("usage: issue203_ab MATRIX.mtx N_VARS [PAIRS]");
         std::process::exit(2);
     }
-    let n_vars: usize = args[1].parse().expect("N_VARS");
     let pairs: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
 
     let mtx = read_mtx(std::path::Path::new(&args[0])).expect("read_mtx");
     let csc = mtx.to_csc().expect("to_csc");
     let n = csc.n;
-    let expect = (n_vars, n - n_vars, 0usize);
+    // `-` means "no analytic oracle"; fall back to cross-arm agreement.
+    let expect: Option<(usize, usize, usize)> = args[1]
+        .parse::<usize>()
+        .ok()
+        .map(|n_vars| (n_vars, n - n_vars, 0usize));
 
     // b = K x_true with x_true[i] = 1 + i/n, the chain_proxy convention.
     let x_true: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 / n as f64).collect();
@@ -147,23 +175,40 @@ fn main() {
         csc.row_idx.len(),
         pairs
     );
-    println!("inertia oracle: ({}, {}, {})", expect.0, expect.1, expect.2);
+    match expect {
+        Some(e) => println!("inertia oracle (analytic): ({}, {}, {})", e.0, e.1, e.2),
+        None => println!("inertia oracle: none — gating on cross-arm agreement only"),
+    }
 
     let mut ws = FactorWorkspace::new();
     let mut factor: Vec<Vec<u128>> = vec![Vec::new(); arms.len()];
     let mut total: Vec<Vec<u128>> = vec![Vec::new(); arms.len()];
     let mut first: Vec<Option<Run>> = (0..arms.len()).map(|_| None).collect();
     let mut bad: Vec<String> = Vec::new();
+    let mut seen_inertia: Option<(usize, usize, usize)> = None;
 
     for _ in 0..pairs {
         for (a, (label, method)) in arms.iter().enumerate() {
             match one(&csc, &b, method.clone(), &mut ws) {
                 Some(r) => {
-                    if r.inertia != expect {
-                        bad.push(format!(
+                    match expect {
+                        Some(e) if r.inertia != e => bad.push(format!(
                             "{label}: inertia {:?} != oracle {:?}",
-                            r.inertia, expect
-                        ));
+                            r.inertia, e
+                        )),
+                        _ => {}
+                    }
+                    if expect.is_none() {
+                        if let Some(prev) = seen_inertia {
+                            if prev != r.inertia {
+                                bad.push(format!(
+                                    "{label}: inertia {:?} disagrees with another arm's {:?}",
+                                    r.inertia, prev
+                                ));
+                            }
+                        } else {
+                            seen_inertia = Some(r.inertia);
+                        }
                     }
                     if r.rel > 1e-8 || r.rel.is_nan() {
                         bad.push(format!("{label}: rel_res {:.3e} > 1e-8", r.rel));
@@ -187,20 +232,27 @@ fn main() {
             println!("  {m}");
         }
     } else {
-        println!("correctness gate: all arms hit the inertia oracle, rel_res <= 1e-8");
+        match expect {
+            Some(_) => {
+                println!("correctness gate: all arms hit the analytic inertia oracle, rel_res <= 1e-8")
+            }
+            None => println!(
+                "correctness gate: all arms agree on inertia {:?}, rel_res <= 1e-8 (agreement, not an oracle)",
+                seen_inertia.unwrap_or_default()
+            ),
+        }
     }
 
     println!(
-        "\n{:<8} {:>12} {:>12} {:>12} {:>12} {:>12}",
-        "arm", "nnz_L", "analyse_us", "min_factor", "min_total", "rel_res"
+        "\n{:<8} {:>12} {:>11} {:>10} {:>12} {:>12} {:>10}",
+        "arm", "nnz_L", "flop_proxy", "max_front", "analyse_us", "min_factor", "rel_res"
     );
     for (a, (label, _)) in arms.iter().enumerate() {
         let Some(r) = &first[a] else { continue };
         let mf = factor[a].iter().copied().min().unwrap_or(0);
-        let mt = total[a].iter().copied().min().unwrap_or(0);
         println!(
-            "{label:<8} {:>12} {:>12} {:>12} {:>12} {:>12.2e}",
-            r.nnz_l, r.analyse_us, mf, mt, r.rel
+            "{label:<8} {:>12} {:>11.3e} {:>10} {:>12} {:>12} {:>10.1e}",
+            r.nnz_l, r.flop_proxy, r.max_front, r.analyse_us, mf, r.rel
         );
     }
 

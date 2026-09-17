@@ -348,3 +348,82 @@ The difference is `LdltCompress`, which runs an MC64 matching and is
 therefore value-dependent. Amortized across IPM iterates, so it does not
 affect the numbers above, but 12.6 s of one-time analysis at n=449k is
 worth a look on its own.
+
+* 20:30 :issue203:routing:attempt:
+Took on "fix `Auto`'s routing" (#67/#73's blanket `MetisND -> Amf`).
+Read both notes first. The evidence base is stronger than I had been
+assuming: #67 is 36/36 in-scope families in `10k < n <= 100k`, median
+time_r ~1.5x, tail 4.5x, and — line 77 — measured "via the full
+`Solver` path (production parallel numeric)". So there is no
+"they only measured sequential" loophole. #73 adds 5 families above
+100k on wall-clock: dtoc2 2.49x, pinene 1.18x, cont5_1_l 2.75x, nql180
+2.05x, YATP1NE 2.13x, all AMF wins.
+
+Those families are not on this machine, so I built geometry-matched
+proxies for the two whose structure is unambiguous — `dtoc` (narrow
+discrete-time-control chain, matched to dtoc2's n=104k) and `pde2d`
+(elliptic control on a grid, matched to cont5_1_l's n=181k) — with the
+same saddle-point value scheme and analytic inertia oracle.
+
+* 20:45 :issue203:routing:invalid:
+**The proxies fail their own validity check and cannot be used.**
+
+Ran them against the *old* metis (temporarily flipping `node_refine`
+back to false, i.e. exactly the code #67/#73 measured), parallel path,
+same protocol:
+
+| proxy     | old metis vs auto | #73 says for the real family |
+| dtoc_wide |  1.129x (metis)   | dtoc2:     2.49x (AMF)        |
+| pde2d     |  1.037x (metis)   | cont5_1_l: 2.75x (AMF)        |
+
+The proxies put metis *ahead* on the very code that measured AMF ahead
+by 2.5-2.8x on the real families. They do not reproduce the result they
+were built to re-test, so nothing they say about the new metis counts.
+This is the failure mode `external_benchmarks/chain_proxy/README.md`
+already documents; I walked into it anyway. Recorded in
+tried-and-rejected.
+
+* 20:55 :issue203:routing:mechanism:
+What the exercise did establish, on matrices that are not proxies.
+
+**The #203 win is two separate effects.** At nfe=48, `RAYON_NUM_THREADS=1`
+vs the default parallel path:
+
+| arm   | seq factor | par factor | par speedup |
+| auto  |  1124 ms   |   698 ms   |   1.61x     |
+| metis |   694 ms   |   198 ms   |   3.51x     |
+
+So metis is 1.62x faster sequentially — close to its 1.37x flop_proxy
+edge, i.e. arithmetic — and a *further* 2.2x comes from the ordering
+parallelising better. `max_front` says why: amf 2288 against metis 1293.
+Wide fronts serialise. The 3.52x headline is ~1.6x arithmetic x ~2.2x
+scheduling, and only the first half was predictable from symbolic data.
+
+**No cheap guard metric exists.** Checked all three candidates against
+every matrix measured today plus #73's RDW2D51U row:
+- `nnz_L`: at nfe=48 amf and metis are within 1.5% (17.64M vs 17.37M)
+  while wall-clock differs 3.52x. Useless.
+- `flop_proxy`: predicts 1.37x where the measured parallel answer is
+  3.52x, and had the sign wrong at nfe=24.
+- `max_front`: predicts the winner on 3 of 6. Not a predictor either.
+
+That is the same wall the fill-guarded race hit in 2026-05, now with two
+more metrics ruled out rather than one.
+
+* 21:05 :issue203:routing:verdict:
+**Not changing `choose_adaptive`.** What I have is three real-pattern
+matrices from one reporter's model against 41 real families measured on
+the production parallel path. The proxies that were supposed to bridge
+that gap are invalid. A predicate fitted to three matrices is exactly
+what #67's note warns against ("a corpus-wide A/B, not a two-matrix
+anecdote"), and no cheap metric survives contact with the data anyway.
+
+The routing question needs one of two things, neither available here:
+1. the #67/#73 A/B re-run on the real corpus against the new metis; or
+2. a **measured** choice rather than a guessed one — a one-time race
+   that runs both symbolic analyses *and* one numeric factorization per
+   arm, keeps the winner, and amortises over the ~100 IPM iterates that
+   reuse the symbolic. That inverts the economics the 2026-05 race was
+   rejected on: it was priced as per-solve overhead, but in an IPM the
+   symbolic is computed once (`pounce-feral/src/lib.rs:17`). It is a
+   Solver-level API change, not a `choose_adaptive` tweak.

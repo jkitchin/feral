@@ -6060,3 +6060,47 @@ than feral's best at nfe=48 and 2.89x fewer at nfe=96, with the gap widening
 as the horizon grows. The deficit is in `feral-metis` / `feral-scotch`
 separator quality, not in a missing chain heuristic. Full evidence in
 `dev/research/issue-203-collocation-kkt-ordering-2026-09-17.md`.
+
+## 2026-09-17 — geometry-matched proxies for the #67/#73 ordering families
+
+**Tried.** To re-decide `choose_adaptive`'s blanket `MetisND -> Amf` reroute
+without the corpus, built stand-ins for the two #67/#73 families whose
+structure is public and unambiguous: `dtoc` (narrow discrete-time optimal
+control chain, matched to dtoc2's n=104k) and `pde2d` (elliptic
+PDE-constrained control on a grid, matched to cont5_1_l's n=181k). Both as
+augmented systems with an analytic inertia oracle, run through the same
+paired A/B harness on the production parallel path.
+
+**Symptoms.** The proxies do not reproduce the result they were built to
+re-test. Run against the *old* `feral-metis` — `node_refine: false`, i.e.
+byte-for-byte the code #67/#73 measured:
+
+| proxy | old metis vs auto, measured here | what #73 reports for the real family |
+|---|---|---|
+| `dtoc_wide` (n=103,992) | **1.129x, metis faster** | dtoc2: 2.49x, **AMF** faster |
+| `pde2d` (n=181,548) | **1.037x, metis faster** | cont5_1_l: 2.75x, **AMF** faster |
+
+The proxies put MetisND ahead on the exact code that put AMF ahead by
+2.5-2.8x on the real families — the sign is wrong, not just the magnitude.
+Anything they then say about the *new* metis is uninterpretable, so the
+whole arm was discarded.
+
+**Why they fail, as far as it was chased.** `dtoc_wide`'s `max_front` is 31.
+At that width the numeric phase is all per-front overhead and no arithmetic,
+so the comparison measures supernode count rather than flops, and MetisND's
+fewer-but-wider fronts win for reasons that have nothing to do with dtoc2.
+Widening the chain from `(nx,nu) = (4,2)` to `(8,4)` moved `max_front` only
+24 -> 31; the real dtoc2's avg_deg of 17.5 is not reachable by this
+construction at the right `n`.
+
+**This was already on the record.**
+`external_benchmarks/chain_proxy/README.md` documents geometry-matched
+proxies producing the wrong answer and says to prefer the real corpus. That
+warning was read during this session and the proxies were built anyway.
+
+**What survives.** Nothing about routing. The non-proxy measurements in the
+same session stand on their own and are recorded in
+`dev/research/issue-203-auto-routing-2026-09-17.md`: on the issue #203
+patterns MetisND is 1.62x faster sequentially and 3.5x in parallel, and
+`nnz_L`, `flop_proxy` and `max_front` were each checked as routing guards
+and each mispredicts.
