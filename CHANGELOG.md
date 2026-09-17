@@ -2,6 +2,39 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Improved — `MetisND` refines the node separator, not the edge cut (issue #203)
+
+- **What changed.** `feral-metis` now builds the node separator at the
+  coarsest level of the multilevel hierarchy and refines *that separator*
+  with Fiduccia-Mattheyses at every uncoarsening level, matching METIS's
+  `Refine2WayNode` / `FM_2WayNodeRefine1Sided`. It previously refined the
+  **edge cut** through uncoarsening and converted to a vertex separator only
+  once, at the finest level, followed by a single positive-gain-only greedy
+  pass. Set `MetisOptions::node_refine = false` to recover the old behaviour.
+- **Why.** Minimum edge cut and minimum vertex separator are different
+  objectives, so every uncoarsening level was optimising the wrong thing; and
+  the one separator pass could not climb out of a local minimum, which is why
+  raising `fm_passes` produced bit-identical output.
+- **Effect.** Elimination flops (`sum_j (c_j-1)^2`), with MA57's bundled real
+  METIS as the external oracle:
+
+  | matrix | before | after | real METIS |
+  |---|---|---|---|
+  | collocation KKT, n=224,646 | 2.10e10 | 6.74e9 | 6.42e9 |
+  | collocation KKT, n=449,286 | 6.89e10 | 2.91e10 | 1.75e10 |
+  | 40^3 grid Laplacian | 2.31e10 | 2.18e10 | 1.67e10 |
+
+  2.4x-3.5x on long-horizon collocation / optimal-control KKTs, 6-10% on grid
+  Laplacians, never worse on any matrix measured, and inside a 1.16x symbolic
+  cost increase at n=449,286.
+- **`Auto` is unchanged.** `choose_adaptive` still routes every
+  would-be-`MetisND` decision to `Amf` (issues #67/#73), so the default path
+  produces bit-identical orderings. Callers on long-horizon collocation
+  problems should ask for `OrderingMethod::MetisND` (`feral_ordering=metis`)
+  explicitly to get the improvement.
+
 ## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)

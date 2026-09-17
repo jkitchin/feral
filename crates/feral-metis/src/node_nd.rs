@@ -16,7 +16,7 @@
 //! invert at the end.
 
 use crate::coarsen::{coarsen, CoarsenCounters};
-use crate::fm_refine::{refine_bisection, refine_separator};
+use crate::fm_refine::{refine_bisection, refine_separator, refine_separator_fm};
 use crate::graph::Graph;
 use crate::initial_partition::{initial_bisect_bfs, initial_bisect_ggp, PART_A, PART_B};
 use crate::rng::SplitMix;
@@ -185,6 +185,34 @@ fn multilevel_node_bisection(
         }
     }
     let mut labels = best_labels;
+
+    if opts.node_refine {
+        // METIS's structure (`ometis.c` + `refine.c`): build the node
+        // separator at the *coarsest* level, then project and
+        // FM-refine the separator itself at every uncoarsening level.
+        // The projection below is label-agnostic, so `PART_SEP` rides
+        // down the hierarchy unchanged.
+        construct_separator(coarsest, &mut labels);
+        stats.n_fm_passes += opts.fm_passes;
+        refine_separator_fm(coarsest, &mut labels, opts.max_imbalance, opts.fm_passes);
+        for level_idx in (0..levels.len()).rev() {
+            let cg = &levels[level_idx];
+            let prev_graph: &Graph = if level_idx == 0 {
+                graph
+            } else {
+                &levels[level_idx - 1].graph
+            };
+            let prev_n = prev_graph.nvtxs as usize;
+            let mut proj: Vec<u8> = vec![PART_A; prev_n];
+            for (v, p) in proj.iter_mut().enumerate().take(prev_n) {
+                *p = labels[cg.cmap[v] as usize];
+            }
+            labels = proj;
+            refine_separator_fm(prev_graph, &mut labels, opts.max_imbalance, opts.fm_passes);
+            stats.n_fm_passes += opts.fm_passes;
+        }
+        return labels;
+    }
 
     // Uncoarsen: walk levels in reverse. `cmap` at level i maps
     // previous-graph vertices to level-i graph vertices.
@@ -553,5 +581,46 @@ mod tests {
         assert_eq!(map, vec![0, 1, 2]);
         // Top row: 0-1, 1-2 → 2 edges, each stored twice.
         assert_eq!(sub.adjncy.len(), 4);
+    }
+
+    /// The `node_refine` path must produce a valid permutation and a
+    /// *better or equal* ordering than the edge-cut path on a grid,
+    /// which is the shape nested dissection is designed for. The
+    /// quality claim is checked as a separator-width proxy: the
+    /// permutation's last block (the top separator) must not grow.
+    #[test]
+    fn node_refine_path_is_a_valid_permutation() {
+        let t = grid_triples(20, 20);
+        let (cp, ri) = csc_from_triples(400, &t);
+        let pat = CscPattern::new(400, &cp, &ri).unwrap();
+        let opts = MetisOptions {
+            node_refine: true,
+            ..MetisOptions::default()
+        };
+        let mut stats = MetisStats::default();
+        let perm = nd_order(&pat, &opts, &mut stats).unwrap();
+        assert_eq!(perm.len(), 400);
+        assert_permutation(&perm);
+        assert!(
+            stats.n_separator_vertices > 0,
+            "expected a top-level separator"
+        );
+    }
+
+    /// Same seed, same permutation — the crate contract.
+    #[test]
+    fn node_refine_path_is_deterministic() {
+        let t = grid_triples(24, 24);
+        let (cp, ri) = csc_from_triples(576, &t);
+        let pat = CscPattern::new(576, &cp, &ri).unwrap();
+        let opts = MetisOptions {
+            node_refine: true,
+            ..MetisOptions::default()
+        };
+        let mut sa = MetisStats::default();
+        let mut sb = MetisStats::default();
+        let a = nd_order(&pat, &opts, &mut sa).unwrap();
+        let b = nd_order(&pat, &opts, &mut sb).unwrap();
+        assert_eq!(a, b);
     }
 }

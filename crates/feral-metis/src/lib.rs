@@ -98,6 +98,22 @@ pub struct MetisOptions {
     /// Number of FM passes at each uncoarsening level (METIS 5.2.0
     /// default: 10).
     pub fm_passes: u32,
+    /// Carry the **node separator** through uncoarsening and refine it
+    /// with FM at every level (METIS's `Refine2WayNode` /
+    /// `FM_2WayNodeRefine1Sided`), instead of refining the edge cut
+    /// through uncoarsening and converting to a separator once at the
+    /// finest level.
+    ///
+    /// **Default: `true`.** The two paths share coarsening and initial
+    /// bisection; they differ only in what the uncoarsening loop
+    /// optimises. Measured against MA57's bundled real METIS as the
+    /// oracle (`dev/research/feral-metis-node-separator-fm-2026-09-17.md`),
+    /// on the six matrices in this repo large enough for nested
+    /// dissection to engage, `node_refine` cuts the elimination flop
+    /// count by 2.4-3.5x on collocation KKTs and 5-9% on grid
+    /// Laplacians, is never worse, and is not slower. Set to `false`
+    /// to recover the pre-2026-09-17 edge-cut behaviour.
+    pub node_refine: bool,
     /// Pull near-dense columns out of the ND graph before recursive
     /// bisection and append them at the *end* of the returned
     /// permutation.
@@ -147,6 +163,7 @@ impl Default for MetisOptions {
             two_hop_ratio_threshold: 0.85,
             max_imbalance: 0.20,
             fm_passes: 10,
+            node_refine: true,
             dense_quotient_enabled: false,
             dense_quotient_threshold: None,
         }

@@ -122,3 +122,154 @@ constraints; feral's is 3204-3453, about twice that.
 iteration".** At the sizes pounce runs (nfe=48-216) the ordering gap
 alone is 1.7x-2.9x in flops, which covers the reported wall-clock gap
 without invoking any kernel difference.
+
+* 16:05 :issue203:metis:measure:
+Dug into where feral's ND loses. First hypothesis — the top-level
+separator — is **wrong**. New probe `issue203_sep_probe` recovers the
+top separator from a permutation alone (incremental union-find over the
+permutation prefix; ND numbers the top separator last) and sweeps
+`MetisOptions`. On nfe=48:
+
+| arm                  | top_sep | nnz_L  | flops    |
+| feral default        |     577 | 28.7M  | 2.10e10  |
+| niparts=16 / 64      |     577 | 29.7M / 29.3M | 2.29e10 / 2.17e10 |
+| fm_passes=40 / 200   |     577 | 28.7M  | 2.10e10  |
+| nd_to_amd_switch 50/800 |  577 | 29.5M / 29.9M | 2.29e10 |
+| coarsen_floor 30/500 |    1286 / 577 | 28.1M / 30.1M | 2.11e10 / 2.49e10 |
+| max_imbalance .03/.4 |   1573 / 954 | 31.8M / 31.4M | 2.79e10 / 2.55e10 |
+| MA57 real METIS perm |     481 | 16.6M  | 6.42e9   |
+
+feral's top separator is 577 against real METIS's 481 — 1.20x, nowhere
+near the 3.26x flop gap. **No knob moves the result by more than 10%.**
+So it is not tuning and not the top cut.
+
+Also ruled out **graph compression**: hashing each vertex's closed
+neighbourhood on the nfe=48 pattern gives 224,646 distinct classes out
+of 224,646 vertices. METIS's `CompressGraph` is a no-op on this matrix,
+so its absence cannot be the explanation.
+
+* 16:20 :issue203:metis:evidence:
+The discriminating measurement is a flop histogram bucketed by column
+count (`FILL_PROBE_HIST=1`). nfe=48:
+
+| bucket      | feral Amf cols / flops | MA57 METIS cols / flops |
+| 512..1024   |  3,890 / 2.18e9 (20%)  |  6,116 / 3.73e9 (58%)   |
+| 1024..2048  |  2,444 / 5.69e9 (52%)  |  1,112 / 1.44e9 (22%)   |
+| >=2048      |    447 / 2.02e9 (18%)  |      0 / 0      ( 0%)   |
+
+Real METIS has **no column wider than 2048** and pushes the mass down
+into the 512-1024 band; feral carries 70% of its flops above 1024.
+feral's own MetisND is worse still — 8,157 columns in 1024..2048, 74%
+of its flops. The defect is mid-tree separator size, not the root.
+
+* 16:35 :issue203:metis:generality:
+Checked whether this is specific to the collocation KKT by running the
+same comparison on canonical ND test graphs (5-point / 7-point
+Laplacians):
+
+| graph          | n      | feral Amf | feral MetisND | MA57 real METIS |
+| grid2d 300x300 | 90,000 |  3.02e8   |    4.69e8     |    3.33e8       |
+| grid3d 40^3    | 64,000 |  2.33e10  |    2.31e10    |    1.67e10      |
+
+**`feral-metis` lags real METIS by ~1.4x on both grids**, and feral's
+best of five is 1.39x behind on the 3-D grid. So this is a *general*
+nested-dissection quality deficit that the collocation KKT amplifies to
+3.3x, not a pattern-specific quirk. grid3d_40 is a cheap canonical
+regression target: 2.31e10 now, 1.67e10 to match.
+
+* 16:45 :issue203:metis:diagnosis:
+Read `crates/feral-metis/src/node_nd.rs::multilevel_node_bisection`
+against METIS 5.x `ometis.c`/`refine.c`. feral does:
+
+  coarsen -> niparts edge bisections at coarsest -> uncoarsen refining
+  the **edge cut** at every level -> `construct_separator` (Konig min
+  vertex cover) once at the finest level -> one greedy
+  positive-gain-only `refine_separator` pass.
+
+METIS does:
+
+  coarsen -> `InitSeparator` (edge bisection + `ConstructSeparator`) at
+  the **coarsest** level -> `Refine2WayNode`: at every uncoarsening
+  level project the **node separator** down, `FM_2WayNodeBalance`, then
+  `FM_2WayNodeRefine1Sided/2Sided` for `niter` passes — real FM with
+  gain buckets, negative-gain moves and rollback to the best state seen.
+
+Two concrete gaps: (a) the refinement objective during uncoarsening is
+the edge cut, not the separator weight; (b) the one separator pass that
+does run is hill-climbing-free greedy, so it stops at the first local
+minimum — which is why `fm_passes=200` changes nothing. Note
+`refine_separator` at `fm_refine.rs:214` only accepts `best_gain > 0`.
+
+Next: implement node-separator FM and move it into the uncoarsening
+loop. Research note and plan before code.
+
+* 17:30 :issue203:metis:implement:
+Implemented `refine_separator_fm` in `crates/feral-metis/src/fm_refine.rs`
+— METIS's `FM_2WayNodeRefine1Sided`. Six tests written first, all
+hand-oracled on graphs whose minimum separator is obvious (path -> 1
+vertex, k x k grid -> k, barbell -> 1), plus balance, monotonicity and
+determinism. All six passed on the first run.
+
+Then P2: `multilevel_node_bisection` gained the METIS structure behind
+`MetisOptions::node_refine` — build the node separator at the
+*coarsest* level, project the 3-way labels down and FM-refine the
+separator at every uncoarsening level, instead of edge-FM through the
+hierarchy plus one greedy separator pass at the end.
+
+* 17:45 :issue203:metis:result:
+Elimination flops (`sum_j (c_j-1)^2`), every permutation replayed
+through feral's symbolic pipeline:
+
+| graph        | metis before | metis node_refine | real METIS | gain |
+| gaslib nfe=6 |     4.25e8   |         1.23e8    |   8.99e7   | 3.45x |
+| nfe=12       |     1.95e9   |         6.01e8    |   4.18e8   | 3.24x |
+| nfe=24       |     7.71e9   |         3.05e9    |   1.72e9   | 2.52x |
+| nfe=48       |     2.10e10  |         6.74e9    |   6.42e9   | 3.11x |
+| nfe=96       |     6.89e10  |         2.91e10   |   1.75e10  | 2.37x |
+| grid2d 300^2 |     4.69e8   |         4.27e8    |   3.33e8   | 1.10x |
+| grid3d 40^3  |     2.31e10  |         2.18e10   |   1.67e10  | 1.06x |
+
+At nfe=48 feral is now within **5%** of real METIS (6.74e9 vs 6.42e9)
+and its top separator matches exactly (481 = 481). At nfe=96 it is
+still 1.67x behind (top separator 1143 vs 828), so the hierarchy is
+right but the coarsening or the initial bisection still gives away
+something at scale.
+
+**Against the plan's acceptance table: 1 of 4 targets met.** nfe=48
+beat its target (6.74e9 <= 9.0e9); nfe=96 (2.91e10 vs <= 2.5e10),
+grid3d (2.18e10 vs <= 1.9e10) and grid2d (4.27e8 vs <= 3.7e8) all
+missed. The targets were set at "match real METIS", which turned out
+to be the wrong bar for a gate.
+
+Guardrails all pass: 37/38 parity matrices produce a **bit-identical**
+ordering (they sit below `nd_to_amd_switch=200`, so ND never engages);
+`tests/data/large` moves 8700 -> 8707 nnz_L (+0.08%); `MetisND`
+symbolic time at nfe=96 goes 6.31 s -> 7.30 s (1.16x, guardrail 1.5x);
+determinism is covered by two tests.
+
+Flipped `node_refine` to default `true` despite the acceptance miss:
+the change is never worse on any of the 40 matrices measured, is 2.4x
+to 3.5x better on the class the issue is about, and is a more faithful
+implementation of the published algorithm. Recorded in decisions.md.
+`cargo test --workspace`: 1199 passed, 0 failed, 25 ignored.
+
+* 17:55 :issue203:auto:note:
+**The fix does not reach `Auto` yet, and I did not make it.**
+`choose_adaptive` (src/symbolic/mod.rs:270) reroutes *every*
+would-be-`MetisND` decision to `Amf` — the issue #67/#73 blanket
+override. So on nfe=96 `Auto` still picks `Amf` (5.06e10) over the new
+`MetisND` (2.91e10) and leaves 1.74x on the table.
+
+Not changed here on purpose. The #67/#73 override was justified by
+**real factor+solve wall-clock** on a corpus this machine does not
+have, and `tried-and-rejected.md` already records a fill-guarded race
+that was rejected precisely because fill is not a reliable speed
+predictor (nql180: MetisND had 0.98x the fill and AMF was still 2.05x
+faster end to end). Re-deciding that on symbolic fill alone would
+repeat the mistake. Re-opening #67/#73 needs a wall-clock A/B on the
+corpus machine.
+
+Meanwhile `feral_ordering=metis` is the immediately available path for
+pounce, and it is now worth taking: it was 55% *slower* than the
+default in pounce#947's sweep, and on the same matrices it is now
+1.6-1.7x better than `Auto` in flops at nfe >= 48.

@@ -7646,3 +7646,50 @@ high standard — researched, measured, documented — and still went unused. Th
 gap was not quality but demand: none originated in a request from pounce or
 discopt. Feature work on the solver should start from a consumer-demonstrated
 need, not from an improvement that is available to make.
+
+## 2026-09-17 — feral-metis refines the node separator, not the edge cut
+
+**Decision.** `MetisOptions::node_refine` defaults to `true`:
+`feral-metis` now builds the node separator at the coarsest level and
+FM-refines *the separator* at every uncoarsening level, as METIS does
+(`libmetis/refine.c::Refine2WayNode`,
+`libmetis/sfm.c::FM_2WayNodeRefine1Sided`). The previous structure — edge-cut
+FM through uncoarsening, König min-cover conversion once at the finest level,
+one greedy positive-gain-only separator pass — remains reachable with
+`node_refine: false`.
+
+**Why.** Elimination flops (`sum_j (c_j-1)^2`, every permutation replayed
+through feral's own symbolic pipeline, MA57's bundled real METIS as the
+external oracle):
+
+| graph | before | after | real METIS |
+|---|---|---|---|
+| gaslib collocation KKT, nfe=48 | 2.10e10 | 6.74e9 | 6.42e9 |
+| nfe=96 | 6.89e10 | 2.91e10 | 1.75e10 |
+| grid3d 40^3 | 2.31e10 | 2.18e10 | 1.67e10 |
+
+2.4x-3.5x on collocation KKTs, 6-10% on grid Laplacians, never worse on any
+of the 40 matrices measured, and not slower (`MetisND` symbolic at nfe=96:
+6.31 s -> 7.30 s, inside the 1.5x guardrail).
+
+**The acceptance table in `dev/plans/metis-node-separator-fm.md` was missed
+on 3 of its 4 rows** (nfe=96, grid2d, grid3d) and the default was flipped
+anyway. Those targets were written as "match real METIS" before any code
+existed; using them as a gate would have withheld a change that is a strict
+improvement everywhere it was measured. Recording the miss here rather than
+quietly restating the targets.
+
+**What is deliberately *not* changed: `choose_adaptive`.** It still reroutes
+every would-be-`MetisND` decision to `Amf` (issues #67/#73), so `Auto` is
+bit-identical to before and still picks the 1.74x-worse ordering at nfe=96.
+That override was established on real factor+solve wall-clock across the IPM
+corpus, and `tried-and-rejected.md` (2026-05, fill-guarded race) already
+records one attempt to re-decide it on fill that was rejected because fill
+does not predict speed — nql180 has 0.98x the fill under MetisND and is still
+2.05x slower end to end. Re-opening it needs a wall-clock A/B on the corpus
+machine, not a symbolic argument.
+
+**Evidence.** `dev/research/feral-metis-node-separator-fm-2026-09-17.md`;
+`cargo test --workspace` 1199 passed / 0 failed / 25 ignored;
+`cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`
+clean.

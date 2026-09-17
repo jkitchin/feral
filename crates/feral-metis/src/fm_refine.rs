@@ -289,6 +289,187 @@ pub fn refine_separator(
     separator_weight(graph, labels)
 }
 
+/// Fiduccia-Mattheyses refinement of a **node separator**.
+///
+/// `labels[v] ∈ {PART_A, PART_B, PART_SEP}` on entry and on exit, and
+/// the input must already be a valid separator. Returns the final
+/// separator weight, which is never larger than the input's.
+///
+/// This is METIS's `FM_2WayNodeRefine1Sided` (`libmetis/sfm.c`):
+/// passes alternate the target side, so one priority queue suffices.
+/// Within a pass the highest-gain separator vertex is pulled into the
+/// target side — which forces its neighbours on the far side into the
+/// separator — and the pass keeps going through **negative**-gain
+/// moves, rolling back at the end to the lightest separator it saw.
+/// That hill-climbing is the whole point: [`refine_separator`] accepts
+/// only positive gains and therefore stops at the first local minimum.
+///
+/// Gain model, for a separator vertex `v` moved to side `to`:
+///
+/// ```text
+///   gain(v) = vwgt[v] - sum of vwgt[u] over neighbours u with labels[u] == other
+/// ```
+///
+/// since `v` leaves the separator and every far-side neighbour joins it.
+///
+/// Balance is a hard bound: a move that would push `pwgts[to]` past
+/// `(1 + max_imbalance) * total / 2` ends the pass, as in METIS.
+pub fn refine_separator_fm(
+    graph: &Graph,
+    labels: &mut [u8],
+    max_imbalance: f64,
+    max_passes: u32,
+) -> i64 {
+    let n = graph.nvtxs as usize;
+    debug_assert_eq!(labels.len(), n);
+    let total: i64 = graph.vwgt.iter().map(|&w| w as i64).sum();
+    let max_side = ((1.0 + max_imbalance) * total as f64 / 2.0).ceil() as i64;
+
+    let mut pwgt = [
+        part_weight(graph, labels, PART_A),
+        part_weight(graph, labels, PART_B),
+    ];
+    let mut sep = separator_weight(graph, labels);
+
+    // `edeg[v][s]` is the weight of v's neighbours on side s; only
+    // maintained while v is in the separator.
+    let mut edeg: Vec<[i64; 2]> = vec![[0, 0]; n];
+    // Undo log: `moves[m]` is the vertex pulled out of the separator by
+    // move m, and `pulled[m]` the far-side neighbours it dragged in.
+    let mut moves: Vec<usize> = Vec::new();
+    let mut pulled: Vec<Vec<usize>> = Vec::new();
+
+    for pass in 0..max_passes {
+        let to = if pass % 2 == 0 { PART_A } else { PART_B };
+        let other = if to == PART_A { PART_B } else { PART_A };
+        let to_i = if to == PART_A { 0 } else { 1 };
+        let other_i = 1 - to_i;
+
+        for v in 0..n {
+            if labels[v] == PART_SEP {
+                edeg[v] = side_degrees(graph, labels, v);
+            }
+        }
+        let mut heap: BinaryHeap<(i64, Reverse<usize>)> = BinaryHeap::new();
+        let mut n_sep = 0usize;
+        for v in 0..n {
+            if labels[v] == PART_SEP {
+                n_sep += 1;
+                heap.push((graph.vwgt[v] as i64 - edeg[v][other_i], Reverse(v)));
+            }
+        }
+        if n_sep == 0 {
+            break;
+        }
+        // METIS's tolerance for how far past the best separator a pass
+        // is allowed to wander before giving up.
+        let limit = (3 * (n_sep + 1)).min(300);
+
+        moves.clear();
+        pulled.clear();
+        let mut best_sep = sep;
+        let mut best_at = 0usize; // number of moves kept at the best state
+        let mut moved = vec![false; n];
+
+        while let Some((key, Reverse(v))) = heap.pop() {
+            if labels[v] != PART_SEP || moved[v] {
+                continue;
+            }
+            let cur = graph.vwgt[v] as i64 - edeg[v][other_i];
+            if key != cur {
+                // Stale entry; a fresher one is in the heap.
+                continue;
+            }
+            if pwgt[to_i] + graph.vwgt[v] as i64 > max_side {
+                break;
+            }
+            // Apply the move.
+            moved[v] = true;
+            labels[v] = to;
+            pwgt[to_i] += graph.vwgt[v] as i64;
+            sep -= graph.vwgt[v] as i64;
+            let mut dragged: Vec<usize> = Vec::new();
+            for k in graph.xadj[v] as usize..graph.xadj[v + 1] as usize {
+                let u = graph.adjncy[k] as usize;
+                match labels[u] {
+                    l if l == other => {
+                        labels[u] = PART_SEP;
+                        pwgt[other_i] -= graph.vwgt[u] as i64;
+                        sep += graph.vwgt[u] as i64;
+                        edeg[u] = side_degrees(graph, labels, u);
+                        dragged.push(u);
+                        if !moved[u] {
+                            heap.push((graph.vwgt[u] as i64 - edeg[u][other_i], Reverse(u)));
+                        }
+                    }
+                    PART_SEP => {
+                        edeg[u][to_i] += graph.vwgt[v] as i64;
+                        if !moved[u] {
+                            heap.push((graph.vwgt[u] as i64 - edeg[u][other_i], Reverse(u)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // A vertex dragged in changes its neighbours' `edeg[other]`.
+            for &u in &dragged {
+                for k in graph.xadj[u] as usize..graph.xadj[u + 1] as usize {
+                    let w = graph.adjncy[k] as usize;
+                    if labels[w] == PART_SEP && w != u {
+                        edeg[w][other_i] -= graph.vwgt[u] as i64;
+                        if !moved[w] {
+                            heap.push((graph.vwgt[w] as i64 - edeg[w][other_i], Reverse(w)));
+                        }
+                    }
+                }
+            }
+            moves.push(v);
+            pulled.push(dragged);
+
+            if sep < best_sep {
+                best_sep = sep;
+                best_at = moves.len();
+            } else if moves.len() - best_at > limit {
+                break;
+            }
+        }
+
+        // Roll back to the lightest separator this pass saw.
+        while moves.len() > best_at {
+            let v = moves.pop().unwrap_or(0);
+            let dragged = pulled.pop().unwrap_or_default();
+            labels[v] = PART_SEP;
+            pwgt[to_i] -= graph.vwgt[v] as i64;
+            sep += graph.vwgt[v] as i64;
+            for u in dragged {
+                labels[u] = other;
+                pwgt[other_i] += graph.vwgt[u] as i64;
+                sep -= graph.vwgt[u] as i64;
+            }
+        }
+        debug_assert_eq!(sep, best_sep);
+        if best_at == 0 && pass > 0 {
+            // Neither side found anything; further passes would repeat.
+            break;
+        }
+    }
+    sep
+}
+
+/// `[weight of v's PART_A neighbours, weight of v's PART_B neighbours]`.
+fn side_degrees(graph: &Graph, labels: &[u8], v: usize) -> [i64; 2] {
+    let mut d = [0i64; 2];
+    for k in graph.xadj[v] as usize..graph.xadj[v + 1] as usize {
+        let u = graph.adjncy[k] as usize;
+        if labels[u] == PART_A {
+            d[0] += graph.vwgt[u] as i64;
+        } else if labels[u] == PART_B {
+            d[1] += graph.vwgt[u] as i64;
+        }
+    }
+    d
+}
+
 /// Sum of `vwgt[u]` over neighbors u of v whose label is the given side.
 fn separator_pull_costs(graph: &Graph, labels: &[u8], v: usize) -> (i64, i64) {
     let lo = graph.xadj[v] as usize;
@@ -323,6 +504,7 @@ mod tests {
     use super::*;
     use crate::initial_partition::initial_bisect_ggp;
     use crate::rng::SplitMix;
+    use crate::separator::construct_separator as construct;
     use feral_ordering_core::CscPattern;
     use std::collections::BTreeSet;
 
@@ -788,5 +970,192 @@ mod tests {
             before,
             after
         );
+    }
+
+    // ---- node-separator FM (`refine_separator_fm`) ------------------
+    //
+    // Oracles here are hand-computed minimum separators on graphs
+    // whose answer is obvious by inspection, not outputs of this
+    // crate: a path has a 1-vertex separator, a `k x k` grid has a
+    // `k`-vertex straight cut, and two cliques joined by an edge are
+    // separated by either endpoint of that edge.
+
+    fn path_graph(n: usize) -> Graph {
+        let mut t = Vec::new();
+        for i in 0..n {
+            t.push((i, i));
+            if i + 1 < n {
+                t.push((i, i + 1));
+            }
+        }
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        Graph::from_csc_pattern(&pat).unwrap()
+    }
+
+    /// Two `k`-cliques joined by the single edge `(k-1, k)`.
+    fn barbell(k: usize) -> Graph {
+        let n = 2 * k;
+        let mut t = Vec::new();
+        for i in 0..n {
+            t.push((i, i));
+        }
+        for a in 0..k {
+            for b in (a + 1)..k {
+                t.push((a, b));
+                t.push((a + k, b + k));
+            }
+        }
+        t.push((k - 1, k));
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        Graph::from_csc_pattern(&pat).unwrap()
+    }
+
+    /// Every A-vertex and B-vertex pair must be non-adjacent.
+    fn valid_sep(graph: &Graph, labels: &[u8]) -> bool {
+        for v in 0..graph.nvtxs as usize {
+            let lv = labels[v];
+            if lv == PART_SEP {
+                continue;
+            }
+            for k in graph.xadj[v] as usize..graph.xadj[v + 1] as usize {
+                let lu = labels[graph.adjncy[k] as usize];
+                if lu != PART_SEP && lu != lv {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// P_21 cut at the middle with a deliberately fat 5-vertex
+    /// separator. The minimum balanced separator of a path is one
+    /// vertex, and FM must find it: pulling a separator endpoint into
+    /// its own side costs nothing, because its only far-side neighbour
+    /// is already in the separator.
+    #[test]
+    fn node_fm_shrinks_a_fat_path_separator() {
+        let g = path_graph(21);
+        let mut labels = vec![PART_A; 21];
+        for (v, l) in labels.iter_mut().enumerate() {
+            *l = match v {
+                0..=7 => PART_A,
+                8..=12 => PART_SEP,
+                _ => PART_B,
+            };
+        }
+        let before = separator_weight(&g, &labels);
+        assert_eq!(before, 5);
+        let after = refine_separator_fm(&g, &mut labels, 0.2, 10);
+        assert!(valid_sep(&g, &labels), "not a separator: {labels:?}");
+        assert_eq!(after, separator_weight(&g, &labels), "bookkeeping drift");
+        assert_eq!(after, 1, "path separator should shrink to 1, got {after}");
+    }
+
+    /// A ragged separator on a 9x9 grid must come down to at most one
+    /// full column (9 vertices), the obvious straight cut.
+    #[test]
+    fn node_fm_reaches_a_straight_grid_cut() {
+        let k = 9;
+        let g = grid(k, k);
+        let mut labels = vec![PART_A; k * k];
+        for r in 0..k {
+            for c in 0..k {
+                // Ragged three-column separator around the middle.
+                let width = if r % 2 == 0 { 3 } else { 2 };
+                let lo = 4 - width / 2;
+                labels[r * k + c] = if c < lo {
+                    PART_A
+                } else if c < lo + width {
+                    PART_SEP
+                } else {
+                    PART_B
+                };
+            }
+        }
+        let before = separator_weight(&g, &labels);
+        let after = refine_separator_fm(&g, &mut labels, 0.2, 10);
+        assert!(valid_sep(&g, &labels));
+        assert_eq!(after, separator_weight(&g, &labels), "bookkeeping drift");
+        assert!(
+            after <= k as i64,
+            "grid separator {after} should be <= {k} (was {before})"
+        );
+    }
+
+    /// Two cliques joined by one edge: the minimum separator is one of
+    /// that edge's endpoints. Starting from a whole clique in the
+    /// separator, FM must get to 1.
+    #[test]
+    fn node_fm_finds_the_barbell_cut_vertex() {
+        let k = 8;
+        let g = barbell(k);
+        let mut labels = vec![PART_B; 2 * k];
+        for l in labels.iter_mut().take(k) {
+            *l = PART_SEP;
+        }
+        let after = refine_separator_fm(&g, &mut labels, 0.4, 10);
+        assert!(valid_sep(&g, &labels));
+        assert_eq!(after, 1, "barbell separator should be 1, got {after}");
+    }
+
+    /// The rollback makes the pass monotone: whatever it is handed, it
+    /// never returns something worse.
+    #[test]
+    fn node_fm_never_worsens_the_separator() {
+        let g = grid(12, 12);
+        let mut rng = SplitMix::new(7);
+        for trial in 0..8u32 {
+            let mut labels = initial_bisect_ggp(&g, &mut rng, 72);
+            construct(&g, &mut labels);
+            let before = separator_weight(&g, &labels);
+            let after = refine_separator_fm(&g, &mut labels, 0.2, 10);
+            assert!(valid_sep(&g, &labels), "trial {trial}");
+            assert!(
+                after <= before,
+                "trial {trial}: {before} -> {after} got worse"
+            );
+        }
+    }
+
+    /// Balance is a hard constraint, at every tolerance.
+    #[test]
+    fn node_fm_respects_the_balance_bound() {
+        let g = grid(10, 10);
+        for &imb in &[0.0f64, 0.03, 0.2, 0.4] {
+            let mut labels = vec![PART_A; 100];
+            for (v, l) in labels.iter_mut().enumerate() {
+                *l = match v % 10 {
+                    0..=3 => PART_A,
+                    4..=5 => PART_SEP,
+                    _ => PART_B,
+                };
+            }
+            refine_separator_fm(&g, &mut labels, imb, 10);
+            let total: i64 = g.vwgt.iter().map(|&w| w as i64).sum();
+            let max_side = ((1.0 + imb) * total as f64 / 2.0).ceil() as i64;
+            let a = part_weight(&g, &labels, PART_A);
+            let b = part_weight(&g, &labels, PART_B);
+            assert!(
+                a <= max_side && b <= max_side,
+                "imb {imb}: a={a} b={b} max={max_side}"
+            );
+        }
+    }
+
+    /// Same input, same output — the crate contract requires it.
+    #[test]
+    fn node_fm_is_deterministic() {
+        let g = grid(11, 11);
+        let mut rng = SplitMix::new(3);
+        let mut labels = initial_bisect_ggp(&g, &mut rng, 60);
+        construct(&g, &mut labels);
+        let mut a = labels.clone();
+        let mut b = labels.clone();
+        let wa = refine_separator_fm(&g, &mut a, 0.2, 10);
+        let wb = refine_separator_fm(&g, &mut b, 0.2, 10);
+        assert_eq!(wa, wb);
+        assert_eq!(a, b);
     }
 }

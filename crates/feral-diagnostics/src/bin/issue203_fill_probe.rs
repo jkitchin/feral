@@ -37,6 +37,40 @@ fn stats(sym: &feral::symbolic::SymbolicFactorization) -> (u64, f64, u64) {
     (sym.factor_nnz_estimate as u64, flops, wide)
 }
 
+/// Histogram of where the flops live, bucketed by column count. A
+/// column of L with `c` below-diagonal entries costs `c^2`; printing
+/// the buckets separates "a few enormous fronts" from "everything is
+/// uniformly denser", which is the question that decides whether an
+/// ordering gap is at the top of the elimination tree or throughout.
+fn hist(sym: &feral::symbolic::SymbolicFactorization) {
+    const EDGES: [usize; 8] = [32, 64, 128, 256, 512, 1024, 2048, usize::MAX];
+    let mut cols = [0u64; 8];
+    let mut flops = [0f64; 8];
+    for &c in &sym.col_counts {
+        let below = c.saturating_sub(1);
+        let b = EDGES.iter().position(|&e| below < e).unwrap_or(7);
+        cols[b] += 1;
+        flops[b] += (below * below) as f64;
+    }
+    let total: f64 = flops.iter().sum();
+    let mut lo = 0usize;
+    for b in 0..8 {
+        let hi = EDGES[b];
+        let name = if hi == usize::MAX {
+            format!(">={lo}")
+        } else {
+            format!("{lo}..{hi}")
+        };
+        println!(
+            "        {name:>12} {:>10} cols {:>12.4e} flops {:>6.1}%",
+            cols[b],
+            flops[b],
+            100.0 * flops[b] / total
+        );
+        lo = hi;
+    }
+}
+
 fn read_perm(path: &str) -> Result<Vec<usize>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let mut perm = Vec::new();
@@ -114,6 +148,9 @@ fn main() {
                     "{label:<20} {nnz:>14} {flops:>16.4e} {wide:>10} {ms:>10.1}  {:?}/{:?}",
                     sym.resolved_method, sym.resolved_preprocess
                 );
+                if std::env::var("FILL_PROBE_HIST").is_ok() {
+                    hist(&sym);
+                }
             }
             Err(e) => println!("{label:<20} FAILED: {e}"),
         }
