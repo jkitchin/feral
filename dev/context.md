@@ -1,92 +1,92 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-09-17T18:27:12Z
+Generated: 2026-09-17T19:16:37Z
 
 ## Latest Session
-File: dev/sessions/2026-09-01-01.md
+File: dev/sessions/2026-09-17-01.md
 ```
-# Session 2026-09-01-01
+# Session 2026-09-17-01
 
 ## Benchmark note (read first)
 
-**No benchmark was run this session, and the numbers below are not fresh.**
-This session reverted the code tree to the `v0.17.0` baseline; the resulting
-tree is byte-identical to the tag except for an 18-line clippy `allow`. The
-figures quoted are therefore the ones recorded at the 0.17.0 release
-(`dev/sessions/2026-08-19-05.md`) and are cited, not re-measured. Re-running
-the corpus to confirm that unchanged code produces unchanged numbers would
-have bought nothing. The next session that touches solver code must run the
-bench and report against these.
+**The corpus is not on this machine, so the session benchmark is vacuous.**
+`cargo run --bin bench --release` ran and found **2 matrices**
+(`densecol_kkt_300_0000` and one other), both passing, with **no oracle
+timings**, so both Phase 2.8.1 exit partitions report `N/A` with count 0. No
+factor-ratio-vs-MUMPS number can be quoted from this session, favourable or
+otherwise, and none is quoted below.
+
+That is acceptable for what this session changed — the work is entirely in
+the *symbolic* ordering, measured directly as `nnz_L` and elimination flops
+against an external oracle (MA57's bundled real METIS). It is **not**
+acceptable as a release gate: the next session on a corpus machine must run
+the full bench before this lands anywhere near a tag, and must in particular
+measure real factor+solve wall-clock, which this session did not touch.
 
 ```
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.58     <= 2.0     PASS
-medium (<500)            153560     1.58     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 ```
 
 ## Goal
 
-Park the post-0.17.0 development on a branch and return `main` to the 0.17.0
-release baseline, after review found that none of it is used by pounce or
-discopt.
+Explore issue #203 — pounce reports factorization cost growing `~n^2.3` and
+symbolic fill `~n^1.37` on a long-horizon collocation optimal-control KKT
+whose `dim K` and `nnz(K)` are exactly linear in the horizon. The issue
+hypothesises a block chain with an available linear-fill elimination order
+that no ordering backend is finding, and asks three questions plus a fourth
+from the original report (why MA57 is 1.2–1.9x faster per iteration).
 
 ## Accomplished
 
-- **Parked 42 commits.** `v0.17.0` (2fbf9b7) to 91ace05 was 42 commits / 79
-  files / +12384 / -340. Pushed to `origin` as branch `park/post-0.17` and
-  annotated tag `park/post-0.17-tip`, both verified at 91ace05 by
-  `git ls-remote` *before* any rollback began.
+### 1. Diagnosed the issue, and refuted its premise
 
-- **Reverted the code tree to 0.17.0** on branch `revert/park-post-0.17`
-  (commit bb18f0a). Undone: #190 (`RefineOptions` targets, `RefineOutcome`),
-  #192 (`Solver::reset_quality`), #194 (cooperative `factor` cancellation),
-  multi-RHS solve perf, and the componentwise-refinement default with its
-  breaking `*_refined_into` return-type change.
+The reproducer's own index arithmetic says the matrix is **not** a chain of
+small blocks: the embedded spatial coupling is 775x775 with 1977 nonzeros
+(2.55/row, a near-tree gas network) crossed with a time path of `3*nfe`
+points. Spatial extent 775 exceeds temporal extent (18 to 288 over the
+sweep), so a time-slice separator is the *expensive* cut.
 
-- **Three carve-outs kept**, each for a stated reason: the clippy 1.98 fixes
-  (CI runs `stable` = 1.98, local is 1.93 — reverting them turns CI red on
-  every future PR); the CI coverage infrastructure; and all of `dev/`, whose
-  append-only logs the protocol forbids rewinding.
-
-- **Evidence.** `cargo check --workspace --all-targets` clean.
+Built the chain permutation the issue asks for and replayed it through
 ```
 
 ## Git Status
 ```
+7045060 chore: drop the issue203 separator-tree probe as unreliable
+15d6217 feat(metis): refine the node separator through uncoarsening, not the edge cut
+ba19a3f research: diagnose issue #203 collocation-KKT fill growth as an ND ordering gap
 a303326 Merge pull request #198 from jkitchin/docs/krylov-evaluation
 b412113 docs: record the recycled-MINRES evaluation and why it was not adopted
-6f54680 Merge pull request #197 from jkitchin/revert/park-post-0.17
-de3ade2 docs: session checkpoint 2026-09-01-01 (post-0.17 work parked)
-bb18f0a revert: park post-0.17.0 development, resume from the 0.17.0 baseline
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.59s
+test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.35s
 
 ```
 
@@ -96,58 +96,58 @@ test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; fi
 ```
 
 ## Recent Decisions
-needs a revert-of-revert, which is a known and local inconvenience; a force-push
-would have silently invalidated every branch cut from `main` since 2026-08-19.
+|---|---|---|---|
+| gaslib collocation KKT, nfe=48 | 2.10e10 | 6.74e9 | 6.42e9 |
+| nfe=96 | 6.89e10 | 2.91e10 | 1.75e10 |
+| grid3d 40^3 | 2.31e10 | 2.18e10 | 1.67e10 |
 
-**Three carve-outs are deliberately not reverted.**
+2.4x-3.5x on collocation KKTs, 6-10% on grid Laplacians, never worse on any
+of the 40 matrices measured, and not slower (`MetisND` symbolic at nfe=96:
+6.31 s -> 7.30 s, inside the 1.5x guardrail).
 
-1. *The clippy 1.98 fixes* (9c5dfac, 216a755). CI resolves
-   `dtolnay/rust-toolchain@stable` to 1.98, which introduced
-   `needless_late_init` and `chunks_exact_to_as_chunks`; the local toolchain is
-   1.93. Reverting them turns CI red on every future PR while the pre-commit
-   hook still passes locally — reintroducing exactly the local/CI drift those
-   commits fixed. The `unknown_lints` guard is part of this: without it the
-   `allow` is itself a hard error under `-D warnings` on any pre-1.98
-   toolchain.
-2. *CI coverage infrastructure* — `.github/workflows/coverage.yml`,
-   `codecov.yml`, the README badge. Infrastructure, not solver code.
-3. *All of `dev/`.* The session checkpoints, journals, and the append-only
-   `decisions.md` / `tried-and-rejected.md` entries are the record of what was
-   tried and learned. Reverting an append-only log to drop entries would
-   violate the protocol in `CLAUDE.md`, and the record is *more* valuable after
-   a park, not less: it documents why the code is on a shelf.
+**The acceptance table in `dev/plans/metis-node-separator-fm.md` was missed
+on 3 of its 4 rows** (nfe=96, grid2d, grid3d) and the default was flipped
+anyway. Those targets were written as "match real METIS" before any code
+existed; using them as a gate would have withheld a change that is a strict
+improvement everywhere it was measured. Recording the miss here rather than
+quietly restating the targets.
 
-**Evidence.** `cargo test --workspace`: 1191 passed, 0 failed, 25 ignored.
-`git diff v0.17.0..HEAD -- src/ python/ tests/ Cargo.toml` reduces to the
-18-line `schur_kernel.rs` clippy allow and nothing else.
+**What is deliberately *not* changed: `choose_adaptive`.** It still reroutes
+every would-be-`MetisND` decision to `Amf` (issues #67/#73), so `Auto` is
+bit-identical to before and still picks the 1.74x-worse ordering at nfe=96.
+That override was established on real factor+solve wall-clock across the IPM
+corpus, and `tried-and-rejected.md` (2026-05, fill-guarded race) already
+records one attempt to re-decide it on fill that was rejected because fill
+does not predict speed — nql180 has 0.98x the fill under MetisND and is still
+2.05x slower end to end. Re-opening it needs a wall-clock A/B on the corpus
+machine, not a symbolic argument.
 
-**Standing implication for future work.** The parked features were built to a
-high standard — researched, measured, documented — and still went unused. The
-gap was not quality but demand: none originated in a request from pounce or
-discopt. Feature work on the solver should start from a consumer-demonstrated
-need, not from an improvement that is available to make.
+**Evidence.** `dev/research/feral-metis-node-separator-fm-2026-09-17.md`;
+`cargo test --workspace` 1199 passed / 0 failed / 25 ignored;
+`cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`
+clean.
 
 ## Recent Tried-and-Rejected
-   **0–2 steps, never at the cap**, on seven large matrices; issue #30 found
-   4/28 stagnating, and on those MUMPS floors at the same residual — the
-   floor is the matrix, not the iteration. A synthetic head-to-head at equal
-   cost per step had stationary refinement matching or beating preconditioned
-   MINRES at every step count.
-3. Factorization, not back-solve, is the dominant cost
-   (`pounce/dev-notes/performance-engineering.md:149`; 0.1702 s vs 0.0856 s
-   per iteration on the 118k KKT). A Krylov path that still factors for
-   inertia cannot reach it, and pounce's inertia gate reads
-   `check_inertia = neg_curv_test_tol <= 0.0 || !provides_inertia()` — so
-   returning `provides_inertia() -> false` *forces* the check on rather than
-   standing it down.
+past `nfe ~ 1000`, well beyond any horizon in play.
 
-**Not a verdict on iterative methods generally.** This is the first time the
-question has been raised in this repo — grep for `minres|gmres|krylov|arnoldi`
-returns zero real hits — so there is no prior rejection to inherit. The full
-evaluation, including the falsifiers that would flip the answer and the
-reproduction code for every number above, is in
-`dev/research/krylov-recycling-evaluation-2026-09-01.md`. Read that before
-re-opening the question.
+**Why the premise fails.** The matrix is not a chain of small blocks. The
+reproducer's embedded spatial coupling is 775x775 with 1977 nonzeros (2.55
+per row) — a near-tree gas network — crossed with a time path of `3*nfe`
+points. That is a 2-D product graph whose *spatial* extent (775) exceeds its
+*temporal* extent (18 to 648 over the whole sweep). Ordering along time only
+is the classic band/profile ordering for a 2-D grid, with fill
+`O(n * bandwidth)`.
+
+**What this rejects.** Both the `External` chain permutation and the
+chain/near-banded detection heuristic proposed for `Auto` dispatch: on this
+pattern such a heuristic would fire and lose two orders of magnitude.
+
+**What it does not reject.** A better *nested dissection*. Replaying MA57's
+bundled real-METIS ordering through feral's pipeline gives 1.70x fewer flops
+than feral's best at nfe=48 and 2.89x fewer at nfe=96, with the gap widening
+as the horizon grows. The deficit is in `feral-metis` / `feral-scotch`
+separator quality, not in a missing chain heuristic. Full evidence in
+`dev/research/issue-203-collocation-kkt-ordering-2026-09-17.md`.
 
 ## Source Files
 ```
