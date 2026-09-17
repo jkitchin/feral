@@ -7693,3 +7693,48 @@ machine, not a symbolic argument.
 `cargo test --workspace` 1199 passed / 0 failed / 25 ignored;
 `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`
 clean.
+
+## 2026-09-17 — the ordering choice can be measured, opt-in
+
+**Decision.** `Solver::with_ordering_race(arms)` runs every listed ordering
+on the first `factor()` of each pattern and adopts the fastest. Opt-in, off
+by default, fewer than two arms is a no-op.
+
+**Why measured rather than predicted.** Three predictors were checked
+against every matrix measured on 2026-09-17 and all three mispredict:
+`nnz_L` (arms within 1.5% while wall-clock differed 3.52x), the `ncol·nrow²`
+flop proxy (1.37x predicted against 3.52x measured, and the wrong sign on a
+third matrix), `max_front` (right on 3 of 6). The dominant term on the
+motivating matrix is a scheduling effect — wide fronts serialise — that no
+symbolic quantity captures. A race needs no predictor; its worst case is
+spending the race cost on a near-tie.
+
+**Why this is not the race rejected in 2026-05.** That one guarded on fill,
+the metric since shown to be anti-correlated with speed, and was priced as
+per-solve overhead. This one measures numeric time directly and amortises
+over the iterates an IPM host runs against one pattern
+(`pounce-feral/src/lib.rs:17` reuses the symbolic across them).
+
+**Ranking is on steady state, and that is load-bearing.** The first
+implementation ranked on each arm's first `factor()` and picked `Amf` over
+`MetisND` on the issue #203 matrix — the wrong arm, because the first call
+is dominated by the analysis and `MetisND` analyses slower while factoring
+3.5x faster. Each arm now factors once to build its analysis and twice more
+with it cached, scoring on the minimum.
+
+**A tie is not settled by the stopwatch.** Arms within `race_margin` (5%)
+are ranked by the caller's listed order, and arms that *disagree on inertia*
+cause the race to decline entirely rather than pick — a disagreement is a
+correctness signal.
+
+**Cost, measured.** On the issue #203 KKT at n=224,646: first `factor()`
+2.30x an un-raced one, each subsequent ~4.6x faster, break-even at 14-24
+factorizations of the same pattern. A clear win for an IPM host, a straight
+loss for a single-shot caller — hence opt-in.
+
+**`choose_adaptive` is still untouched.** The race is orthogonal; the
+#67/#73 routing question still needs the corpus A/B
+(`dev/research/issue-203-auto-routing-2026-09-17.md`).
+
+**Evidence.** `dev/plans/ordering-race.md`; `cargo test --workspace` 1211
+passed, 0 failed, 25 ignored; fmt and clippy clean.

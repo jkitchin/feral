@@ -4,6 +4,40 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `Solver::with_ordering_race`, a measured ordering choice (issue #203)
+
+- **What.** Opt in with
+  `Solver::new().with_ordering_race(vec![OrderingMethod::Amf, OrderingMethod::MetisND])`
+  and the first `factor()` for each pattern runs every listed ordering,
+  compares them, and adopts the fastest for that pattern. `last_race()`
+  reports what happened. Off by default; fewer than two arms is a no-op.
+- **Why measured and not predicted.** Every cheap predictor was checked and
+  all of them mispredict: `nnz_L` (two orderings within 1.5% of each other
+  while wall-clock differed 3.5x), the `ncol·nrow²` flop proxy (predicted
+  1.37x against a measured 3.52x, and the wrong *sign* on a third matrix)
+  and `max_front` (right on three of six). The dominant term on the matrix
+  that motivated this is a scheduling effect — wide fronts serialise — that
+  no symbolic quantity captures.
+- **It ranks steady state, not the first call.** Each arm is factored once
+  to build its analysis and then timed on two further factorizations, the
+  minimum of which is its score. Ranking on the first call instead picks the
+  ordering cheapest to *analyse* rather than cheapest to *use*, which
+  inverted the answer on the motivating matrix.
+- **It never changes the answer.** If two arms report different inertias the
+  race declines, keeps the configured ordering, and flags
+  `RaceResult::inertia_disagreement` — a disagreement is a correctness
+  signal, not a timing question. Near-ties (within `with_race_margin`,
+  default 5%) go to the arm listed first, so timing noise cannot flip the
+  pick.
+- **Cost.** `k` analyses and `3k` factorizations, once per pattern. On the
+  issue #203 KKT at n=224,646 the first `factor()` costs 2.3x an un-raced
+  one and each subsequent factorization is ~4x faster, breaking even after
+  roughly 15-20 factorizations of the same pattern. That is a clear win for
+  an interior-point host, which factors one pattern on every iterate, and a
+  straight loss for a caller that factors once — hence opt-in.
+- **Default behaviour is unchanged.** With no `with_ordering_race` call the
+  only new work on any path is one `len()` check.
+
 ### Improved — `MetisND` refines the node separator, not the edge cut (issue #203)
 
 - **What changed.** `feral-metis` now builds the node separator at the

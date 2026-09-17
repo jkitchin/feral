@@ -427,3 +427,62 @@ The routing question needs one of two things, neither available here:
    rejected on: it was priced as per-solve overhead, but in an IPM the
    symbolic is computed once (`pounce-feral/src/lib.rs:17`). It is a
    Solver-level API change, not a `choose_adaptive` tweak.
+
+* 22:10 :issue203:race:implement:
+Built the measured ordering race. `Solver::with_ordering_race(arms)`,
+opt-in, off by default. Selection is a pure function
+(`pick_race_winner`) so the policy is unit-testable without timing:
+skip failed arms, decline if survivors disagree on inertia, otherwise
+fastest wins unless inside `race_margin` (5%) of the runner-up, in
+which case the caller's listed order breaks the tie. Seven unit tests
+plus five end-to-end against an analytic saddle-point inertia oracle.
+
+* 22:25 :issue203:race:bug:
+**First implementation ranked on the wrong quantity and picked the
+wrong arm.** It timed each probe's whole first `factor()`, which is
+dominated by the symbolic analysis:
+
+  Amf      4916988 us  <-- adopted
+  MetisND  6219127 us
+
+MetisND analyses slower and factors 3.5x faster, so ranking on the
+first call picks the ordering cheapest to *analyse* rather than
+cheapest to *use* — the exact inversion, on the exact matrix the race
+exists for. Fixed by ranking on **steady state**: each arm factors once
+to build its analysis, then twice more with it cached, and scores on
+the min. Re-run:
+
+  Amf      first 4119020 us  steady 1934548 us
+  MetisND  first 6249675 us  steady  188933 us  <-- adopted
+
+Min-of-2 rather than a single sample because a single steady sample was
+measured drifting ~50% high on a loaded machine — enough to invert a
+close pick.
+
+* 22:40 :issue203:race:measure:
+Acceptance on the nfe=48 KKT (n=224,646), against an un-raced
+`Solver::new()`:
+
+| per-call baseline (us) | 1170351, 802646, 854334, 826507, 798508 |
+| per-call raced    (us) |  199513, 179821, 191723, 176021, 172184 |
+
+~4.6x per factorization, matching the standalone A/B's 3.5x within
+machine noise. First `factor()` costs 2.30x an un-raced one (plan said
+< 3x). Break-even lands at 14-24 factorizations of the same pattern
+across runs; pounce runs 50-122 iterates per solve, so it clears it.
+
+A confounder worth recording: an earlier run showed the baseline's
+repeat factorizations at 1.65 s each against the probe's 696 ms for the
+same ordering. Printing per-call times showed that was thermal drift
+from my own back-to-back runs, not a real effect. Single-number
+comparisons on this machine are not trustworthy; per-call series are.
+
+`cargo test --workspace` 1211 passed, 0 failed, 25 ignored. fmt and
+clippy clean.
+
+* 22:50 :issue203:race:scope:
+`choose_adaptive` is still untouched, and the race does not change the
+default path — with no `with_ordering_race` call the only new work is
+one `len()` check. The #67/#73 question still needs the corpus. What
+the race changes is that a host no longer *has* to wait for that
+answer: it can measure its own matrices.
