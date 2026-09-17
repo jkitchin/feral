@@ -1125,6 +1125,10 @@ impl Solver {
         p.parallel_pool = self.parallel_pool.clone();
         p.ordering_escalation_growth = self.ordering_escalation_growth;
         p.auto_cascade_break_beta = self.auto_cascade_break_beta;
+        p.mc64_cache_enabled = self.mc64_cache_enabled;
+        // Profiling is the one configuration deliberately *not*
+        // inherited: a probe's profile is not the caller's, and
+        // collecting it would slow the very thing being timed.
         p.profiling_enabled = false;
         p
     }
@@ -4971,5 +4975,64 @@ mod tests {
         let s = Solver::new();
         assert!(s.race_arms.is_empty());
         assert!(s.last_race().is_none());
+    }
+
+    /// Every configuration field a builder can set must reach the race
+    /// probe. A field left behind means the race times an arm under a
+    /// configuration the real solver never uses — which is how
+    /// `mc64_cache_enabled` was caught. When a new `with_*` builder
+    /// adds a field, this test is where it must be registered.
+    #[test]
+    fn race_probe_inherits_every_configured_field() {
+        let s = Solver::new()
+            .with_parallel(false)
+            .with_fma(true)
+            .with_fma_large_fronts(4096)
+            .with_static_pivoting(true)
+            .with_cascade_break(3.5)
+            .with_auto_cascade_break(2.5)
+            .with_mc64_cache(false)
+            .with_scaling(ScalingStrategy::Identity)
+            .with_cascade_break_eps(1e-7)
+            .with_static_pivot_threshold(1e-9)
+            .with_partial_singular_warning(true)
+            .with_sqd_mode(true)
+            .with_ordering_escalation(Some(12.0))
+            .with_ordering_race(vec![OrderingMethod::Amd, OrderingMethod::Amf]);
+        let p = s.race_probe();
+
+        // Everything the `with_*` builders write into `numeric_params`.
+        // `NumericParams` is not `PartialEq`, so compare its `Debug`
+        // rendering — that covers every field without needing the
+        // derive, and a new field shows up in it automatically.
+        assert_eq!(
+            format!("{:?}", p.numeric_params),
+            format!("{:?}", s.numeric_params),
+            "numeric_params"
+        );
+        assert_eq!(p.snode_params.nemin, s.snode_params.nemin, "snode_params");
+        // Top-level configuration fields.
+        assert_eq!(p.use_parallel, s.use_parallel, "use_parallel");
+        assert_eq!(p.pivtol_max, s.pivtol_max, "pivtol_max");
+        assert_eq!(p.quality_level, s.quality_level, "quality_level");
+        assert_eq!(
+            p.ordering_escalation_growth, s.ordering_escalation_growth,
+            "ordering_escalation_growth"
+        );
+        assert_eq!(
+            p.auto_cascade_break_beta, s.auto_cascade_break_beta,
+            "auto_cascade_break_beta"
+        );
+        assert_eq!(
+            p.mc64_cache_enabled, s.mc64_cache_enabled,
+            "mc64_cache_enabled"
+        );
+
+        // And the two things a probe must NOT inherit.
+        assert!(
+            p.race_arms.is_empty(),
+            "a probe that inherited race_arms would recurse"
+        );
+        assert!(!p.profiling_enabled, "a probe must not collect profiles");
     }
 }

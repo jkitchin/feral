@@ -486,3 +486,30 @@ default path — with no `with_ordering_race` call the only new work is
 one `len()` check. The #67/#73 question still needs the corpus. What
 the race changes is that a host no longer *has* to wait for that
 answer: it can measure its own matrices.
+
+* 23:15 :issue203:race:bug:release-audit:
+Asked whether this is release-ready; audited the new API before
+answering and found a **real bug**. `race_probe()` hand-copies the
+configuration a probe must inherit, and it missed
+`mc64_cache_enabled`. `with_mc64_cache(false)` would therefore have
+raced arms with MC64 caching *on* while the real solver ran with it
+off — timing arms under a configuration the caller never uses, which is
+exactly the failure mode the hand-copy invites.
+
+Found it by auditing every `pub fn with_*` for the fields it writes.
+The first pass missed it because the grep pattern was `with_[a-z_]*`
+and the method name has digits.
+
+Fixed, and added `race_probe_inherits_every_configured_field` — builds
+a solver with every builder set to a non-default value and asserts the
+probe matches on each. `NumericParams` is not `PartialEq`, so that one
+is compared through its `Debug` rendering, which picks up new fields
+automatically. That is the drift guard: a future `with_*` that adds a
+top-level field fails this test.
+
+Also checked the blast radius: `src/capi.rs` and `python/src/lib.rs`
+never touch the race (the three `race` hits in capi.rs are
+`trace_factor` and a comment), so the C ABI and the Python bindings are
+unaffected.
+
+`cargo test --workspace` 1212 passed, 0 failed. fmt and clippy clean.
