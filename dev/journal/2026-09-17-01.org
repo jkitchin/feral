@@ -1,0 +1,124 @@
+#+TITLE: Session journal 2026-09-17-01
+#+STARTUP: showeverything
+
+* 14:25 :issue203:ordering:orient:
+Issue #203 (filed from pounce#947): factorization cost on a long-horizon
+collocation optimal-control KKT grows ~n^2.3-2.4, symbolic fill ~n^1.37,
+while `dim K` and `nnz(K)` are exactly linear in the horizon length
+`nfe`. The issue's hypothesis is that the matrix is a *block chain*
+whose available front-to-back elimination order gives linear fill, and
+that AMD/METIS/SCOTCH/KaHIP are all failing to find it. Three asks:
+explain the superlinearity, check whether `OrderingMethod::External`
+with a hand-built chain permutation recovers linear fill, and say
+whether a chain-detection heuristic belongs in `Auto`.
+
+Extracted the self-contained reproducer from pounce#947 and regenerated
+the patterns. It reproduces the reported geometry exactly:
+
+| nfe | dim K     | nnz(K) lower |
+|   6 |    28,086 |      156,858 |
+|  12 |    56,166 |      317,364 |
+|  24 |   112,326 |      638,376 |
+|  48 |   224,646 |    1,280,400 |
+|  96 |   449,286 |    2,564,448 |
+
+* 14:35 :issue203:structure:
+Read the reproducer's index arithmetic to recover the actual graph.
+`NS=775` states per collocation point, `NCP=3` points per element,
+`NC=6` controls with one knot per element, `NE=6` path constraints per
+point. The embedded spatial coupling `S` is 775x775 with **1977**
+nonzeros — 2.55 per row, i.e. a near-tree network (GasLib-40, 10 finite
+volumes per pipe), not a dense block.
+
+So the graph is not a chain of dense blocks. It is a **2-D product**:
+a sparse spatial network of 775 nodes crossed with a time path of
+`3*nfe` points, with the constraint rows roughly doubling each slice.
+Spatial extent 775 is *larger* than the temporal extent `3*nfe` for
+every size tested (18 at nfe=6, 288 at nfe=96, 648 at nfe=216). The
+premise "1-D chain with linear-fill elimination available" does not
+hold at these sizes: a time-slice separator is 775 states wide, and
+densifying it costs 775^2/2 ~ 3e5 per cut.
+
+* 14:50 :issue203:external:measure:
+Built the chain permutation the issue asks for (`gen_perm.py`: sort
+every row/column by its time key, controls and ramps placed at their
+knot's collocation point; two within-slab variants, all-vars-then-all-
+constraints and interleaved var/constraint pairs) and replayed it
+through feral's own symbolic pipeline via `OrderingMethod::External`.
+New probe `crates/feral-diagnostics/src/bin/issue203_fill_probe.rs`
+reports `nnz_L`, `sum_j (c_j - 1)^2` as a flop proxy, and `front_max`.
+
+`nnz_L` / flops, chain ordering vs feral default:
+
+| nfe | Auto nnz_L | chain nnz_L | ratio | Auto flops | chain flops | ratio |
+|   6 |      0.90M |      80.5M |   90x |    5.36e7  |    1.745e11 | 3254x |
+|  12 |      2.37M |     165.1M |   70x |    2.97e8  |    3.609e11 | 1214x |
+|  24 |      6.45M |     334.3M |   52x |    1.83e9  |    7.336e11 |  401x |
+|  48 |     17.6M  |     672.7M |   38x |    1.09e10 |    1.479e12 |  135x |
+
+The chain ordering *is* exactly linear (2.01x per doubling in fill,
+2.02x in flops — the prediction in the issue is arithmetically right)
+and it is catastrophic in absolute terms: `front_max` pins at 3299 for
+every size, the width of one element's slab. The interleaved variant
+changes nothing (79.5M vs 80.5M at nfe=6). Extrapolating both curves,
+the crossover is past nfe ~ 1000, far beyond the horizon lengths in
+play.
+
+**Conclusion: ask #2 answered, with the opposite sign to what was
+expected.** A chain permutation does not recover linear fill in any
+useful sense, and a chain-detection heuristic in `Auto` (ask #3) would
+be actively harmful on this pattern. Recorded in tried-and-rejected.
+
+* 15:10 :issue203:ma57:measure:
+If the chain order is not the answer, is there a better ordering at
+all? Built an analysis-only MA57 probe (`ma57_analyse.F`, MA57ID +
+MA57AD, CoinHSL v2023.11.17) reporting INFO(5) reals-in-factors,
+INFO(7) max front and RINFO(2) elimination flops. Pattern-only, so the
+reproducer's unit values are fine.
+
+MA57's automatic ordering (ICNTL(6)=5) picks AMD at nfe<=12 and
+switches to its bundled **real METIS** at nfe>=24. Real METIS is far
+ahead of every feral backend at scale. At nfe=96:
+
+| ordering              | nnz_L / reals | flops    | max front |
+| feral Amd             |        53.7M  | 5.61e10  |     3136  |
+| feral Amf (= Auto)    |        46.4M  | 5.06e10  |     3453  |
+| feral MetisND         |        69.5M  | 6.89e10  |     3204  |
+| feral ScotchND        |        75.5M  | 8.22e10  |     3215  |
+| MA57 + real METIS     |        33.3M  | 1.80e10  |     1605  |
+
+* 15:25 :issue203:ordering-gap:evidence:
+Isolated the cause. Dumped MA57's pivot order (`KEEP(1:N)` after
+MA57AD), inverted it to feral's new-to-old convention, and replayed it
+through feral's *own* symbolic pipeline as `External`. Same
+amalgamation, same column counts, same everything except the
+permutation:
+
+| nfe | feral Auto flops | MA57-METIS perm, feral pipeline | ratio |
+|   6 |         5.36e7   |                        8.99e7   | 0.60  |
+|  12 |         2.97e8   |                        4.18e8   | 0.71  |
+|  24 |         1.83e9   |                        1.72e9   | 1.06  |
+|  48 |         1.09e10  |                        6.42e9   | 1.70  |
+|  96 |         5.06e10  |                        1.75e10  | 2.89  |
+
+The replayed figures track MA57's own forecast closely (6.42e9 vs
+6.68e9 at nfe=48; 1.75e10 vs 1.80e10 at nfe=96), which validates the
+cross-solver flop metric and confirms nothing but the permutation is
+being compared.
+
+Growth per doubling of `nfe`:
+- feral Auto flops: 5.5x, 6.2x, 6.0x, 4.6x  (exponent 2.2-2.6)
+- real METIS flops: 4.7x, 4.1x, 3.7x, 2.7x  (exponent falling to ~1.4)
+
+So real METIS *is* bending toward the near-linear asymptote the issue
+expects, while every feral backend stays at ~n^2.4. The superlinearity
+pounce reports is therefore a genuine ordering-quality deficit — but
+in `feral-metis`/`feral-scotch` nested dissection, not in a missing
+chain heuristic. `front_max` says the same thing in one number: real
+METIS's top separator is 1605, about one time slice of states plus
+constraints; feral's is 3204-3453, about twice that.
+
+**This is also the answer to "why is MA57 1.2-1.9x faster per
+iteration".** At the sizes pounce runs (nfe=48-216) the ordering gap
+alone is 1.7x-2.9x in flops, which covers the reported wall-clock gap
+without invoking any kernel difference.
