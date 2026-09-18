@@ -1150,3 +1150,53 @@ pins it with the reasoning attached, since a unit test cannot reproduce
 an IPM-trajectory outcome.
 
 `cargo test --workspace` 1225 passed, 0 failed.
+
+* 17:40 :release:api-review:
+Deliberate review pass over the four public surfaces 0.18.0 adds, before
+publishing makes them a semver commitment. Three real findings, all
+fixed; one pre-existing condition recorded.
+
+**1. None of the new types was reachable from the crate root.**
+`FactorStats` is re-exported at the root, and I added `ordering_info` to
+it — but `OrderingInfo` itself was not exported, so a caller could read
+the field and not *name* its type without
+`feral::numeric::solver::OrderingInfo`. Same for `RaceResult` / `RaceArm`
+(returned by `Solver::last_race()`) and `WorkEstimate` (returned by
+`Solver::work_estimate()`). **Every one of the four is returned by a
+method on a root-exported type and none of them was root-exported.**
+Fixed in `lib.rs`.
+
+**2. `RaceArm` / `RaceResult` lacked `PartialEq`** where every sibling
+(`FactorStats`, `OrderingInfo`, `WorkEstimate`, `ScalingInfo`,
+`Inertia`) has it, and it derives cleanly. Fixed.
+
+**3. The Python bindings did not expose #205 at all.** `python/` is a
+**separate cargo workspace**, so `cargo test --workspace` never touched
+it. It builds (its `FactorStats` is a field-by-field wrapper, so adding
+a field upstream cannot break it) — but the wrapper carried
+`scaling_info` and no `ordering_info`, so the routing report was
+invisible to Python users. Added an `OrderingInfo` pyclass mirroring the
+`ScalingInfo` pattern, wired into the wrapper and registered on the
+module.
+
+**Not a finding, but worth recording:** `cargo clippy -- -D warnings` on
+`python/` reports 48 errors, **none in code I touched** — 28 `useless
+conversion to PyErr`, 13 pyo3 `gil-refs` cfg drift, and some
+loop-index lints. The root pre-commit hook lints the root workspace and
+`feral-diagnostics` only, so the Python workspace has never been linted
+in CI and has drifted. Not a release blocker — it compiles and the wheel
+jobs pass — but it is a gap in the guard rails.
+
+**Checked and deliberately left alone:**
+- `non_exhaustive` is used nowhere in `src/`, so adding a field to
+  `FactorStats` follows existing practice. feral is 0.x, so 0.17 -> 0.18
+  is already the breaking bump under cargo's semver rules; the change is
+  correctly signalled.
+- No doctests anywhere in the crate (the two that exist are `ignore`d),
+  so the new API having none matches convention rather than missing one.
+- `OrderingInfo::pattern_reused` duplicates `FactorStats::pattern_reused`
+  on purpose, documented, so the routing report is self-contained when
+  logged alone.
+
+feral `cargo test --workspace` 1225 passed, 0 failed; clippy clean.
+`python/` builds clean.

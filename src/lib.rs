@@ -56,6 +56,8 @@ pub use numeric::solve::{
     solve_sparse_refined_with_diagnostics, solve_sparse_refined_with_diagnostics_opts,
     RefineOptions, RefinementDiagnostics, RefinementStep, SolveCore, DEFAULT_REFINE_MAX_STEPS,
 };
-pub use numeric::solver::{FactorStats, FactorStatus, QualityLevel, Solver};
+pub use numeric::solver::{
+    FactorStats, FactorStatus, OrderingInfo, QualityLevel, RaceArm, RaceResult, Solver,
+};
 pub use sparse::csc::{CscMatrix, CscPattern};
-pub use symbolic::SymbolicProfileReport;
+pub use symbolic::{SymbolicProfileReport, WorkEstimate};

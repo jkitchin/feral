@@ -34,8 +34,8 @@ use common::{
 };
 use factors::Factors;
 use introspect::{
-    BucketStats, FactorStats, ProfileReport, PrologueBreakdown, ScalingInfo, StagePct,
-    SymbolicProfileReport,
+    BucketStats, FactorStats, OrderingInfo, ProfileReport, PrologueBreakdown, ScalingInfo,
+    StagePct, SymbolicProfileReport,
 };
 use lu::{LuFactor, LuMatrix};
 use matrix::CscMatrix;
@@ -58,6 +58,7 @@ fn _feral(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SymbolicProfileReport>()?;
     m.add_class::<StagePct>()?;
     m.add_class::<ScalingInfo>()?;
+    m.add_class::<OrderingInfo>()?;
 
     // Standalone symbolic-analysis entry point.
     m.add_function(wrap_pyfunction!(symbolic::analyze, m)?)?;
