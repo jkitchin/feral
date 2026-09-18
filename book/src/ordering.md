@@ -104,6 +104,41 @@ better orderings than greedy methods on large, mesh-like graphs.
 > reuses it. So an expensive ordering like `KahipND` or `AutoRace` is
 > cheap in amortized terms across a Newton run or a refactorization loop.
 
+## Choosing for your workload
+
+`Auto` is tuned for the benchmark corpus as a whole. Two workload shapes do
+measurably better with an explicit choice, and the difference is large enough
+to be worth one line of configuration.
+
+**Collocation, optimal control, PDE-in-time — ask for `MetisND`.** These are
+space-by-time product patterns: a sparse spatial graph crossed with a time
+axis. Nested dissection finds the separators; the local heuristics do not.
+Measured steady-state factor time per iterate, lower is better:
+
+| model | `Amf` (what `Auto` picks) | `MetisND` |
+|---|---|---|
+| gas-network transient control, n = 224,646 | 337.6 ms | **131.4 ms** |
+| 2-D Poisson boundary control, n = 607,500 | 509.5 ms | **440.3 ms** |
+| minimum-lap-time collocation, n = 126,028 | 85.0 ms | **42.7 ms** |
+
+**Thin chains, QPs and small-front problems — leave `Auto` alone.** On the
+same measurement `MetisND` is the wrong answer by a similar margin: 21.9 ms
+against 17.5 ms on a beam-control chain, 30.8 against 20.8 on a
+discrete-time control problem, 33.1 against 23.8 on a sparse QP.
+
+There is no cheap structural test that separates the two groups — average
+degree puts members of each on both sides of the boundary — so this is a
+judgement about your problem, not something the library can infer.
+
+**If you would rather not hardcode it**, and you factor one pattern many
+times (any interior-point or Newton loop),
+[`Solver::with_ordering_race`](https://docs.rs/feral) measures instead of
+guessing: it runs each candidate once and keeps the fastest for that pattern.
+Across the ten families above it lands within 5% of the best fixed arm on 29
+of 31 matrices. It costs a few extra factorizations once per pattern, which
+breaks even after roughly 15 — free inside a solve, a loss for a one-shot
+factorization.
+
 ## References
 
 Greedy orderings:
