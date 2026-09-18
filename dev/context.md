@@ -1,92 +1,92 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-09-17T19:16:37Z
+Generated: 2026-09-18T13:36:43Z
 
 ## Latest Session
-File: dev/sessions/2026-09-17-01.md
+File: dev/sessions/2026-09-18-01.md
 ```
-# Session 2026-09-17-01
+# Session 2026-09-18-01
+
+Continuation of `2026-09-17-01.md` (same unbroken session; that checkpoint
+covers the diagnosis and the `feral-metis` fix and stops there). Read this one
+for everything after.
 
 ## Benchmark note (read first)
 
-**The corpus is not on this machine, so the session benchmark is vacuous.**
-`cargo run --bin bench --release` ran and found **2 matrices**
-(`densecol_kkt_300_0000` and one other), both passing, with **no oracle
-timings**, so both Phase 2.8.1 exit partitions report `N/A` with count 0. No
-factor-ratio-vs-MUMPS number can be quoted from this session, favourable or
-otherwise, and none is quoted below.
+**`cargo run --bin bench --release` still has not been run against the new
+corpus, and no factor-ratio-vs-MUMPS number is quoted anywhere in this
+session.** That gate needs `*.mumps.json` oracle sidecars, which need a MUMPS
+5.8.2 build that does not exist on this machine (`ref/` is empty). It was
+judged unnecessary for what this branch changes — the ordering permutation is
+bit-identical on 7 of 9 corpus families, so a ratio-vs-MUMPS comparison would
+be measuring unchanged code — but that is a judgement, not a measurement, and
+the next session should say so out loud rather than let it pass silently.
 
-That is acceptable for what this session changed — the work is entirely in
-the *symbolic* ordering, measured directly as `nnz_L` and elimination flops
-against an external oracle (MA57's bundled real METIS). It is **not**
-acceptable as a release gate: the next session on a corpus machine must run
-the full bench before this lands anywhere near a tag, and must in particular
-measure real factor+solve wall-clock, which this session did not touch.
-
-```
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-```
+What *was* measured: steady-state numeric factor time, paired, on 135 real KKT
+matrices across 9 families, gated on cross-arm inertia agreement and a refined
+residual. Those numbers are throughout.
 
 ## Goal
 
-Explore issue #203 — pounce reports factorization cost growing `~n^2.3` and
-symbolic fill `~n^1.37` on a long-horizon collocation optimal-control KKT
-whose `dim K` and `nnz(K)` are exactly linear in the horizon. The issue
-hypothesises a block chain with an available linear-fill elimination order
-that no ordering backend is finding, and asks three questions plus a fourth
-from the original report (why MA57 is 1.2–1.9x faster per iteration).
+Finish issue #203: fix the remaining backends, get a real corpus, decide
+whether the work is release-ready.
 
 ## Accomplished
 
-### 1. Diagnosed the issue, and refuted its premise
+### `ScotchND` and `KahipND` had the identical defect, now fixed
 
-The reproducer's own index arithmetic says the matrix is **not** a chain of
-small blocks: the embedded spatial coupling is 775x775 with 1977 nonzeros
-(2.55/row, a near-tree gas network) crossed with a time path of `3*nfe`
-points. Spatial extent 775 exceeds temporal extent (18 to 288 over the
-sweep), so a time-slice separator is the *expensive* cut.
+All three ND backends refined a 2-way edge bisection through uncoarsening and
+built the node separator once at the finest level. Elimination flops on the
+collocation KKT at n=224,646:
 
-Built the chain permutation the issue asks for and replayed it through
+| backend | before | after | gain |
+|---|---|---|---|
+| `MetisND` | 2.095e10 | 6.737e9 | 3.11x *(2026-09-17)* |
+| `ScotchND` | 2.264e10 | 1.017e10 | 2.23x |
+| `KahipND` | 2.577e10 | 7.184e9 | 3.59x |
+
+KaHIP's symbolic analysis roughly halves (5,263 -> 2,274 ms) because its
+max-flow lift now runs on the coarsest graph. Corpus wall-clock is neutral for
+both (scotch 1.060 -> 1.045, kahip 1.118 -> 1.102 against `Amf`).
+
+### A real corpus, without AMPL
+
+`scripts/build-pounce-corpus.sh`. pounce's `generate_nl.py` builds six large
+NLPs in Pyomo and writes `.nl` directly, so the AMPL Community Edition licence
+is not needed. 135 matrices, 9 families, covering the shapes the argument
+turns on: `bratu` (#67's `bratu3d`), `poisson` (#73's `cont5_1_l`),
 ```
 
 ## Git Status
 ```
-7045060 chore: drop the issue203 separator-tree probe as unreliable
-15d6217 feat(metis): refine the node separator through uncoarsening, not the edge cut
-ba19a3f research: diagnose issue #203 collocation-KKT fill growth as an ND ordering gap
-a303326 Merge pull request #198 from jkitchin/docs/krylov-evaluation
-b412113 docs: record the recycled-MINRES evaluation and why it was not adopted
+9bcecac test(bench): laptime anomaly resolved — no blocker, and two of my results corrected
+f25cf3d feat(scotch,kahip): refine the node separator through uncoarsening
+58d8cf4 test(bench): scotch and kahip have the same defect metis had, measured
+3e358af test(bench): corpus A/B settles both routing questions — and retracts my Amd claim
+605536f test(bench): policy break-even data — and Amd beats Auto on all six families
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test numeric::solve::tests::issue175_wide_thin_tree_is_not_scheduled_in_parallel ... ok
+test numeric::solve::tests::issue175_overhead_term_is_scheduling_only ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.35s
+test result: ok. 452 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.65s
 
 ```
 
@@ -96,58 +96,58 @@ test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; fi
 ```
 
 ## Recent Decisions
-|---|---|---|---|
-| gaslib collocation KKT, nfe=48 | 2.10e10 | 6.74e9 | 6.42e9 |
-| nfe=96 | 6.89e10 | 2.91e10 | 1.75e10 |
-| grid3d 40^3 | 2.31e10 | 2.18e10 | 1.67e10 |
+bisection and converting once at the finest level.
 
-2.4x-3.5x on collocation KKTs, 6-10% on grid Laplacians, never worse on any
-of the 40 matrices measured, and not slower (`MetisND` symbolic at nfe=96:
-6.31 s -> 7.30 s, inside the 1.5x guardrail).
+**Why, given a narrow audience.** Neither backend is reachable from `Auto`,
+so nobody gets this by default. It was done anyway because leaving a known,
+measured, 2-3.6x deficiency in two of three backends through a release is
+worse than the audience is small — a later user who reaches for `ScotchND`
+has no way to know it is the un-fixed one.
 
-**The acceptance table in `dev/plans/metis-node-separator-fm.md` was missed
-on 3 of its 4 rows** (nfe=96, grid2d, grid3d) and the default was flipped
-anyway. Those targets were written as "match real METIS" before any code
-existed; using them as a gate would have withheld a change that is a strict
-improvement everywhere it was measured. Recording the miss here rather than
-quietly restating the targets.
+**Results** (gaslib nfe=48, elimination flops): scotch 2.264e10 -> 1.017e10
+(2.23x), kahip 2.577e10 -> 7.184e9 (3.59x). On the pounce corpus both are
+neutral in wall-clock (scotch geomean vs `Amf` 1.060 -> 1.045, kahip 1.118 ->
+1.102) — the same "large win on collocation, inert elsewhere" profile metis
+had.
 
-**What is deliberately *not* changed: `choose_adaptive`.** It still reroutes
-every would-be-`MetisND` decision to `Amf` (issues #67/#73), so `Auto` is
-bit-identical to before and still picks the 1.74x-worse ordering at nfe=96.
-That override was established on real factor+solve wall-clock across the IPM
-corpus, and `tried-and-rejected.md` (2026-05, fill-guarded race) already
-records one attempt to re-decide it on fill that was rejected because fill
-does not predict speed — nql180 has 0.98x the fill under MetisND and is still
-2.05x slower end to end. Re-opening it needs a wall-clock A/B on the corpus
-machine, not a symbolic argument.
+**KaHIP keeps its flow lift at the coarsest level only**, rather than
+re-running it per level. `flow_node_separator` is a max-flow vertex-cover
+reduction and per-level use would cost more than the refinement is worth; the
+FM pass down the hierarchy is what fixes the objective. A side effect is that
+kahip's analysis roughly halves, since the max-flow now runs on the smallest
+graph rather than the largest.
 
-**Evidence.** `dev/research/feral-metis-node-separator-fm-2026-09-17.md`;
-`cargo test --workspace` 1199 passed / 0 failed / 25 ignored;
-`cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`
-clean.
+**Corroboration worth keeping.** Scotch's finest-level separator step was
+already *better* than pre-fix metis's — a two-sided FM optimising separator
+weight directly, against a König cover plus a positive-gain-only greedy pass
+— and scotch still measured slightly worse than pre-fix metis (3.36x vs
+3.11x behind). That is independent evidence for the original diagnosis: the
+final polish is not what decides this, the hierarchy is.
+
+**Evidence.** `dev/research/scotch-kahip-node-separator-2026-09-18.md`;
+`cargo test --workspace` 1212 passed, 0 failed; fmt and clippy clean.
 
 ## Recent Tried-and-Rejected
-past `nfe ~ 1000`, well beyond any horizon in play.
 
-**Why the premise fails.** The matrix is not a chain of small blocks. The
-reproducer's embedded spatial coupling is 775x775 with 1977 nonzeros (2.55
-per row) — a near-tree gas network — crossed with a time path of `3*nfe`
-points. That is a 2-D product graph whose *spatial* extent (775) exceeds its
-*temporal* extent (18 to 648 over the whole sweep). Ordering along time only
-is the classic band/profile ordering for a 2-D grid, with fill
-`O(n * bandwidth)`.
+**Why they fail, as far as it was chased.** `dtoc_wide`'s `max_front` is 31.
+At that width the numeric phase is all per-front overhead and no arithmetic,
+so the comparison measures supernode count rather than flops, and MetisND's
+fewer-but-wider fronts win for reasons that have nothing to do with dtoc2.
+Widening the chain from `(nx,nu) = (4,2)` to `(8,4)` moved `max_front` only
+24 -> 31; the real dtoc2's avg_deg of 17.5 is not reachable by this
+construction at the right `n`.
 
-**What this rejects.** Both the `External` chain permutation and the
-chain/near-banded detection heuristic proposed for `Auto` dispatch: on this
-pattern such a heuristic would fire and lose two orders of magnitude.
+**This was already on the record.**
+`external_benchmarks/chain_proxy/README.md` documents geometry-matched
+proxies producing the wrong answer and says to prefer the real corpus. That
+warning was read during this session and the proxies were built anyway.
 
-**What it does not reject.** A better *nested dissection*. Replaying MA57's
-bundled real-METIS ordering through feral's pipeline gives 1.70x fewer flops
-than feral's best at nfe=48 and 2.89x fewer at nfe=96, with the gap widening
-as the horizon grows. The deficit is in `feral-metis` / `feral-scotch`
-separator quality, not in a missing chain heuristic. Full evidence in
-`dev/research/issue-203-collocation-kkt-ordering-2026-09-17.md`.
+**What survives.** Nothing about routing. The non-proxy measurements in the
+same session stand on their own and are recorded in
+`dev/research/issue-203-auto-routing-2026-09-17.md`: on the issue #203
+patterns MetisND is 1.62x faster sequentially and 3.5x in parallel, and
+`nnz_L`, `flop_proxy` and `max_front` were each checked as routing guards
+and each mispredicts.
 
 ## Source Files
 ```
@@ -254,6 +254,7 @@ tests/issue128_supernode_nrow.rs
 tests/issue177_parallel_entry_point_core.rs
 tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
+tests/issue203_ordering_race.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
