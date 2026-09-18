@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Improved — `ScotchND` and `KahipND` refine the node separator too (issue #203)
+
+- **What changed.** Both crates gain `node_refine: bool`, defaulting to
+  `true`, mirroring the `feral-metis` change above. They had the identical
+  defect: refine a 2-way edge bisection through uncoarsening, build the node
+  separator once at the finest level. Minimum edge cut and minimum vertex
+  separator are different objectives, so every level optimised the wrong one.
+- **Effect** on the collocation KKT at n=224,646 (elimination flops):
+  `ScotchND` 2.264e10 -> 1.017e10 (2.23x), `KahipND` 2.577e10 -> 7.184e9
+  (3.59x). `max_front` falls with it (2080 -> 1783, 2145 -> 1517). KaHIP's
+  symbolic analysis also roughly halves (5,263 ms -> 2,274 ms), because its
+  max-flow separator lift now runs on the coarsest graph in the hierarchy
+  rather than the finest.
+- **Neutral elsewhere.** On the pounce corpus, steady-state factor time
+  against `Amf` (geomean over all matrices) moves 1.060 -> 1.045 for scotch
+  and 1.118 -> 1.102 for kahip — within run-to-run noise, the same profile
+  the metis change had. Scotch's `corkscrw` flop proxy is 13% worse and does
+  not reach the clock (wall-clock 1.002 -> 1.017 on that family).
+- **No default path changes.** `choose_adaptive` never selects either
+  backend, so this is visible only to callers naming `ScotchND` / `KahipND`
+  explicitly, or racing them.
+
 ### Added — `Solver::with_ordering_race`, a measured ordering choice (issue #203)
 
 - **What.** Opt in with

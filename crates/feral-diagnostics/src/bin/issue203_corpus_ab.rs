@@ -33,6 +33,8 @@ fn arm(name: &str) -> OrderingMethod {
         "amd" => OrderingMethod::Amd,
         "amf" => OrderingMethod::Amf,
         "metis" => OrderingMethod::MetisND,
+        "scotch" => OrderingMethod::ScotchND,
+        "kahip" => OrderingMethod::KahipND,
         _ => OrderingMethod::Auto,
     }
 }

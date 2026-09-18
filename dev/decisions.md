@@ -7738,3 +7738,40 @@ loss for a single-shot caller — hence opt-in.
 
 **Evidence.** `dev/plans/ordering-race.md`; `cargo test --workspace` 1211
 passed, 0 failed, 25 ignored; fmt and clippy clean.
+
+## 2026-09-18 — the node-separator fix lands in scotch and kahip too
+
+**Decision.** `ScotchOptions::node_refine` and `KahipOptions::node_refine`
+default to `true`, mirroring `MetisOptions::node_refine` (2026-09-17). All
+three ND backends now build the node separator at the coarsest level and
+refine *the separator* down the hierarchy, instead of refining a 2-way edge
+bisection and converting once at the finest level.
+
+**Why, given a narrow audience.** Neither backend is reachable from `Auto`,
+so nobody gets this by default. It was done anyway because leaving a known,
+measured, 2-3.6x deficiency in two of three backends through a release is
+worse than the audience is small — a later user who reaches for `ScotchND`
+has no way to know it is the un-fixed one.
+
+**Results** (gaslib nfe=48, elimination flops): scotch 2.264e10 -> 1.017e10
+(2.23x), kahip 2.577e10 -> 7.184e9 (3.59x). On the pounce corpus both are
+neutral in wall-clock (scotch geomean vs `Amf` 1.060 -> 1.045, kahip 1.118 ->
+1.102) — the same "large win on collocation, inert elsewhere" profile metis
+had.
+
+**KaHIP keeps its flow lift at the coarsest level only**, rather than
+re-running it per level. `flow_node_separator` is a max-flow vertex-cover
+reduction and per-level use would cost more than the refinement is worth; the
+FM pass down the hierarchy is what fixes the objective. A side effect is that
+kahip's analysis roughly halves, since the max-flow now runs on the smallest
+graph rather than the largest.
+
+**Corroboration worth keeping.** Scotch's finest-level separator step was
+already *better* than pre-fix metis's — a two-sided FM optimising separator
+weight directly, against a König cover plus a positive-gain-only greedy pass
+— and scotch still measured slightly worse than pre-fix metis (3.36x vs
+3.11x behind). That is independent evidence for the original diagnosis: the
+final polish is not what decides this, the hierarchy is.
+
+**Evidence.** `dev/research/scotch-kahip-node-separator-2026-09-18.md`;
+`cargo test --workspace` 1212 passed, 0 failed; fmt and clippy clean.
