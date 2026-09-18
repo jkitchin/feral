@@ -686,3 +686,72 @@ ahead of "fix Auto's MetisND reroute": it is cheaper (no race, no new
 API), it never lost on this corpus, and it is worth 1.17x geomean
 against the reroute question's 1.14x — on a corpus that includes two
 members of the class the reroute is wrong about.
+
+* 02:15 :issue203:corpus-ab:amd-vs-amf:
+Ran the corpus A/B the six-family table said was worth doing. New tool
+`issue203_corpus_ab`: per matrix, warm the symbolic then time `pairs`
+alternating pairs per arm and take the min; gate on cross-arm inertia
+agreement and `rel_res <= 1e-8`; report per-family geomean, worst case,
+wins and an exact sign test. Corpus is `data/matrices/kkt-pounce`,
+now 9 families after adding the two cached Mittelmann `.nl`
+(clnlbeam — #67's own worst case — and corkscrw), capped at 8 evenly
+spaced iterates per family so the sample is not all early ones.
+
+**amf (A) vs amd (B), ratio > 1 means amd faster. 45 matrices:**
+
+| family     |  n     | mats | geomean | worst | amd wins |    p   |
+| bratu      |  19996 |  3   |  1.083  | 0.954 |   2/3    | 1.0000 |
+| clnlbeam   |  99999 |  8   |  1.020  | 0.985 |   5/8    | 0.7266 |
+| corkscrw   |  84997 |  7   |  1.096  | 1.049 |   7/7    | 0.0156 |
+| laptime    | 126028 |  8   |  1.241  | 0.700 |   6/8    | 0.2891 |
+| optcontrol | 150002 |  2   |  0.995  | 0.995 |   0/2    | 0.5000 |
+| poisson    | 120000 |  2   |  1.117  | 1.116 |   2/2    | 0.5000 |
+| rosenbrock |   2000 |  8   |  0.998  | 0.953 |   2/8    | 0.2891 |
+| sparseqp   | 150000 |  7   |  0.994  | 0.973 |   2/7    | 0.4531 |
+| **ALL**    |        | 45   | **1.067** | 0.700 | 26/45  | **0.3713** |
+
+**The effect evaporates.** 6.7% geomean, **not significant** (p=0.37),
+worst case 0.700. Only corkscrw is significant (1.096, 7/7, p=0.0156);
+clnlbeam, optcontrol, rosenbrock and sparseqp are ties.
+
+**So my "Amd beats Auto on all six families, geomean 1.17x" was a
+sampling artifact** — one iterate per family, and the 1.17 was carried
+by a single laptime matrix at 2.02x. With eight laptime iterates the
+family geomean is 1.241 with a worst case of 0.700: high variance, not
+a uniform win. Retracted. No change to `Auto` is warranted on this.
+
+That is exactly what the evidence bar is for, and it caught me one
+message after I invoked it against myself.
+
+* 02:30 :issue203:corpus-ab:routing:
+Same machinery on the actual routing question. **amf (A) vs metis (B),
+42 matrices:**
+
+| family     | geomean | worst | metis wins |    p   |
+| bratu      |  0.918  | 0.899 |    0/3     | 0.2500 |
+| clnlbeam   |  0.776  | 0.617 |    0/8     | **0.0078** |
+| corkscrw   |  0.975  | 0.920 |    4/8     | 1.0000 |
+| laptime    | **1.516** | 1.319 |  4/4     | 0.1250 |
+| optcontrol |  0.662  | 0.651 |    0/2     | 0.5000 |
+| poisson    |  1.167  | 1.158 |    2/2     | 0.5000 |
+| rosenbrock |  0.945  | 0.845 |    2/8     | 0.2891 |
+| sparseqp   |  0.655  | 0.637 |    0/7     | **0.0156** |
+| **ALL**    | **0.893** | 0.617 | 12/42   | **0.0079** |
+
+**#67/#73 are vindicated on a real corpus.** `Amf` beats `MetisND`
+overall at p=0.0079, significantly so on clnlbeam and sparseqp, and
+loses only on **laptime** (1.52x, 4/4) and marginally on poisson.
+laptime is the collocation class — the same transcription family as
+the gaslib KKT, where metis is 3.17x.
+
+So the blanket `MetisND -> Amf` reroute is **right in aggregate and
+wrong on exactly one class**, now measured rather than argued. A global
+routing change in either direction is unsupportable; the mechanism that
+fits the data is per-matrix measurement (the race) or an explicit
+opt-in for the collocation class.
+
+The gate earned its keep: it excluded a corkscrw iterate where amf and
+amd report different inertias, two laptime iterates where amf and metis
+do, and laptime_0000 where metis returns `rel_res` 1.19e-6 against
+amf's 1.91e-10. That last one is worth its own look — a 4-order
+residual gap on one matrix is not a timing question.
