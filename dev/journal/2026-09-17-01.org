@@ -513,3 +513,86 @@ never touch the race (the three `race` hits in capi.rs are
 unaffected.
 
 `cargo test --workspace` 1212 passed, 0 failed. fmt and clippy clean.
+
+* 23:50 :corpus:pounce:build:
+User: "we should be able to get what we need from pounce." Correct, and
+it bypasses the AMPL gate entirely.
+
+`pounce/benchmarks/large_scale/generate_nl.py` builds six large sparse
+NLPs **in Pyomo** and writes `.nl` directly — no AMPL licence, no
+plato.asu.edu fetch. Pyomo 6.10.0 was already installed. Sizes are
+dials (`--scale`, `--<problem>-<dim>`).
+
+Two gotchas worth recording:
+- pounce options are `key=value`, not `--key value`; `--max-iter 12`
+  silently printed help.
+- `solver_selection=auto` routes convex QPs to `pounce-convex`, which
+  does not dump KKTs. optcontrol / poisson / sparseqp produced *zero*
+  dumps until forced with `solver_selection=nlp`.
+
+Harvested with `scripts/harvest-pounce-kkt.py` into
+`data/matrices/kkt-pounce/`: 135 matrices, 7 families, 1.9 GB.
+
+| family      | n       | nnz     | shape                          |
+| rosenbrock  |   2,000 |   3,999 | unconstrained, tridiagonal     |
+| bratu       |  19,996 |  49,988 | 1-D PDE  (#67 bratu3d family)  |
+| poisson     | 120,000 | 359,200 | 2-D elliptic control (cont5_1_l) |
+| laptime     | 126,028 | 747,055 | nonconvex Radau collocation (#203) |
+| optcontrol  | 150,002 | 300,003 | discrete-time control (dtoc2)  |
+| sparseqp    | 150,000 | 399,999 | convex QP                      |
+| poisson450  | 607,500 |1,820,700| 2-D elliptic control, wide fronts |
+
+* 00:05 :corpus:routing:evidence:
+Ran the ordering A/B on one mid-IPM matrix per family. `factor vs auto`,
+ratio > 1 means the arm beats today's default:
+
+| family     | amf   | amd   | metis | max_front (amf/metis) |
+| bratu      | 1.025 | 1.017 | 0.944 |   18 / 20   |
+| optcontrol | 0.983 | 0.981 | 0.633 |   17 / 18   |
+| poisson    | 0.892 | 0.985 | 1.008 |  601 / 697  |
+| sparseqp   | 1.012 | 1.005 | 0.657 |   20 / 20   |
+| laptime    | 1.008 | 1.887 | 2.619 |  107 / 146  |
+| poisson450 | 0.880 | 0.988 | 0.961 | 1345 / 1553 |
+
+**#67/#73 are vindicated on their own shapes, by real models.**
+optcontrol is the dtoc2 shape and AMF wins 1.58x; sparseqp 1.52x;
+bratu 1.06x. #73 reported dtoc2 at 2.49x — same direction, same order.
+And my hand-built proxies had the **sign wrong** on exactly this shape
+(they said metis wins 1.13x). The tried-and-rejected entry stands
+confirmed, now against real models rather than argument.
+
+**laptime is the second member of the #203 class.** Nonconvex Radau
+collocation — the same transcription family as the gas network — and
+metis wins **2.62x**, amd 1.89x. So the blanket `MetisND -> Amf`
+reroute is wrong on collocation and right nearly everywhere else.
+
+**No symbolic metric predicts laptime.** nnz_L: amf 6.477M vs metis
+6.425M, a tie. flop_proxy: amf 5.087e8 vs metis 6.070e8 — says amf
+wins by 1.19x. max_front: amf 107 vs metis 146 — says amf. All three
+predictors point the wrong way on a matrix where metis is 2.62x
+faster. That is the strongest evidence yet that the routing has to be
+measured, not predicted.
+
+* 00:15 :corpus:metis:no-op:
+Ran every family under `node_refine: false` (the pre-2026-09-17 metis)
+and compared. **`nnz_L` is bit-identical on all seven**, including
+poisson450 (39,596,634 both ways, max_front 1553).
+
+Checked the flag was actually live rather than assuming: gaslib nfe=24
+under the same build gives 12,424,966, the old number, against
+8,146,351 new. The measurement is sound; the families really are
+unaffected.
+
+So the node-separator change is **inert on regular grids and on narrow
+chains, and bites only on the gaslib-style space x time product**. The
+likely reason is that a 2-D grid's edge bisection already has a
+near-optimal min-vertex-cover — straight-line separators — so node-FM
+finds nothing, whereas the product of a sparse network with a path has
+irregular separators where the cover is far off.
+
+**Release read.** This is the coverage that was missing: zero measured
+regression across seven real families at n up to 607k with real IPM
+numerics, bit-identical output on every one, against a large win on
+the one class where it engages (independently confirmed end-to-end by
+the reporter at n=503k). That retires the "validated by one 1,575-row
+matrix" objection.
