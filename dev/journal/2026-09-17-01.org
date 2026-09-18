@@ -882,3 +882,57 @@ and racing four candidates on it beats any fixed arm. That raises a
 release question I cannot settle alone: the new `with_ordering_race`
 (numeric) now has to justify itself against a shipped `AutoRace`
 (symbolic) that measures better than every fixed arm.
+
+* 11:20 :issue203:race:head-to-head:
+Raced the two race features against each other — the measurement I was
+missing when I listed the AutoRace-vs-`with_ordering_race` decision.
+`issue203_policy` gained an `autorace` arm so both are costed the same
+way: first `factor()` plus steady state, totalled over N factorizations
+of one pattern.
+
+Total seconds for N=180 factorizations:
+
+| matrix       |  auto | bestfix | autorace | raceDM | race3 | best arm |
+| gaslib nfe48 | 99.79 |  31.45  |  39.51   | 35.55  | 39.12 | metis    |
+| laptime      | 15.37 |   7.75  |  10.71   |  8.91  |  9.38 | amd      |
+| sparseqp     |  3.75 |   3.71  |   4.82   |  4.34  |  4.51 | amd      |
+| clnlbeam     |  3.17 |   3.10  |   4.01   |  3.48  |  3.77 | amf      |
+
+Ratio vs `auto` (>1 = cheaper overall):
+
+| policy     | geomean | worst | best  |
+| best fixed |  1.596  | 1.009 | 3.173 |  <- oracle, needs expertise
+| raceDM     |  1.398  | 0.863 | 2.807 |
+| race3      |  1.308  | 0.830 | 2.551 |
+| autorace   |  1.222  | 0.778 | 2.526 |
+
+**The numeric race beats `AutoRace` on 4 of 4**: raceDM geomean 1.144x
+cheaper (range 1.110-1.202), race3 1.070x (1.010-1.141).
+
+Two reasons, and only one of them is the metric:
+
+1. **Candidate set, which dominates.** `RACE_CANDIDATES` is
+   `{Amd, MetisND, ScotchND, KahipND}` — four symbolic passes, two of
+   them backends that are expensive to analyse and never win on this
+   set. It also **excludes `Amf`**, which is the best arm on clnlbeam.
+   `raceDM` races two arms and sets up in 8.31 s on gaslib against
+   autorace's 12.72 s.
+2. **Metric, which showed up once.** On laptime min-fill points at
+   `MetisND` (nnz_L 3.28M, half of amd's 6.0M) while measured time
+   prefers `Amd`; race3 adopted `Amd` and amd's total (7.75 s) beats
+   metis's (8.78 s). Real, but worth ~2% in steady state here — the
+   setup cost is what decides these four.
+
+So my worry about the fill metric was, again, overblown; the actual
+problem with `AutoRace` is that it races the wrong *set*.
+
+**What I would recommend, not decide.** The cheap fix is to shrink
+`RACE_CANDIDATES` to `{Amd, Amf, MetisND}` — drop the two backends that
+never win, add the one that sometimes does. That alone should close most
+of the 1.14x, at no new API surface. Whether `AutoRace` should then also
+switch to measured time, and whether `with_ordering_race` survives as
+its customisable form, is a design call with 4 matrices behind it and
+should not be made on this evidence alone.
+
+Caveat on the framing: N=180 favours the race, because setup amortises.
+At small N every race loses to plain `auto`.

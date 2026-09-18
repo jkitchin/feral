@@ -39,6 +39,8 @@ fn build(label: &'static str) -> Solver {
         "amf" => Solver::new().with_ordering(OrderingMethod::Amf),
         "amd" => Solver::new().with_ordering(OrderingMethod::Amd),
         "metis" => Solver::new().with_ordering(OrderingMethod::MetisND),
+        // The SHIPPED race: 4 symbolic passes, keeps min factor_nnz_estimate.
+        "autorace" => Solver::new().with_ordering(OrderingMethod::AutoRace),
         "race2" => {
             Solver::new().with_ordering_race(vec![OrderingMethod::Amf, OrderingMethod::MetisND])
         }
@@ -119,7 +121,10 @@ fn main() {
         m.row_idx.len()
     );
 
-    let labels = ["auto", "amf", "amd", "metis", "race2", "raceDM", "race3"];
+    // `autorace` (symbolic, min fill) against `raceDM`/`race3` (numeric,
+    // min measured steady-state factor time) is the head-to-head this
+    // probe exists for.
+    let labels = ["auto", "amf", "amd", "metis", "autorace", "raceDM", "race3"];
     let pols: Vec<Policy> = labels.iter().map(|l| measure(l, &m, reps)).collect();
 
     println!(
