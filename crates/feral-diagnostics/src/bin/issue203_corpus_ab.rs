@@ -35,6 +35,7 @@ fn arm(name: &str) -> OrderingMethod {
         "metis" => OrderingMethod::MetisND,
         "scotch" => OrderingMethod::ScotchND,
         "kahip" => OrderingMethod::KahipND,
+        "autorace" => OrderingMethod::AutoRace,
         _ => OrderingMethod::Auto,
     }
 }
@@ -85,7 +86,12 @@ fn run(
         best = best.min(t.elapsed().as_micros());
     }
     let inr = s.inertia()?.clone();
-    let x = s.solve(b).ok()?;
+    // Refined, because that is what the consumer does: pounce defaults
+    // `refine` to true and calls `solve_refined_into`
+    // (`pounce-feral/src/lib.rs:212`). Gating on the *unrefined*
+    // `solve` measured a path nobody uses and flagged laptime_0000 at
+    // rel_res 1.19e-6 when the refined answer is 2.0e-14.
+    let x = s.solve_refined(m, b).ok()?;
     Some((
         best,
         (inr.positive, inr.negative, inr.zero),

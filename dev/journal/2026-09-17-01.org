@@ -811,3 +811,74 @@ lift, not an FM, so projecting and re-refining a separator per level
 needs more than a call-site move.
 
 Worth an issue, not worth a session.
+
+* 09:30 :issue203:laptime:resolved:
+Chased the laptime residual/inertia anomaly. **No release blocker. It
+was three separate things, two of them my own harness.**
+
+1. **The 1.19e-6 residual was my harness.** `issue203_corpus_ab` gated
+   on `Solver::solve`, which calls `solve_sparse` — *no iterative
+   refinement*. pounce defaults `refine` to true and calls
+   `solve_refined_into` (`pounce-feral/src/lib.rs:212`). On the refined
+   path metis gets 2.0e-14 on laptime_0000, not 1.19e-6. I was gating on
+   a path the consumer does not use.
+
+2. **The metis-vs-amf inertia split is a pivot-threshold artefact.**
+   `NumericParams::default()` sets `bk.pivot_threshold = 1e-8` (MA27's
+   `cntl[1]`, Ipopt's `ma27_pivtol`); MA57's `CNTL(1)` defaults to 1e-2.
+   Sweeping it on laptime_0015:
+
+   | ordering | pivtol | inertia        | rel_res  |
+   | amf      | 1e-8..1e-1 | (64003, 62025, 0) — unchanged | 5.8e-14 -> 1.6e-16 |
+   | metis    | 1e-8   | (64002, 62026, 0) | 1.8e-10 |
+   | metis    | >= 1e-6| (64003, 62025, 0) | <= 2.7e-14 |
+
+   So the two orderings agree once the threshold is tighter than the
+   default, and metis's accuracy improves six orders. Benign, explained.
+
+3. **feral vs MA57, ~22 apart, is the matrices being numerically
+   singular.** Condition estimate (`estimate_condition_1norm`):
+
+   | matrix        | kappa    | agreement |
+   | laptime_0000  | 1.826e7  | feral (all arms) and MA57 agree exactly |
+   | laptime_0015  | 3.404e20 | everyone disagrees |
+   | laptime_0022  | 3.404e20 | everyone disagrees |
+
+   3.4e20 is past 1/eps (1.8e16): the inertia is not defined at double
+   precision. MA57's own solve on laptime_0015 returns **rel_res
+   2.55e+05**, consistent with the same reading. CLAUDE.md's constraint
+   is explicitly "inertia must be exactly correct **on non-singular
+   matrices**", and the consensus framework's `excluded` bucket exists
+   for exactly this. Note the well-conditioned iterate is the one where
+   everything agrees — which is the result you want to see.
+
+* 09:45 :issue203:corpus-ab:correction:
+Fixing the harness to use `solve_refined` (matching the consumer)
+**changes results I already reported.** Re-ran all three A/Bs:
+
+| policy vs amf | geomean | worst | wins  |   p    |
+| amd           | 1.067   | 0.677 | 25/39 | 0.1081 |
+| metis         | 0.973   | 0.648 | 15/38 | 0.2559 |
+| **autorace**  | **1.116** | **0.931** | 27/38 | **0.0139** |
+
+**Correction 1.** I reported amf vs metis as 0.893 at p=0.0079 and said
+"#67/#73 are vindicated on a real corpus". On the refined path it is
+0.973 at **p=0.2559 — not significant**. The honest statement is that
+neither dominates overall; it is family-dependent, with metis
+significantly better on laptime (1.760) and better on poisson /
+poisson450 (1.165 / 1.177), and amf significantly better on clnlbeam
+(0.852), sparseqp (0.649) and rosenbrock (0.945). That is weaker support
+for the current routing than I claimed, and stronger support for
+measuring per matrix.
+
+**Correction 2.** `poisson450` now appears in the statistics at all — the
+unrefined gate had excluded it on rel_res 1.99e-8.
+
+**AutoRace is the best policy on the corpus**, and the only one that
+significantly beats `Amf`: best geomean (1.116), best worst case
+(0.931), p=0.0139. My suspicion of its fill-based metric was overblown.
+Fill is a poor *predictor of the winner* but min-fill is a safe *floor*,
+and racing four candidates on it beats any fixed arm. That raises a
+release question I cannot settle alone: the new `with_ordering_race`
+(numeric) now has to justify itself against a shipped `AutoRace`
+(symbolic) that measures better than every fixed arm.
