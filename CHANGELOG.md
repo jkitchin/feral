@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — a-priori memory and work estimate from the symbolic analysis (issue #204)
+
+- **What.** `SymbolicFactorization::work_estimate()` and
+  `Solver::work_estimate()` return a `WorkEstimate`: true factor nonzeros,
+  the slacked allocation figure, the transient contribution-block peak, the
+  combined `peak_bytes` to budget against, the largest frontal matrix, and
+  the `sum ncol * nrow^2` work proxy. Structural, `O(n_supernodes)`, and
+  available *before* committing to a numeric factorization — the complement
+  to `with_profiling`, which measures after the fact.
+- **`factor_nnz` and `factor_alloc_nnz` are different numbers.**
+  `SymbolicFactorization::factor_nnz_estimate` carries a 1.2x allocation
+  slack (`factor_slack`); the sum of `col_counts` does not. `WorkEstimate`
+  exposes both and says which is which: budget memory with the slacked one,
+  compare fill against another solver with the true one. Conflating them
+  overstates feral's fill by 20%.
+- **No predicted runtime, deliberately.** Turning the flop proxy into
+  milliseconds needs a machine-calibrated rate, and on this repo's own
+  corpus two orderings within 1.5% on `nnz_L` differed 3.5x in factor time
+  while the flop proxy had the wrong *sign* on a third matrix. A host that
+  calibrates against its own observed rate will beat any constant shipped
+  here.
+
 ### Improved — `ScotchND` and `KahipND` refine the node separator too (issue #203)
 
 - **What changed.** Both crates gain `node_refine: bool`, defaulting to

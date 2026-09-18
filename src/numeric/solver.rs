@@ -1101,6 +1101,18 @@ impl Solver {
         self
     }
 
+    /// A-priori memory and work estimate for the currently cached
+    /// symbolic analysis (issue #204), or `None` if no analysis has run
+    /// yet — i.e. before the first `factor()` on a pattern.
+    ///
+    /// The estimate is a property of the *pattern*, so it is stable
+    /// across refactorizations with new values and costs nothing to
+    /// read. See [`crate::symbolic::WorkEstimate`] for what each field
+    /// means and why there is no predicted runtime.
+    pub fn work_estimate(&self) -> Option<crate::symbolic::WorkEstimate> {
+        self.last_symbolic.as_ref().map(|s| s.work_estimate())
+    }
+
     /// What the last ordering race decided, or `None` if no race has
     /// run for the current pattern.
     pub fn last_race(&self) -> Option<&RaceResult> {

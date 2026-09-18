@@ -1000,3 +1000,62 @@ Also fixed `book/src/ordering.md`, which was wrong twice: it listed the
 old candidate set, and it claimed `Auto` picks `MetisND` for larger
 matrices when the #67/#73 catch means it never selects any
 nested-dissection method at all.
+
+* 13:30 :issue204:work-estimate:
+Implemented #204 on this branch at the user's request, in separate
+commits so it can be split out if review wants that — it is an unrelated
+feature and the PR was already +5636/-105.
+
+feral turned out to have most of it already: `peak_contrib_bytes` is
+exactly the multifrontal transient peak the issue asks for (simulated
+over the postorder traversal with children freed as assembled). The
+missing pieces were the work proxy, the largest-front size, and a
+documented struct to hand a host.
+
+Deliberately **no `est_runtime_ms`**. The issue asks for one, and this
+session's own data is the argument against: two orderings within 1.5% on
+`nnz_L` differed 3.5x in factor time, and the flop proxy had the wrong
+sign on a third matrix. A calibrated host rate beats any constant this
+crate could ship, and POUNCE's `predict_factor_overshoot` already
+calibrates.
+
+Also skipped RSLAB's `panels_all_bytes` / `panel_live_peak_bytes` /
+`transient_peak_bytes` trio: those model a **left-looking** panel
+schedule, and feral is multifrontal. Inventing a left-looking estimate
+for a path feral does not run would be a number that is wrong on
+purpose.
+
+* 13:45 :issue204:slack:correction:
+Writing the hand-oracle test caught something that affects claims I made
+earlier in this session. For an order-8 tridiagonal the closed form is
+`nnz(L) = 2n-1 = 15`; `factor_nnz_estimate` returned **18**. The ratio is
+exactly 1.2 — `factor_nnz_estimate = factor_nnz * factor_slack`, and the
+slack is baked in (`symbolic/mod.rs:1500`).
+
+**Every `nnz_L` number I reported this session is that slacked figure.**
+Feral-to-feral ratios are unaffected — the 1.2 cancels — so every
+ordering comparison stands. The **cross-solver** tables do not:
+
+| nfe=96 arm     | as I reported | true fill | vs MA57 reported | vs MA57 true |
+| feral Amd      |  53,651,360   | 44,709,467|      1.61x       |    1.34x     |
+| feral Amf      |  46,412,167   | 38,676,806|      1.39x       |    1.16x     |
+| feral MetisND  |  44,522,475   | 37,102,062|      1.34x       |    1.11x     |
+| MA57 realMETIS |  33,298,561   |     —     |                  |              |
+
+And at nfe=48 the direction **flips**: I reported feral MetisND 17.37M
+against MA57's 15.32M (feral 13% worse); the true fill is 14.48M, so
+feral is 5.5% *better*.
+
+Caveat against over-correcting: MA57's `INFO(5)` is a forecast of reals
+to hold the factors in a multifrontal solver, so it is a dense-block
+figure and also not `nnz(L)`. The honest statement is that **the nnz
+column in my cross-solver tables was never like-for-like in either
+direction.** The flops column was computed from `col_counts` (unslacked)
+throughout, and every conclusion in this session rested on flops and
+wall-clock, not on that nnz column.
+
+`WorkEstimate` now exposes `factor_nnz` (true) and `factor_alloc_nnz`
+(slacked) as separate documented fields so the next person cannot make
+this mistake from the API.
+
+`cargo test --workspace` 1218 passed, 0 failed.
