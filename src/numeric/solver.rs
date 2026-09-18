@@ -47,6 +47,57 @@ use std::sync::{Arc, Mutex};
 /// (`FatalError`, `Err(NumericallyRankDeficient)`) clear the
 /// snapshot alongside the existing `last_factors` / `last_inertia`
 /// reset, so a stale stats blob cannot survive a failed retry.
+/// What the adaptive routing actually chose for a factorization
+/// (issue #205).
+///
+/// `OrderingMethod::Auto` and `OrderingPreprocess::Auto` pick a concrete
+/// method from pattern features, and before this existed a caller knew
+/// the fill it got but not which ordering produced it. A routing change
+/// is invisible in every other number — fill, time and inertia can all
+/// move for a routing reason and read as a numeric one, or stay put
+/// while the route silently changes — so it gets reported on every
+/// factorization rather than only profiled ones.
+///
+/// The `requested` / `used` pair is the load-bearing part: it separates
+/// "I asked for AMD and got AMD" from "I asked for `Auto` and got
+/// whatever today's heuristics chose". `used` is always a concrete
+/// method; it is never `Auto` or `AutoRace`.
+///
+/// This is the ordering counterpart to
+/// [`crate::scaling::ScalingInfo`], which already did the same job for
+/// `ScalingStrategy::Auto`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderingInfo {
+    /// The method the caller configured, verbatim — including the
+    /// `Auto` / `AutoRace` sentinels.
+    pub requested: OrderingMethod,
+    /// The concrete method the analysis actually ran. Never a sentinel.
+    ///
+    /// Requesting this method directly must reproduce the same factor;
+    /// `tests/issue205_ordering_info.rs` pins that, so the field is a
+    /// falsifiable claim rather than a label.
+    pub used: OrderingMethod,
+    /// The resolved ordering preprocessor. Never
+    /// [`OrderingPreprocess::Auto`].
+    pub preprocess: crate::symbolic::OrderingPreprocess,
+    /// True when ordering escalation fired for this pattern — the
+    /// "routed, then re-routed after observing pivot growth" case, the
+    /// same shape as `ScalingInfo`'s MC64-fallback variant.
+    pub escalated: bool,
+    /// True when this factorization reused a cached symbolic analysis
+    /// rather than running a new one. Mirrors
+    /// [`FactorStats::pattern_reused`]; repeated here so a caller
+    /// logging `ordering_info` alone can tell a fresh routing decision
+    /// from a replayed one.
+    pub pattern_reused: bool,
+    /// Supernodes in the elimination tree — cheap, already computed,
+    /// and usually the first thing you want when explaining a fill
+    /// number.
+    pub n_supernodes: usize,
+    /// Rows in the largest frontal matrix.
+    pub max_front_rows: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactorStats {
     /// `CscMatrix::nnz()` of the matrix passed to `factor()`.
@@ -72,6 +123,9 @@ pub struct FactorStats {
     /// Scaling outcome of the numeric phase. Mirrors
     /// [`Solver::scaling_info`].
     pub scaling_info: crate::scaling::ScalingInfo,
+    /// Which ordering the adaptive routing actually chose (issue #205).
+    /// The counterpart to `scaling_info`, for `OrderingMethod::Auto`.
+    pub ordering_info: OrderingInfo,
     /// MUMPS `INFO(25)` / NBTINYW equivalent: count of pivots that
     /// were statically perturbed to `sign(d)·floor` during this
     /// factor() call, summed across all supernodes. Counts both 1×1
@@ -2464,6 +2518,22 @@ impl Solver {
         let max_abs_pivot = factors.max_pivot_magnitude().unwrap_or(0.0);
         let scaling_info = factors.scaling_info.clone();
         let n_tiny = factors.n_tiny();
+        let sym = self.last_symbolic.as_ref()?;
+        let mut n_supernodes = 0usize;
+        let mut max_front_rows = 0usize;
+        for sn in &sym.supernodes {
+            n_supernodes += 1;
+            max_front_rows = max_front_rows.max(sn.nrow);
+        }
+        let ordering_info = OrderingInfo {
+            requested: self.ordering.clone(),
+            used: sym.resolved_method.clone(),
+            preprocess: sym.resolved_preprocess,
+            escalated: self.ordering_escalated,
+            pattern_reused,
+            n_supernodes,
+            max_front_rows,
+        };
         Some(FactorStats {
             nnz_a,
             nnz_l,
@@ -2473,6 +2543,7 @@ impl Solver {
             max_abs_pivot,
             pattern_reused,
             scaling_info,
+            ordering_info,
             n_tiny,
         })
     }

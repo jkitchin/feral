@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `FactorStats::ordering_info` names the ordering `Auto` chose (issue #205)
+
+- **What.** `FactorStats` gains `ordering_info: OrderingInfo`, alongside the
+  existing `scaling_info`: `requested` / `used` (the load-bearing pair),
+  the resolved `preprocess`, whether ordering escalation fired,
+  `pattern_reused`, and the two structural numbers you usually want when
+  explaining a fill figure — `n_supernodes` and `max_front_rows`.
+- **Why.** `OrderingMethod::Auto` routes adaptively and reported nothing
+  back, so a caller knew the fill it got but not which ordering produced
+  it. A routing change is invisible in every other number: fill, time and
+  inertia can all move for a routing reason and read as a numeric one, or
+  stay put while the route silently changes. It is reported on every
+  factorization, not only profiled ones.
+- **`used` is a falsifiable claim, not a label.** It is always a concrete
+  method — never `Auto` or `AutoRace` — and
+  `tests/issue205_ordering_info.rs` pins that requesting the reported
+  method directly reproduces the same factor and inertia.
+
 ### Added — a-priori memory and work estimate from the symbolic analysis (issue #204)
 
 - **What.** `SymbolicFactorization::work_estimate()` and

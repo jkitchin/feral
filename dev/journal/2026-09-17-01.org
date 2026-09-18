@@ -1059,3 +1059,29 @@ wall-clock, not on that nnz column.
 this mistake from the API.
 
 `cargo test --workspace` 1218 passed, 0 failed.
+
+* 14:30 :issue205:ordering-info:
+Implemented #205 — `FactorStats::ordering_info`, the ordering
+counterpart to the existing `scaling_info`.
+
+Most of it already existed and was simply not surfaced:
+`SymbolicFactorization` carries `resolved_method` and
+`resolved_preprocess` (I have been reading them through
+`issue203_fill_probe` all session). The work was packaging them with
+`requested`, the escalation flag, `pattern_reused`, and the two cheap
+structural numbers, then hanging it off `FactorStats` so it costs no
+`with_profiling(true)`.
+
+The design point worth keeping: **`used` is written as a falsifiable
+claim.** `auto_reports_a_concrete_method_that_reproduces_the_same_factor`
+takes whatever `Auto` reports, requests that method directly, and asserts
+the factor and inertia match. A mislabelled field fails that test, so the
+API cannot quietly drift into decoration.
+
+This closes a gap the issue names in #203 itself: measurements taken
+under `Auto` could not say which orderer produced the fill, so runs were
+not comparable without pinning the ordering by hand. I hit exactly that
+and worked around it by reading `resolved_method` out of a diagnostics
+binary; a consumer had no such option.
+
+`cargo test --workspace` 1224 passed, 0 failed.
