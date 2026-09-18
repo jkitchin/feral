@@ -1,92 +1,92 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-09-01T16:00:54Z
+Generated: 2026-09-18T13:36:43Z
 
 ## Latest Session
-File: dev/sessions/2026-09-01-01.md
+File: dev/sessions/2026-09-18-01.md
 ```
-# Session 2026-09-01-01
+# Session 2026-09-18-01
+
+Continuation of `2026-09-17-01.md` (same unbroken session; that checkpoint
+covers the diagnosis and the `feral-metis` fix and stops there). Read this one
+for everything after.
 
 ## Benchmark note (read first)
 
-**No benchmark was run this session, and the numbers below are not fresh.**
-This session reverted the code tree to the `v0.17.0` baseline; the resulting
-tree is byte-identical to the tag except for an 18-line clippy `allow`. The
-figures quoted are therefore the ones recorded at the 0.17.0 release
-(`dev/sessions/2026-08-19-05.md`) and are cited, not re-measured. Re-running
-the corpus to confirm that unchanged code produces unchanged numbers would
-have bought nothing. The next session that touches solver code must run the
-bench and report against these.
+**`cargo run --bin bench --release` still has not been run against the new
+corpus, and no factor-ratio-vs-MUMPS number is quoted anywhere in this
+session.** That gate needs `*.mumps.json` oracle sidecars, which need a MUMPS
+5.8.2 build that does not exist on this machine (`ref/` is empty). It was
+judged unnecessary for what this branch changes — the ordering permutation is
+bit-identical on 7 of 9 corpus families, so a ratio-vs-MUMPS comparison would
+be measuring unchanged code — but that is a judgement, not a measurement, and
+the next session should say so out loud rather than let it pass silently.
 
-```
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.58     <= 2.0     PASS
-medium (<500)            153560     1.58     <= 3.0     PASS
-```
+What *was* measured: steady-state numeric factor time, paired, on 135 real KKT
+matrices across 9 families, gated on cross-arm inertia agreement and a refined
+residual. Those numbers are throughout.
 
 ## Goal
 
-Park the post-0.17.0 development on a branch and return `main` to the 0.17.0
-release baseline, after review found that none of it is used by pounce or
-discopt.
+Finish issue #203: fix the remaining backends, get a real corpus, decide
+whether the work is release-ready.
 
 ## Accomplished
 
-- **Parked 42 commits.** `v0.17.0` (2fbf9b7) to 91ace05 was 42 commits / 79
-  files / +12384 / -340. Pushed to `origin` as branch `park/post-0.17` and
-  annotated tag `park/post-0.17-tip`, both verified at 91ace05 by
-  `git ls-remote` *before* any rollback began.
+### `ScotchND` and `KahipND` had the identical defect, now fixed
 
-- **Reverted the code tree to 0.17.0** on branch `revert/park-post-0.17`
-  (commit bb18f0a). Undone: #190 (`RefineOptions` targets, `RefineOutcome`),
-  #192 (`Solver::reset_quality`), #194 (cooperative `factor` cancellation),
-  multi-RHS solve perf, and the componentwise-refinement default with its
-  breaking `*_refined_into` return-type change.
+All three ND backends refined a 2-way edge bisection through uncoarsening and
+built the node separator once at the finest level. Elimination flops on the
+collocation KKT at n=224,646:
 
-- **Three carve-outs kept**, each for a stated reason: the clippy 1.98 fixes
-  (CI runs `stable` = 1.98, local is 1.93 — reverting them turns CI red on
-  every future PR); the CI coverage infrastructure; and all of `dev/`, whose
-  append-only logs the protocol forbids rewinding.
+| backend | before | after | gain |
+|---|---|---|---|
+| `MetisND` | 2.095e10 | 6.737e9 | 3.11x *(2026-09-17)* |
+| `ScotchND` | 2.264e10 | 1.017e10 | 2.23x |
+| `KahipND` | 2.577e10 | 7.184e9 | 3.59x |
 
-- **Evidence.** `cargo check --workspace --all-targets` clean.
+KaHIP's symbolic analysis roughly halves (5,263 -> 2,274 ms) because its
+max-flow lift now runs on the coarsest graph. Corpus wall-clock is neutral for
+both (scotch 1.060 -> 1.045, kahip 1.118 -> 1.102 against `Amf`).
+
+### A real corpus, without AMPL
+
+`scripts/build-pounce-corpus.sh`. pounce's `generate_nl.py` builds six large
+NLPs in Pyomo and writes `.nl` directly, so the AMPL Community Edition licence
+is not needed. 135 matrices, 9 families, covering the shapes the argument
+turns on: `bratu` (#67's `bratu3d`), `poisson` (#73's `cont5_1_l`),
 ```
 
 ## Git Status
 ```
-bb18f0a revert: park post-0.17.0 development, resume from the 0.17.0 baseline
-91ace05 docs: session checkpoint 2026-08-30-02 (#191, #193, #195 reviewed and landed)
-d0b3000 Merge pull request #195 from jkitchin/claude/issue-194-p6gri8
-7b42414 fix(solve): an interrupt during the MC64 retry must not be swallowed
-942d130 Merge origin/main into claude/issue-194-p6gri8
+9bcecac test(bench): laptime anomaly resolved — no blocker, and two of my results corrected
+f25cf3d feat(scotch,kahip): refine the node separator through uncoarsening
+58d8cf4 test(bench): scotch and kahip have the same defect metis had, measured
+3e358af test(bench): corpus A/B settles both routing questions — and retracts my Amd claim
+605536f test(bench): policy break-even data — and Amd beats Auto on all six families
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test numeric::solve::tests::issue175_wide_thin_tree_is_not_scheduled_in_parallel ... ok
 test numeric::solve::tests::issue175_overhead_term_is_scheduling_only ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::solve::tests::issue175_wide_thin_tree_is_not_scheduled_in_parallel ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.84s
+test result: ok. 452 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.65s
 
 ```
 
@@ -96,58 +96,58 @@ test result: ok. 444 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; fi
 ```
 
 ## Recent Decisions
-needs a revert-of-revert, which is a known and local inconvenience; a force-push
-would have silently invalidated every branch cut from `main` since 2026-08-19.
+bisection and converting once at the finest level.
 
-**Three carve-outs are deliberately not reverted.**
+**Why, given a narrow audience.** Neither backend is reachable from `Auto`,
+so nobody gets this by default. It was done anyway because leaving a known,
+measured, 2-3.6x deficiency in two of three backends through a release is
+worse than the audience is small — a later user who reaches for `ScotchND`
+has no way to know it is the un-fixed one.
 
-1. *The clippy 1.98 fixes* (9c5dfac, 216a755). CI resolves
-   `dtolnay/rust-toolchain@stable` to 1.98, which introduced
-   `needless_late_init` and `chunks_exact_to_as_chunks`; the local toolchain is
-   1.93. Reverting them turns CI red on every future PR while the pre-commit
-   hook still passes locally — reintroducing exactly the local/CI drift those
-   commits fixed. The `unknown_lints` guard is part of this: without it the
-   `allow` is itself a hard error under `-D warnings` on any pre-1.98
-   toolchain.
-2. *CI coverage infrastructure* — `.github/workflows/coverage.yml`,
-   `codecov.yml`, the README badge. Infrastructure, not solver code.
-3. *All of `dev/`.* The session checkpoints, journals, and the append-only
-   `decisions.md` / `tried-and-rejected.md` entries are the record of what was
-   tried and learned. Reverting an append-only log to drop entries would
-   violate the protocol in `CLAUDE.md`, and the record is *more* valuable after
-   a park, not less: it documents why the code is on a shelf.
+**Results** (gaslib nfe=48, elimination flops): scotch 2.264e10 -> 1.017e10
+(2.23x), kahip 2.577e10 -> 7.184e9 (3.59x). On the pounce corpus both are
+neutral in wall-clock (scotch geomean vs `Amf` 1.060 -> 1.045, kahip 1.118 ->
+1.102) — the same "large win on collocation, inert elsewhere" profile metis
+had.
 
-**Evidence.** `cargo test --workspace`: 1191 passed, 0 failed, 25 ignored.
-`git diff v0.17.0..HEAD -- src/ python/ tests/ Cargo.toml` reduces to the
-18-line `schur_kernel.rs` clippy allow and nothing else.
+**KaHIP keeps its flow lift at the coarsest level only**, rather than
+re-running it per level. `flow_node_separator` is a max-flow vertex-cover
+reduction and per-level use would cost more than the refinement is worth; the
+FM pass down the hierarchy is what fixes the objective. A side effect is that
+kahip's analysis roughly halves, since the max-flow now runs on the smallest
+graph rather than the largest.
 
-**Standing implication for future work.** The parked features were built to a
-high standard — researched, measured, documented — and still went unused. The
-gap was not quality but demand: none originated in a request from pounce or
-discopt. Feature work on the solver should start from a consumer-demonstrated
-need, not from an improvement that is available to make.
+**Corroboration worth keeping.** Scotch's finest-level separator step was
+already *better* than pre-fix metis's — a two-sided FM optimising separator
+weight directly, against a König cover plus a positive-gain-only greedy pass
+— and scotch still measured slightly worse than pre-fix metis (3.36x vs
+3.11x behind). That is independent evidence for the original diagnosis: the
+final polish is not what decides this, the hierarchy is.
+
+**Evidence.** `dev/research/scotch-kahip-node-separator-2026-09-18.md`;
+`cargo test --workspace` 1212 passed, 0 failed; fmt and clippy clean.
 
 ## Recent Tried-and-Rejected
-**Replaced with.** Two fix-independent observables:
-`mc64_retry_attempt_count() == 1` proves factorization #1 returned `Ok(..)`
-(the issue-#65 gate keys on `Ok`, so the flag was set after it completed),
-and `delay < call_elapsed` proves it was set before the call returned.
-Together they pin the flag inside the retry without referencing the status
-being asserted.
 
-## 2026-08-29 — busy-wait shell pollers while a benchmark is live
+**Why they fail, as far as it was chased.** `dtoc_wide`'s `max_front` is 31.
+At that width the numeric phase is all per-front overhead and no arithmetic,
+so the comparison measures supernode count rather than flops, and MetisND's
+fewer-but-wider fronts win for reasons that have nothing to do with dtoc2.
+Widening the chain from `(nx,nu) = (4,2)` to `(8,4)` moved `max_front` only
+24 -> 31; the real dtoc2's avg_deg of 17.5 is not reachable by this
+construction at the right `n`.
 
-**Tried.** `until grep -q ...; do :; done` to wait on a background job.
+**This was already on the record.**
+`external_benchmarks/chain_proxy/README.md` documents geometry-matched
+proxies producing the wrong answer and says to prefer the real corpus. That
+warning was read during this session and the proxies were built anyway.
 
-**Symptom.** Pinned a core, pushed load to 15.71 alongside `cargo test --all`
-and a live A/B benchmark, and contaminated the branch arm of round 2. Phase
-2.8.1 p90s are ratios against **on-disk MUMPS oracle sidecars**, so
-contention inflates only feral's numerator — the metric is not
-contention-symmetric and a loaded host reads as a regression. A single-shot
-run under that load FAILED; the interleaved re-run was 8/8 PASS.
-
-**Rule.** Any background waiter in this repo must `sleep`, never busy-poll.
-Do not trust a single-shot p90 taken under load; interleave A/B.
+**What survives.** Nothing about routing. The non-proxy measurements in the
+same session stand on their own and are recorded in
+`dev/research/issue-203-auto-routing-2026-09-17.md`: on the issue #203
+patterns MetisND is 1.62x faster sequentially and 3.5x in parallel, and
+`nnz_L`, `flop_proxy` and `max_front` were each checked as routing guards
+and each mispredicts.
 
 ## Source Files
 ```
@@ -254,6 +254,7 @@ tests/issue128_supernode_nrow.rs
 tests/issue177_parallel_entry_point_core.rs
 tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
+tests/issue203_ordering_race.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs

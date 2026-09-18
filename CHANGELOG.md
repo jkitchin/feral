@@ -2,6 +2,142 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Added — `FactorStats::ordering_info` names the ordering `Auto` chose (issue #205)
+
+- **What.** `FactorStats` gains `ordering_info: OrderingInfo`, alongside the
+  existing `scaling_info`: `requested` / `used` (the load-bearing pair),
+  the resolved `preprocess`, whether ordering escalation fired,
+  `pattern_reused`, and the two structural numbers you usually want when
+  explaining a fill figure — `n_supernodes` and `max_front_rows`.
+- **Why.** `OrderingMethod::Auto` routes adaptively and reported nothing
+  back, so a caller knew the fill it got but not which ordering produced
+  it. A routing change is invisible in every other number: fill, time and
+  inertia can all move for a routing reason and read as a numeric one, or
+  stay put while the route silently changes. It is reported on every
+  factorization, not only profiled ones.
+- **`used` is a falsifiable claim, not a label.** It is always a concrete
+  method — never `Auto` or `AutoRace` — and
+  `tests/issue205_ordering_info.rs` pins that requesting the reported
+  method directly reproduces the same factor and inertia.
+
+### Added — a-priori memory and work estimate from the symbolic analysis (issue #204)
+
+- **What.** `SymbolicFactorization::work_estimate()` and
+  `Solver::work_estimate()` return a `WorkEstimate`: true factor nonzeros,
+  the slacked allocation figure, the transient contribution-block peak, the
+  combined `peak_bytes` to budget against, the largest frontal matrix, and
+  the `sum ncol * nrow^2` work proxy. Structural, `O(n_supernodes)`, and
+  available *before* committing to a numeric factorization — the complement
+  to `with_profiling`, which measures after the fact.
+- **`factor_nnz` and `factor_alloc_nnz` are different numbers.**
+  `SymbolicFactorization::factor_nnz_estimate` carries a 1.2x allocation
+  slack (`factor_slack`); the sum of `col_counts` does not. `WorkEstimate`
+  exposes both and says which is which: budget memory with the slacked one,
+  compare fill against another solver with the true one. Conflating them
+  overstates feral's fill by 20%.
+- **No predicted runtime, deliberately.** Turning the flop proxy into
+  milliseconds needs a machine-calibrated rate, and on this repo's own
+  corpus two orderings within 1.5% on `nnz_L` differed 3.5x in factor time
+  while the flop proxy had the wrong *sign* on a third matrix. A host that
+  calibrates against its own observed rate will beat any constant shipped
+  here.
+
+### Improved — `ScotchND` and `KahipND` refine the node separator too (issue #203)
+
+- **What changed.** Both crates gain `node_refine: bool`, defaulting to
+  `true`, mirroring the `feral-metis` change above. They had the identical
+  defect: refine a 2-way edge bisection through uncoarsening, build the node
+  separator once at the finest level. Minimum edge cut and minimum vertex
+  separator are different objectives, so every level optimised the wrong one.
+- **Effect** on the collocation KKT at n=224,646 (elimination flops):
+  `ScotchND` 2.264e10 -> 1.017e10 (2.23x), `KahipND` 2.577e10 -> 7.184e9
+  (3.59x). `max_front` falls with it (2080 -> 1783, 2145 -> 1517). KaHIP's
+  symbolic analysis also roughly halves (5,263 ms -> 2,274 ms), because its
+  max-flow separator lift now runs on the coarsest graph in the hierarchy
+  rather than the finest.
+- **Neutral elsewhere.** On the pounce corpus, steady-state factor time
+  against `Amf` (geomean over all matrices) moves 1.060 -> 1.045 for scotch
+  and 1.118 -> 1.102 for kahip — within run-to-run noise, the same profile
+  the metis change had. Scotch's `corkscrw` flop proxy is 13% worse and does
+  not reach the clock (wall-clock 1.002 -> 1.017 on that family).
+- **No default path changes.** `choose_adaptive` never selects either
+  backend, so this is visible only to callers naming `ScotchND` / `KahipND`
+  explicitly, or racing them.
+
+### Added — `Solver::with_ordering_race`, a measured ordering choice (issue #203)
+
+- **What.** Opt in with
+  `Solver::new().with_ordering_race(vec![OrderingMethod::Amf, OrderingMethod::MetisND])`
+  and the first `factor()` for each pattern runs every listed ordering,
+  compares them, and adopts the fastest for that pattern. `last_race()`
+  reports what happened. Off by default; fewer than two arms is a no-op.
+- **Why measured and not predicted.** Every cheap predictor was checked and
+  all of them mispredict: `nnz_L` (two orderings within 1.5% of each other
+  while wall-clock differed 3.5x), the `ncol·nrow²` flop proxy (predicted
+  1.37x against a measured 3.52x, and the wrong *sign* on a third matrix)
+  and `max_front` (right on three of six). The dominant term on the matrix
+  that motivated this is a scheduling effect — wide fronts serialise — that
+  no symbolic quantity captures.
+- **It ranks steady state, not the first call.** Each arm is factored once
+  to build its analysis and then timed on two further factorizations, the
+  minimum of which is its score. Ranking on the first call instead picks the
+  ordering cheapest to *analyse* rather than cheapest to *use*, which
+  inverted the answer on the motivating matrix.
+- **It never changes the answer.** If two arms report different inertias the
+  race declines, keeps the configured ordering, and flags
+  `RaceResult::inertia_disagreement` — a disagreement is a correctness
+  signal, not a timing question. Near-ties (within `with_race_margin`,
+  default 5%) go to the arm listed first, so timing noise cannot flip the
+  pick.
+- **Cost.** `k` analyses and `3k` factorizations, once per pattern. On the
+  issue #203 KKT at n=224,646 the first `factor()` costs 2.3x an un-raced
+  one and each subsequent factorization is ~4x faster, breaking even after
+  roughly 15-20 factorizations of the same pattern. That is a clear win for
+  an interior-point host, which factors one pattern on every iterate, and a
+  straight loss for a caller that factors once — hence opt-in.
+- **Default behaviour is unchanged.** With no `with_ordering_race` call the
+  only new work on any path is one `len()` check.
+
+### Improved — `MetisND` refines the node separator, not the edge cut (issue #203)
+
+- **What changed.** `feral-metis` now builds the node separator at the
+  coarsest level of the multilevel hierarchy and refines *that separator*
+  with Fiduccia-Mattheyses at every uncoarsening level, matching METIS's
+  `Refine2WayNode` / `FM_2WayNodeRefine1Sided`. It previously refined the
+  **edge cut** through uncoarsening and converted to a vertex separator only
+  once, at the finest level, followed by a single positive-gain-only greedy
+  pass. Set `MetisOptions::node_refine = false` to recover the old behaviour.
+- **Why.** Minimum edge cut and minimum vertex separator are different
+  objectives, so every uncoarsening level was optimising the wrong thing; and
+  the one separator pass could not climb out of a local minimum, which is why
+  raising `fm_passes` produced bit-identical output.
+- **Effect.** Elimination flops (`sum_j (c_j-1)^2`), with MA57's bundled real
+  METIS as the external oracle:
+
+  | matrix | before | after | real METIS |
+  |---|---|---|---|
+  | collocation KKT, n=224,646 | 2.10e10 | 6.74e9 | 6.42e9 |
+  | collocation KKT, n=449,286 | 6.89e10 | 2.91e10 | 1.75e10 |
+  | 40^3 grid Laplacian | 2.31e10 | 2.18e10 | 1.67e10 |
+
+  2.4x-3.5x on long-horizon collocation / optimal-control KKTs.
+- **Not a uniform win.** Timed in wall-clock afterwards (min over 3 runs of 5
+  paired samples, ranges non-overlapping), the grid Laplacians split: a 40^3
+  grid factors **12.8% faster** (331.6 ms -> 289.0 ms) while a 300x300 grid
+  factors **5.8% slower** (23.6 ms -> 25.0 ms) *despite* 10.3% less fill.
+  Fill did not predict speed there either. On every other matrix measured —
+  seven real IPM families up to n=607,500 and 37 of 38 parity matrices — the
+  permutation is bit-identical, and the one that moves (`sawpath_kkt`) grows
+  `nnz_L` by 0.08%. Symbolic analysis costs 1.16x more where the ordering
+  changes and ~11% less where it does not.
+- **`Auto` is unchanged.** `choose_adaptive` still routes every
+  would-be-`MetisND` decision to `Amf` (issues #67/#73), so the default path
+  produces bit-identical orderings. Callers on long-horizon collocation
+  problems should ask for `OrderingMethod::MetisND` (`feral_ordering=metis`)
+  explicitly to get the improvement.
+
 ## [0.17.0] - 2026-08-19
 
 ### Fixed — the tree-parallel solve no longer runs on trees too thin to pay for it (issue #175)

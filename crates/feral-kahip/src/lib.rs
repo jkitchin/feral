@@ -131,6 +131,19 @@ pub struct KahipOptions {
     pub seed: u64,
     /// Quality / speed tradeoff. See [`KahipMode`].
     pub mode: KahipMode,
+    /// Carry the **node separator** through uncoarsening and refine it
+    /// at every level, instead of refining the 2-way bisection and
+    /// lifting to a separator once at the finest level.
+    ///
+    /// The old path optimised the wrong objective at every level:
+    /// minimum edge cut and minimum vertex separator are different
+    /// problems. `feral-metis` and `feral-scotch` had the identical
+    /// defect. KaHIP's flow lift (`flow_node_separator`) is a max-flow
+    /// vertex-cover reduction, too expensive to rerun per level, so the
+    /// lift happens once at the *coarsest* level and the separator is
+    /// then FM-refined down the hierarchy. Evidence in
+    /// `dev/research/scotch-kahip-node-separator-2026-09-18.md`.
+    pub node_refine: bool,
 }
 
 impl Default for KahipOptions {
@@ -138,6 +151,7 @@ impl Default for KahipOptions {
         Self {
             seed: 1,
             mode: KahipMode::default(),
+            node_refine: true,
         }
     }
 }

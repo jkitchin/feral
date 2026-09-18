@@ -40,6 +40,7 @@ use crate::compress::compress_graph;
 use crate::halo_fm::halo_fm_refine;
 use crate::vertex_separator::compute_vertex_separator;
 use crate::{ScotchOptions, ScotchStats};
+use feral_metis::internals::fm_refine::refine_separator_fm;
 
 /// Entry point. Produces a permutation `perm` where `perm[i]` is the
 /// old vertex id placed at new position `i` (new-to-old).
@@ -235,6 +236,55 @@ fn multilevel_node_bisection(
         }
     }
     let mut labels = best_labels;
+
+    if opts.node_refine {
+        // Build the node separator at the *coarsest* level and refine
+        // the separator itself on the way down, rather than refining
+        // the 2-way bisection and converting once at the bottom. Halo
+        // FM minimises an edge cut; minimum edge cut and minimum vertex
+        // separator are different objectives, so the old loop optimised
+        // the wrong thing at every level. See
+        // `dev/research/scotch-kahip-node-separator-2026-09-18.md`.
+        let coarsest_graph: &Graph = match levels.last() {
+            Some(cg) => &cg.graph,
+            None => graph,
+        };
+        compute_vertex_separator(
+            coarsest_graph,
+            &mut labels,
+            opts.max_imbalance,
+            opts.fm_move_cap,
+            opts.fm_pass_cap,
+        );
+        refine_separator_fm(
+            coarsest_graph,
+            &mut labels,
+            opts.max_imbalance,
+            opts.fm_pass_cap,
+        );
+        for level_idx in (0..levels.len()).rev() {
+            let cg = &levels[level_idx];
+            let prev_graph: &Graph = if level_idx == 0 {
+                graph
+            } else {
+                &levels[level_idx - 1].graph
+            };
+            let prev_n = prev_graph.nvtxs as usize;
+            let mut proj: Vec<u8> = vec![PART_A; prev_n];
+            for (v, p) in proj.iter_mut().enumerate().take(prev_n) {
+                *p = labels[cg.cmap[v] as usize];
+            }
+            labels = proj;
+            refine_separator_fm(
+                prev_graph,
+                &mut labels,
+                opts.max_imbalance,
+                opts.fm_pass_cap,
+            );
+            stats.n_fm_passes += opts.fm_pass_cap;
+        }
+        return labels;
+    }
 
     // Uncoarsen with halo FM at every projected level. Halo FM
     // dynamically extends the candidate set beyond the strict

@@ -1,0 +1,1087 @@
+#+TITLE: Session journal 2026-09-17-01
+#+STARTUP: showeverything
+
+* 14:25 :issue203:ordering:orient:
+Issue #203 (filed from pounce#947): factorization cost on a long-horizon
+collocation optimal-control KKT grows ~n^2.3-2.4, symbolic fill ~n^1.37,
+while `dim K` and `nnz(K)` are exactly linear in the horizon length
+`nfe`. The issue's hypothesis is that the matrix is a *block chain*
+whose available front-to-back elimination order gives linear fill, and
+that AMD/METIS/SCOTCH/KaHIP are all failing to find it. Three asks:
+explain the superlinearity, check whether `OrderingMethod::External`
+with a hand-built chain permutation recovers linear fill, and say
+whether a chain-detection heuristic belongs in `Auto`.
+
+Extracted the self-contained reproducer from pounce#947 and regenerated
+the patterns. It reproduces the reported geometry exactly:
+
+| nfe | dim K     | nnz(K) lower |
+|   6 |    28,086 |      156,858 |
+|  12 |    56,166 |      317,364 |
+|  24 |   112,326 |      638,376 |
+|  48 |   224,646 |    1,280,400 |
+|  96 |   449,286 |    2,564,448 |
+
+* 14:35 :issue203:structure:
+Read the reproducer's index arithmetic to recover the actual graph.
+`NS=775` states per collocation point, `NCP=3` points per element,
+`NC=6` controls with one knot per element, `NE=6` path constraints per
+point. The embedded spatial coupling `S` is 775x775 with **1977**
+nonzeros — 2.55 per row, i.e. a near-tree network (GasLib-40, 10 finite
+volumes per pipe), not a dense block.
+
+So the graph is not a chain of dense blocks. It is a **2-D product**:
+a sparse spatial network of 775 nodes crossed with a time path of
+`3*nfe` points, with the constraint rows roughly doubling each slice.
+Spatial extent 775 is *larger* than the temporal extent `3*nfe` for
+every size tested (18 at nfe=6, 288 at nfe=96, 648 at nfe=216). The
+premise "1-D chain with linear-fill elimination available" does not
+hold at these sizes: a time-slice separator is 775 states wide, and
+densifying it costs 775^2/2 ~ 3e5 per cut.
+
+* 14:50 :issue203:external:measure:
+Built the chain permutation the issue asks for (`gen_perm.py`: sort
+every row/column by its time key, controls and ramps placed at their
+knot's collocation point; two within-slab variants, all-vars-then-all-
+constraints and interleaved var/constraint pairs) and replayed it
+through feral's own symbolic pipeline via `OrderingMethod::External`.
+New probe `crates/feral-diagnostics/src/bin/issue203_fill_probe.rs`
+reports `nnz_L`, `sum_j (c_j - 1)^2` as a flop proxy, and `front_max`.
+
+`nnz_L` / flops, chain ordering vs feral default:
+
+| nfe | Auto nnz_L | chain nnz_L | ratio | Auto flops | chain flops | ratio |
+|   6 |      0.90M |      80.5M |   90x |    5.36e7  |    1.745e11 | 3254x |
+|  12 |      2.37M |     165.1M |   70x |    2.97e8  |    3.609e11 | 1214x |
+|  24 |      6.45M |     334.3M |   52x |    1.83e9  |    7.336e11 |  401x |
+|  48 |     17.6M  |     672.7M |   38x |    1.09e10 |    1.479e12 |  135x |
+
+The chain ordering *is* exactly linear (2.01x per doubling in fill,
+2.02x in flops — the prediction in the issue is arithmetically right)
+and it is catastrophic in absolute terms: `front_max` pins at 3299 for
+every size, the width of one element's slab. The interleaved variant
+changes nothing (79.5M vs 80.5M at nfe=6). Extrapolating both curves,
+the crossover is past nfe ~ 1000, far beyond the horizon lengths in
+play.
+
+**Conclusion: ask #2 answered, with the opposite sign to what was
+expected.** A chain permutation does not recover linear fill in any
+useful sense, and a chain-detection heuristic in `Auto` (ask #3) would
+be actively harmful on this pattern. Recorded in tried-and-rejected.
+
+* 15:10 :issue203:ma57:measure:
+If the chain order is not the answer, is there a better ordering at
+all? Built an analysis-only MA57 probe (`ma57_analyse.F`, MA57ID +
+MA57AD, CoinHSL v2023.11.17) reporting INFO(5) reals-in-factors,
+INFO(7) max front and RINFO(2) elimination flops. Pattern-only, so the
+reproducer's unit values are fine.
+
+MA57's automatic ordering (ICNTL(6)=5) picks AMD at nfe<=12 and
+switches to its bundled **real METIS** at nfe>=24. Real METIS is far
+ahead of every feral backend at scale. At nfe=96:
+
+| ordering              | nnz_L / reals | flops    | max front |
+| feral Amd             |        53.7M  | 5.61e10  |     3136  |
+| feral Amf (= Auto)    |        46.4M  | 5.06e10  |     3453  |
+| feral MetisND         |        69.5M  | 6.89e10  |     3204  |
+| feral ScotchND        |        75.5M  | 8.22e10  |     3215  |
+| MA57 + real METIS     |        33.3M  | 1.80e10  |     1605  |
+
+* 15:25 :issue203:ordering-gap:evidence:
+Isolated the cause. Dumped MA57's pivot order (`KEEP(1:N)` after
+MA57AD), inverted it to feral's new-to-old convention, and replayed it
+through feral's *own* symbolic pipeline as `External`. Same
+amalgamation, same column counts, same everything except the
+permutation:
+
+| nfe | feral Auto flops | MA57-METIS perm, feral pipeline | ratio |
+|   6 |         5.36e7   |                        8.99e7   | 0.60  |
+|  12 |         2.97e8   |                        4.18e8   | 0.71  |
+|  24 |         1.83e9   |                        1.72e9   | 1.06  |
+|  48 |         1.09e10  |                        6.42e9   | 1.70  |
+|  96 |         5.06e10  |                        1.75e10  | 2.89  |
+
+The replayed figures track MA57's own forecast closely (6.42e9 vs
+6.68e9 at nfe=48; 1.75e10 vs 1.80e10 at nfe=96), which validates the
+cross-solver flop metric and confirms nothing but the permutation is
+being compared.
+
+Growth per doubling of `nfe`:
+- feral Auto flops: 5.5x, 6.2x, 6.0x, 4.6x  (exponent 2.2-2.6)
+- real METIS flops: 4.7x, 4.1x, 3.7x, 2.7x  (exponent falling to ~1.4)
+
+So real METIS *is* bending toward the near-linear asymptote the issue
+expects, while every feral backend stays at ~n^2.4. The superlinearity
+pounce reports is therefore a genuine ordering-quality deficit — but
+in `feral-metis`/`feral-scotch` nested dissection, not in a missing
+chain heuristic. `front_max` says the same thing in one number: real
+METIS's top separator is 1605, about one time slice of states plus
+constraints; feral's is 3204-3453, about twice that.
+
+**This is also the answer to "why is MA57 1.2-1.9x faster per
+iteration".** At the sizes pounce runs (nfe=48-216) the ordering gap
+alone is 1.7x-2.9x in flops, which covers the reported wall-clock gap
+without invoking any kernel difference.
+
+* 16:05 :issue203:metis:measure:
+Dug into where feral's ND loses. First hypothesis — the top-level
+separator — is **wrong**. New probe `issue203_sep_probe` recovers the
+top separator from a permutation alone (incremental union-find over the
+permutation prefix; ND numbers the top separator last) and sweeps
+`MetisOptions`. On nfe=48:
+
+| arm                  | top_sep | nnz_L  | flops    |
+| feral default        |     577 | 28.7M  | 2.10e10  |
+| niparts=16 / 64      |     577 | 29.7M / 29.3M | 2.29e10 / 2.17e10 |
+| fm_passes=40 / 200   |     577 | 28.7M  | 2.10e10  |
+| nd_to_amd_switch 50/800 |  577 | 29.5M / 29.9M | 2.29e10 |
+| coarsen_floor 30/500 |    1286 / 577 | 28.1M / 30.1M | 2.11e10 / 2.49e10 |
+| max_imbalance .03/.4 |   1573 / 954 | 31.8M / 31.4M | 2.79e10 / 2.55e10 |
+| MA57 real METIS perm |     481 | 16.6M  | 6.42e9   |
+
+feral's top separator is 577 against real METIS's 481 — 1.20x, nowhere
+near the 3.26x flop gap. **No knob moves the result by more than 10%.**
+So it is not tuning and not the top cut.
+
+Also ruled out **graph compression**: hashing each vertex's closed
+neighbourhood on the nfe=48 pattern gives 224,646 distinct classes out
+of 224,646 vertices. METIS's `CompressGraph` is a no-op on this matrix,
+so its absence cannot be the explanation.
+
+* 16:20 :issue203:metis:evidence:
+The discriminating measurement is a flop histogram bucketed by column
+count (`FILL_PROBE_HIST=1`). nfe=48:
+
+| bucket      | feral Amf cols / flops | MA57 METIS cols / flops |
+| 512..1024   |  3,890 / 2.18e9 (20%)  |  6,116 / 3.73e9 (58%)   |
+| 1024..2048  |  2,444 / 5.69e9 (52%)  |  1,112 / 1.44e9 (22%)   |
+| >=2048      |    447 / 2.02e9 (18%)  |      0 / 0      ( 0%)   |
+
+Real METIS has **no column wider than 2048** and pushes the mass down
+into the 512-1024 band; feral carries 70% of its flops above 1024.
+feral's own MetisND is worse still — 8,157 columns in 1024..2048, 74%
+of its flops. The defect is mid-tree separator size, not the root.
+
+* 16:35 :issue203:metis:generality:
+Checked whether this is specific to the collocation KKT by running the
+same comparison on canonical ND test graphs (5-point / 7-point
+Laplacians):
+
+| graph          | n      | feral Amf | feral MetisND | MA57 real METIS |
+| grid2d 300x300 | 90,000 |  3.02e8   |    4.69e8     |    3.33e8       |
+| grid3d 40^3    | 64,000 |  2.33e10  |    2.31e10    |    1.67e10      |
+
+**`feral-metis` lags real METIS by ~1.4x on both grids**, and feral's
+best of five is 1.39x behind on the 3-D grid. So this is a *general*
+nested-dissection quality deficit that the collocation KKT amplifies to
+3.3x, not a pattern-specific quirk. grid3d_40 is a cheap canonical
+regression target: 2.31e10 now, 1.67e10 to match.
+
+* 16:45 :issue203:metis:diagnosis:
+Read `crates/feral-metis/src/node_nd.rs::multilevel_node_bisection`
+against METIS 5.x `ometis.c`/`refine.c`. feral does:
+
+  coarsen -> niparts edge bisections at coarsest -> uncoarsen refining
+  the **edge cut** at every level -> `construct_separator` (Konig min
+  vertex cover) once at the finest level -> one greedy
+  positive-gain-only `refine_separator` pass.
+
+METIS does:
+
+  coarsen -> `InitSeparator` (edge bisection + `ConstructSeparator`) at
+  the **coarsest** level -> `Refine2WayNode`: at every uncoarsening
+  level project the **node separator** down, `FM_2WayNodeBalance`, then
+  `FM_2WayNodeRefine1Sided/2Sided` for `niter` passes — real FM with
+  gain buckets, negative-gain moves and rollback to the best state seen.
+
+Two concrete gaps: (a) the refinement objective during uncoarsening is
+the edge cut, not the separator weight; (b) the one separator pass that
+does run is hill-climbing-free greedy, so it stops at the first local
+minimum — which is why `fm_passes=200` changes nothing. Note
+`refine_separator` at `fm_refine.rs:214` only accepts `best_gain > 0`.
+
+Next: implement node-separator FM and move it into the uncoarsening
+loop. Research note and plan before code.
+
+* 17:30 :issue203:metis:implement:
+Implemented `refine_separator_fm` in `crates/feral-metis/src/fm_refine.rs`
+— METIS's `FM_2WayNodeRefine1Sided`. Six tests written first, all
+hand-oracled on graphs whose minimum separator is obvious (path -> 1
+vertex, k x k grid -> k, barbell -> 1), plus balance, monotonicity and
+determinism. All six passed on the first run.
+
+Then P2: `multilevel_node_bisection` gained the METIS structure behind
+`MetisOptions::node_refine` — build the node separator at the
+*coarsest* level, project the 3-way labels down and FM-refine the
+separator at every uncoarsening level, instead of edge-FM through the
+hierarchy plus one greedy separator pass at the end.
+
+* 17:45 :issue203:metis:result:
+Elimination flops (`sum_j (c_j-1)^2`), every permutation replayed
+through feral's symbolic pipeline:
+
+| graph        | metis before | metis node_refine | real METIS | gain |
+| gaslib nfe=6 |     4.25e8   |         1.23e8    |   8.99e7   | 3.45x |
+| nfe=12       |     1.95e9   |         6.01e8    |   4.18e8   | 3.24x |
+| nfe=24       |     7.71e9   |         3.05e9    |   1.72e9   | 2.52x |
+| nfe=48       |     2.10e10  |         6.74e9    |   6.42e9   | 3.11x |
+| nfe=96       |     6.89e10  |         2.91e10   |   1.75e10  | 2.37x |
+| grid2d 300^2 |     4.69e8   |         4.27e8    |   3.33e8   | 1.10x |
+| grid3d 40^3  |     2.31e10  |         2.18e10   |   1.67e10  | 1.06x |
+
+At nfe=48 feral is now within **5%** of real METIS (6.74e9 vs 6.42e9)
+and its top separator matches exactly (481 = 481). At nfe=96 it is
+still 1.67x behind (top separator 1143 vs 828), so the hierarchy is
+right but the coarsening or the initial bisection still gives away
+something at scale.
+
+**Against the plan's acceptance table: 1 of 4 targets met.** nfe=48
+beat its target (6.74e9 <= 9.0e9); nfe=96 (2.91e10 vs <= 2.5e10),
+grid3d (2.18e10 vs <= 1.9e10) and grid2d (4.27e8 vs <= 3.7e8) all
+missed. The targets were set at "match real METIS", which turned out
+to be the wrong bar for a gate.
+
+Guardrails all pass: 37/38 parity matrices produce a **bit-identical**
+ordering (they sit below `nd_to_amd_switch=200`, so ND never engages);
+`tests/data/large` moves 8700 -> 8707 nnz_L (+0.08%); `MetisND`
+symbolic time at nfe=96 goes 6.31 s -> 7.30 s (1.16x, guardrail 1.5x);
+determinism is covered by two tests.
+
+Flipped `node_refine` to default `true` despite the acceptance miss:
+the change is never worse on any of the 40 matrices measured, is 2.4x
+to 3.5x better on the class the issue is about, and is a more faithful
+implementation of the published algorithm. Recorded in decisions.md.
+`cargo test --workspace`: 1199 passed, 0 failed, 25 ignored.
+
+* 17:55 :issue203:auto:note:
+**The fix does not reach `Auto` yet, and I did not make it.**
+`choose_adaptive` (src/symbolic/mod.rs:270) reroutes *every*
+would-be-`MetisND` decision to `Amf` — the issue #67/#73 blanket
+override. So on nfe=96 `Auto` still picks `Amf` (5.06e10) over the new
+`MetisND` (2.91e10) and leaves 1.74x on the table.
+
+Not changed here on purpose. The #67/#73 override was justified by
+**real factor+solve wall-clock** on a corpus this machine does not
+have, and `tried-and-rejected.md` already records a fill-guarded race
+that was rejected precisely because fill is not a reliable speed
+predictor (nql180: MetisND had 0.98x the fill and AMF was still 2.05x
+faster end to end). Re-deciding that on symbolic fill alone would
+repeat the mistake. Re-opening #67/#73 needs a wall-clock A/B on the
+corpus machine.
+
+Meanwhile `feral_ordering=metis` is the immediately available path for
+pounce, and it is now worth taking: it was 55% *slower* than the
+default in pounce#947's sweep, and on the same matrices it is now
+1.6-1.7x better than `Auto` in flops at nfe >= 48.
+
+* 19:10 :issue203:wallclock:measure:
+Ran the wall-clock half of "next session item 1" that is runnable here.
+`data/matrices/` holds **2** synthetic matrices on this machine, so the
+corpus-wide re-decision of #67/#73 is still blocked; what *is* runnable
+is the #203 matrix class itself.
+
+The reproducer emits pattern only (diag 4 / offdiag 1), which is not a
+saddle point and so drives none of the pivoting a real KKT drives.
+`value_kkt.py` keeps the pattern and assigns block-aware values:
+`K = [[H, J^T], [J, -dI]]`, `H` strictly diagonally dominant positive
+(SPD), `d = 1e-2`. Inertia is then analytically `(n_vars, m, 0)` with
+**no rank assumption** — the Schur complement `-dI - J H^-1 J^T` is
+negative definite whatever `J` is. That is the correctness gate.
+
+New harness `issue203_ab`: four ordering arms in one process against
+one matrix and one RHS, paired alternating, 7 pairs, `min` per arm,
+exact two-sided sign test, correctness gate printed before any timing.
+All arms hit the inertia oracle exactly at every size, `rel_res` 9e-15
+to 2e-14.
+
+**Numeric factorization, min over 7 pairs:**
+
+| nfe | auto (=Amf) | metis | speedup | wins | p      | flop model said |
+|  24 |     158 ms  | 142 ms|  1.12x  | 6/7  | 0.1250 | Amf 1.67x better |
+|  48 |     698 ms  | 198 ms|  3.52x  | 7/7  | 0.0156 | metis 1.62x      |
+|  96 |    2442 ms  | 660 ms|  3.70x  | 7/7  | 0.0156 | metis 1.74x      |
+
+pounce reuses the symbolic across IPM iterates (feral's
+pattern-fingerprint cache, `pounce-feral/src/lib.rs:17`), so factor is
+the per-iteration cost and analysis is paid once. Reporting factor.
+
+* 19:20 :issue203:wallclock:finding:
+Two things the symbolic work got wrong, both now measured.
+
+1. **The flop model underestimates, badly.** Predicted 1.62x / 1.74x at
+   nfe=48/96; measured 3.52x / 3.70x. `sum_j (c_j-1)^2` is the right
+   shape but not the right magnitude.
+2. **At nfe=24 the flop model has the sign wrong.** It said `Amf`
+   (1.83e9) beats `metis` (3.05e9) by 1.67x. Measured, `metis` is
+   *faster* by 1.12x (6/7, p=0.125 — not significant, but certainly not
+   the 1.67x loss predicted). So `MetisND` is at worst neutral and at
+   best 3.7x at every size measured here.
+
+Third, unlooked-for: **`Amd` beats `Auto`/`Amf` by 1.63x at nfe=96**
+(1496 ms vs 2442 ms, 7/7, p=0.0156) despite 15% *more* fill (53.7M vs
+46.4M). Another instance of the same lesson the repo already recorded
+on nql180 — fill does not predict speed — and a hint that `Auto`'s
+preference for `Amf` over `Amd` at large n is itself unexamined on this
+class.
+
+**What this does and does not license.** It licenses saying the ordering
+fix reaches the clock on the #203 class, with a measured 3.5-3.7x on
+numeric factorization at the sizes pounce runs. It does **not** license
+changing `choose_adaptive`: #67/#73 decided the blanket
+`MetisND -> Amf` reroute over 36+ families on a corpus this machine does
+not have. Three matrices are a counterexample, not a refutation.
+
+But the counterexample matters more than usual, because **#67/#73 were
+measured against the old feral-metis** — the one that was 2.4-3.5x worse
+than it should have been. Their evidence base is not merely incomplete
+for this class; it is stale for every class. Re-running that A/B with
+the new METIS should be treated as required, not optional.
+
+Caveat on all of the above: `H` here is strictly diagonally dominant, so
+pivoting is easy and delayed pivots are rare. A real IPM KKT gets harder
+as mu -> 0. The direction is solid; the magnitude is a hypothesis about
+the real matrices.
+
+Also noticed, not chased: `analyse_us` is 3.7-12.6 s on these matrices,
+10x what the pattern-only fill probe reported for the same orderings.
+The difference is `LdltCompress`, which runs an MC64 matching and is
+therefore value-dependent. Amortized across IPM iterates, so it does not
+affect the numbers above, but 12.6 s of one-time analysis at n=449k is
+worth a look on its own.
+
+* 20:30 :issue203:routing:attempt:
+Took on "fix `Auto`'s routing" (#67/#73's blanket `MetisND -> Amf`).
+Read both notes first. The evidence base is stronger than I had been
+assuming: #67 is 36/36 in-scope families in `10k < n <= 100k`, median
+time_r ~1.5x, tail 4.5x, and — line 77 — measured "via the full
+`Solver` path (production parallel numeric)". So there is no
+"they only measured sequential" loophole. #73 adds 5 families above
+100k on wall-clock: dtoc2 2.49x, pinene 1.18x, cont5_1_l 2.75x, nql180
+2.05x, YATP1NE 2.13x, all AMF wins.
+
+Those families are not on this machine, so I built geometry-matched
+proxies for the two whose structure is unambiguous — `dtoc` (narrow
+discrete-time-control chain, matched to dtoc2's n=104k) and `pde2d`
+(elliptic control on a grid, matched to cont5_1_l's n=181k) — with the
+same saddle-point value scheme and analytic inertia oracle.
+
+* 20:45 :issue203:routing:invalid:
+**The proxies fail their own validity check and cannot be used.**
+
+Ran them against the *old* metis (temporarily flipping `node_refine`
+back to false, i.e. exactly the code #67/#73 measured), parallel path,
+same protocol:
+
+| proxy     | old metis vs auto | #73 says for the real family |
+| dtoc_wide |  1.129x (metis)   | dtoc2:     2.49x (AMF)        |
+| pde2d     |  1.037x (metis)   | cont5_1_l: 2.75x (AMF)        |
+
+The proxies put metis *ahead* on the very code that measured AMF ahead
+by 2.5-2.8x on the real families. They do not reproduce the result they
+were built to re-test, so nothing they say about the new metis counts.
+This is the failure mode `external_benchmarks/chain_proxy/README.md`
+already documents; I walked into it anyway. Recorded in
+tried-and-rejected.
+
+* 20:55 :issue203:routing:mechanism:
+What the exercise did establish, on matrices that are not proxies.
+
+**The #203 win is two separate effects.** At nfe=48, `RAYON_NUM_THREADS=1`
+vs the default parallel path:
+
+| arm   | seq factor | par factor | par speedup |
+| auto  |  1124 ms   |   698 ms   |   1.61x     |
+| metis |   694 ms   |   198 ms   |   3.51x     |
+
+So metis is 1.62x faster sequentially — close to its 1.37x flop_proxy
+edge, i.e. arithmetic — and a *further* 2.2x comes from the ordering
+parallelising better. `max_front` says why: amf 2288 against metis 1293.
+Wide fronts serialise. The 3.52x headline is ~1.6x arithmetic x ~2.2x
+scheduling, and only the first half was predictable from symbolic data.
+
+**No cheap guard metric exists.** Checked all three candidates against
+every matrix measured today plus #73's RDW2D51U row:
+- `nnz_L`: at nfe=48 amf and metis are within 1.5% (17.64M vs 17.37M)
+  while wall-clock differs 3.52x. Useless.
+- `flop_proxy`: predicts 1.37x where the measured parallel answer is
+  3.52x, and had the sign wrong at nfe=24.
+- `max_front`: predicts the winner on 3 of 6. Not a predictor either.
+
+That is the same wall the fill-guarded race hit in 2026-05, now with two
+more metrics ruled out rather than one.
+
+* 21:05 :issue203:routing:verdict:
+**Not changing `choose_adaptive`.** What I have is three real-pattern
+matrices from one reporter's model against 41 real families measured on
+the production parallel path. The proxies that were supposed to bridge
+that gap are invalid. A predicate fitted to three matrices is exactly
+what #67's note warns against ("a corpus-wide A/B, not a two-matrix
+anecdote"), and no cheap metric survives contact with the data anyway.
+
+The routing question needs one of two things, neither available here:
+1. the #67/#73 A/B re-run on the real corpus against the new metis; or
+2. a **measured** choice rather than a guessed one — a one-time race
+   that runs both symbolic analyses *and* one numeric factorization per
+   arm, keeps the winner, and amortises over the ~100 IPM iterates that
+   reuse the symbolic. That inverts the economics the 2026-05 race was
+   rejected on: it was priced as per-solve overhead, but in an IPM the
+   symbolic is computed once (`pounce-feral/src/lib.rs:17`). It is a
+   Solver-level API change, not a `choose_adaptive` tweak.
+
+* 22:10 :issue203:race:implement:
+Built the measured ordering race. `Solver::with_ordering_race(arms)`,
+opt-in, off by default. Selection is a pure function
+(`pick_race_winner`) so the policy is unit-testable without timing:
+skip failed arms, decline if survivors disagree on inertia, otherwise
+fastest wins unless inside `race_margin` (5%) of the runner-up, in
+which case the caller's listed order breaks the tie. Seven unit tests
+plus five end-to-end against an analytic saddle-point inertia oracle.
+
+* 22:25 :issue203:race:bug:
+**First implementation ranked on the wrong quantity and picked the
+wrong arm.** It timed each probe's whole first `factor()`, which is
+dominated by the symbolic analysis:
+
+  Amf      4916988 us  <-- adopted
+  MetisND  6219127 us
+
+MetisND analyses slower and factors 3.5x faster, so ranking on the
+first call picks the ordering cheapest to *analyse* rather than
+cheapest to *use* — the exact inversion, on the exact matrix the race
+exists for. Fixed by ranking on **steady state**: each arm factors once
+to build its analysis, then twice more with it cached, and scores on
+the min. Re-run:
+
+  Amf      first 4119020 us  steady 1934548 us
+  MetisND  first 6249675 us  steady  188933 us  <-- adopted
+
+Min-of-2 rather than a single sample because a single steady sample was
+measured drifting ~50% high on a loaded machine — enough to invert a
+close pick.
+
+* 22:40 :issue203:race:measure:
+Acceptance on the nfe=48 KKT (n=224,646), against an un-raced
+`Solver::new()`:
+
+| per-call baseline (us) | 1170351, 802646, 854334, 826507, 798508 |
+| per-call raced    (us) |  199513, 179821, 191723, 176021, 172184 |
+
+~4.6x per factorization, matching the standalone A/B's 3.5x within
+machine noise. First `factor()` costs 2.30x an un-raced one (plan said
+< 3x). Break-even lands at 14-24 factorizations of the same pattern
+across runs; pounce runs 50-122 iterates per solve, so it clears it.
+
+A confounder worth recording: an earlier run showed the baseline's
+repeat factorizations at 1.65 s each against the probe's 696 ms for the
+same ordering. Printing per-call times showed that was thermal drift
+from my own back-to-back runs, not a real effect. Single-number
+comparisons on this machine are not trustworthy; per-call series are.
+
+`cargo test --workspace` 1211 passed, 0 failed, 25 ignored. fmt and
+clippy clean.
+
+* 22:50 :issue203:race:scope:
+`choose_adaptive` is still untouched, and the race does not change the
+default path — with no `with_ordering_race` call the only new work is
+one `len()` check. The #67/#73 question still needs the corpus. What
+the race changes is that a host no longer *has* to wait for that
+answer: it can measure its own matrices.
+
+* 23:15 :issue203:race:bug:release-audit:
+Asked whether this is release-ready; audited the new API before
+answering and found a **real bug**. `race_probe()` hand-copies the
+configuration a probe must inherit, and it missed
+`mc64_cache_enabled`. `with_mc64_cache(false)` would therefore have
+raced arms with MC64 caching *on* while the real solver ran with it
+off — timing arms under a configuration the caller never uses, which is
+exactly the failure mode the hand-copy invites.
+
+Found it by auditing every `pub fn with_*` for the fields it writes.
+The first pass missed it because the grep pattern was `with_[a-z_]*`
+and the method name has digits.
+
+Fixed, and added `race_probe_inherits_every_configured_field` — builds
+a solver with every builder set to a non-default value and asserts the
+probe matches on each. `NumericParams` is not `PartialEq`, so that one
+is compared through its `Debug` rendering, which picks up new fields
+automatically. That is the drift guard: a future `with_*` that adds a
+top-level field fails this test.
+
+Also checked the blast radius: `src/capi.rs` and `python/src/lib.rs`
+never touch the race (the three `race` hits in capi.rs are
+`trace_factor` and a comment), so the C ABI and the Python bindings are
+unaffected.
+
+`cargo test --workspace` 1212 passed, 0 failed. fmt and clippy clean.
+
+* 23:50 :corpus:pounce:build:
+User: "we should be able to get what we need from pounce." Correct, and
+it bypasses the AMPL gate entirely.
+
+`pounce/benchmarks/large_scale/generate_nl.py` builds six large sparse
+NLPs **in Pyomo** and writes `.nl` directly — no AMPL licence, no
+plato.asu.edu fetch. Pyomo 6.10.0 was already installed. Sizes are
+dials (`--scale`, `--<problem>-<dim>`).
+
+Two gotchas worth recording:
+- pounce options are `key=value`, not `--key value`; `--max-iter 12`
+  silently printed help.
+- `solver_selection=auto` routes convex QPs to `pounce-convex`, which
+  does not dump KKTs. optcontrol / poisson / sparseqp produced *zero*
+  dumps until forced with `solver_selection=nlp`.
+
+Harvested with `scripts/harvest-pounce-kkt.py` into
+`data/matrices/kkt-pounce/`: 135 matrices, 7 families, 1.9 GB.
+
+| family      | n       | nnz     | shape                          |
+| rosenbrock  |   2,000 |   3,999 | unconstrained, tridiagonal     |
+| bratu       |  19,996 |  49,988 | 1-D PDE  (#67 bratu3d family)  |
+| poisson     | 120,000 | 359,200 | 2-D elliptic control (cont5_1_l) |
+| laptime     | 126,028 | 747,055 | nonconvex Radau collocation (#203) |
+| optcontrol  | 150,002 | 300,003 | discrete-time control (dtoc2)  |
+| sparseqp    | 150,000 | 399,999 | convex QP                      |
+| poisson450  | 607,500 |1,820,700| 2-D elliptic control, wide fronts |
+
+* 00:05 :corpus:routing:evidence:
+Ran the ordering A/B on one mid-IPM matrix per family. `factor vs auto`,
+ratio > 1 means the arm beats today's default:
+
+| family     | amf   | amd   | metis | max_front (amf/metis) |
+| bratu      | 1.025 | 1.017 | 0.944 |   18 / 20   |
+| optcontrol | 0.983 | 0.981 | 0.633 |   17 / 18   |
+| poisson    | 0.892 | 0.985 | 1.008 |  601 / 697  |
+| sparseqp   | 1.012 | 1.005 | 0.657 |   20 / 20   |
+| laptime    | 1.008 | 1.887 | 2.619 |  107 / 146  |
+| poisson450 | 0.880 | 0.988 | 0.961 | 1345 / 1553 |
+
+**#67/#73 are vindicated on their own shapes, by real models.**
+optcontrol is the dtoc2 shape and AMF wins 1.58x; sparseqp 1.52x;
+bratu 1.06x. #73 reported dtoc2 at 2.49x — same direction, same order.
+And my hand-built proxies had the **sign wrong** on exactly this shape
+(they said metis wins 1.13x). The tried-and-rejected entry stands
+confirmed, now against real models rather than argument.
+
+**laptime is the second member of the #203 class.** Nonconvex Radau
+collocation — the same transcription family as the gas network — and
+metis wins **2.62x**, amd 1.89x. So the blanket `MetisND -> Amf`
+reroute is wrong on collocation and right nearly everywhere else.
+
+**No symbolic metric predicts laptime.** nnz_L: amf 6.477M vs metis
+6.425M, a tie. flop_proxy: amf 5.087e8 vs metis 6.070e8 — says amf
+wins by 1.19x. max_front: amf 107 vs metis 146 — says amf. All three
+predictors point the wrong way on a matrix where metis is 2.62x
+faster. That is the strongest evidence yet that the routing has to be
+measured, not predicted.
+
+* 00:15 :corpus:metis:no-op:
+Ran every family under `node_refine: false` (the pre-2026-09-17 metis)
+and compared. **`nnz_L` is bit-identical on all seven**, including
+poisson450 (39,596,634 both ways, max_front 1553).
+
+Checked the flag was actually live rather than assuming: gaslib nfe=24
+under the same build gives 12,424,966, the old number, against
+8,146,351 new. The measurement is sound; the families really are
+unaffected.
+
+So the node-separator change is **inert on regular grids and on narrow
+chains, and bites only on the gaslib-style space x time product**. The
+likely reason is that a 2-D grid's edge bisection already has a
+near-optimal min-vertex-cover — straight-line separators — so node-FM
+finds nothing, whereas the product of a sparse network with a path has
+irregular separators where the cover is far off.
+
+**Release read.** This is the coverage that was missing: zero measured
+regression across seven real families at n up to 607k with real IPM
+numerics, bit-identical output on every one, against a large win on
+the one class where it engages (independently confirmed end-to-end by
+the reporter at n=503k). That retires the "validated by one 1,575-row
+matrix" objection.
+
+* 00:45 :metis:grids:wallclock:correction:
+User asked whether the improvement is unambiguous. It is not, and
+timing the grids — which I had only ever measured *symbolically* while
+quoting as wins — produced a counterexample.
+
+Min over 3 independent runs of 5 paired samples each, ranges
+non-overlapping in both cases:
+
+| grid            | metis fill old -> new | factor old -> new     | verdict |
+| grid3d 40^3     | 25.17M -> 21.60M  (-14.2%) | 331.6 -> 289.0 ms | **12.8% faster** |
+| grid2d 300x300  |  3.91M ->  3.51M  (-10.3%) |  23.6 ->  25.0 ms | **5.8% slower**  |
+
+grid3d: 289025 / 297443 / 294225 against 331577 / 341092 / 351900.
+grid2d: 24976 / 25141 / 25753 against 23623 / 24121 / 23607.
+
+**So the change makes a 2-D grid 5.8% slower while giving it 10.3%
+less fill.** Fill mispredicts again, and this time against my own
+change rather than in its favour.
+
+Scope of the regression: `Auto` never routes a 90k 2-D grid to
+`MetisND` (the #67/#73 reroute sends it to `Amf`), and on that matrix
+metis is already the worse arm before the change — 0.937 against auto.
+So the affected configuration is "caller explicitly asks for MetisND on
+a 2-D grid", which was already a bad choice and is now 5.8% worse. Real,
+bounded, and worth stating rather than burying.
+
+* 00:55 :metis:claims:retract:
+I had written "never worse, and is not slower" into **CHANGELOG.md** and
+into the `node_refine` doc comment in `crates/feral-metis/src/lib.rs`,
+on the strength of symbolic fill alone. That claim is now measured
+false. Corrected both to state the split result with the numbers, and
+to say plainly that fill did not predict speed there either.
+
+Lesson, and it is the same one three times in this session: this repo's
+own `tried-and-rejected` entry says fill does not predict speed. I used
+fill to characterise my own change anyway, and shipped a claim that
+wall-clock contradicts. Symbolic evidence is fine for *finding* an
+effect and not for *claiming* one.
+
+* 01:30 :issue203:policy:data:
+User declined to choose between "recommend metis and require expertise"
+and "recommend the race and pay for it" without data. Built
+`issue203_policy`: per matrix it measures first-`factor()` and
+steady-state cost for each policy, then totals them over N
+factorizations of one pattern and reports break-even against `auto`.
+
+Total seconds for N=180 factorizations of one pattern (a realistic IPM
+run), and the ratio against today's default:
+
+| family       | auto s | amf  | amd  | metis | race2 | vs auto: amd / metis / race2 |
+| gaslib nfe48 |  99.85 |100.03| 96.64| 31.45 | 35.84 | 1.03 / **3.17** / 2.79 |
+| laptime      |  15.83 | 15.53|  7.84|  8.65 |  9.32 | **2.02** / 1.83 / 1.70 |
+| poisson450   |  81.52 | 90.71| 78.89| 79.31 | 84.11 | 1.03 / 1.03 / 0.97 |
+| grid2d_300   |   4.27 |  4.38|  3.92|  4.82 |  4.78 | 1.09 / 0.89 / 0.89 |
+| optcontrol   |   3.83 |  3.59|  3.66|  5.77 |  4.18 | 1.05 / **0.66** / 0.92 |
+| sparseqp     |   3.80 |  3.81|  3.69|  6.21 |  4.42 | 1.03 / **0.61** / 0.86 |
+
+| geomean vs auto | amf 0.99 | amd 1.17 | metis 1.14 | race2 1.22 |
+| worst case      | amf 0.90 | amd 1.03 | metis 0.61 | race2 0.86 |
+
+**The headline is not the race.** `Amd` beats `Auto` on **all six**
+families — geomean 1.17x, worst case 1.03x, best on three of six, and
+2.02x on laptime. It costs nothing, needs no expertise and has no
+setup. `Auto` prefers `Amf`, and on this corpus `Amf` is the worst of
+the three fixed arms (geomean 0.99, i.e. slightly worse than `Auto`
+itself, which sometimes routes to `Amd` via the #50 branch).
+
+metis-always has the best single result (3.17x on gaslib) and the worst
+(0.61x on sparseqp) — exactly the "needs expertise" profile.
+
+race2 has the best geomean (1.22x) and bounds the downside at 0.86x. It
+is insurance: ~10-14% premium on adverse workloads for 2.79x on the
+target one. `raceDM` (`[Amd, MetisND]`) edges it on both families tried
+(gaslib 35.82 vs 35.84, laptime 9.05 vs 9.32), which follows from `Amd`
+being the better fixed arm.
+
+* 01:40 :issue203:policy:caution:
+What this does **not** license. Six families, one machine, one iterate
+per family. #67/#73 decided the current routing over 41 families. The
+`Amd > Amf` result is a strong hint and not a verdict, and it is the
+same evidence bar I refused to change routing on this morning — it
+would be inconsistent to treat it differently now because the answer is
+more convenient.
+
+It does reframe the priority list. "Fix Auto's Amf preference" is now
+ahead of "fix Auto's MetisND reroute": it is cheaper (no race, no new
+API), it never lost on this corpus, and it is worth 1.17x geomean
+against the reroute question's 1.14x — on a corpus that includes two
+members of the class the reroute is wrong about.
+
+* 02:15 :issue203:corpus-ab:amd-vs-amf:
+Ran the corpus A/B the six-family table said was worth doing. New tool
+`issue203_corpus_ab`: per matrix, warm the symbolic then time `pairs`
+alternating pairs per arm and take the min; gate on cross-arm inertia
+agreement and `rel_res <= 1e-8`; report per-family geomean, worst case,
+wins and an exact sign test. Corpus is `data/matrices/kkt-pounce`,
+now 9 families after adding the two cached Mittelmann `.nl`
+(clnlbeam — #67's own worst case — and corkscrw), capped at 8 evenly
+spaced iterates per family so the sample is not all early ones.
+
+**amf (A) vs amd (B), ratio > 1 means amd faster. 45 matrices:**
+
+| family     |  n     | mats | geomean | worst | amd wins |    p   |
+| bratu      |  19996 |  3   |  1.083  | 0.954 |   2/3    | 1.0000 |
+| clnlbeam   |  99999 |  8   |  1.020  | 0.985 |   5/8    | 0.7266 |
+| corkscrw   |  84997 |  7   |  1.096  | 1.049 |   7/7    | 0.0156 |
+| laptime    | 126028 |  8   |  1.241  | 0.700 |   6/8    | 0.2891 |
+| optcontrol | 150002 |  2   |  0.995  | 0.995 |   0/2    | 0.5000 |
+| poisson    | 120000 |  2   |  1.117  | 1.116 |   2/2    | 0.5000 |
+| rosenbrock |   2000 |  8   |  0.998  | 0.953 |   2/8    | 0.2891 |
+| sparseqp   | 150000 |  7   |  0.994  | 0.973 |   2/7    | 0.4531 |
+| **ALL**    |        | 45   | **1.067** | 0.700 | 26/45  | **0.3713** |
+
+**The effect evaporates.** 6.7% geomean, **not significant** (p=0.37),
+worst case 0.700. Only corkscrw is significant (1.096, 7/7, p=0.0156);
+clnlbeam, optcontrol, rosenbrock and sparseqp are ties.
+
+**So my "Amd beats Auto on all six families, geomean 1.17x" was a
+sampling artifact** — one iterate per family, and the 1.17 was carried
+by a single laptime matrix at 2.02x. With eight laptime iterates the
+family geomean is 1.241 with a worst case of 0.700: high variance, not
+a uniform win. Retracted. No change to `Auto` is warranted on this.
+
+That is exactly what the evidence bar is for, and it caught me one
+message after I invoked it against myself.
+
+* 02:30 :issue203:corpus-ab:routing:
+Same machinery on the actual routing question. **amf (A) vs metis (B),
+42 matrices:**
+
+| family     | geomean | worst | metis wins |    p   |
+| bratu      |  0.918  | 0.899 |    0/3     | 0.2500 |
+| clnlbeam   |  0.776  | 0.617 |    0/8     | **0.0078** |
+| corkscrw   |  0.975  | 0.920 |    4/8     | 1.0000 |
+| laptime    | **1.516** | 1.319 |  4/4     | 0.1250 |
+| optcontrol |  0.662  | 0.651 |    0/2     | 0.5000 |
+| poisson    |  1.167  | 1.158 |    2/2     | 0.5000 |
+| rosenbrock |  0.945  | 0.845 |    2/8     | 0.2891 |
+| sparseqp   |  0.655  | 0.637 |    0/7     | **0.0156** |
+| **ALL**    | **0.893** | 0.617 | 12/42   | **0.0079** |
+
+**#67/#73 are vindicated on a real corpus.** `Amf` beats `MetisND`
+overall at p=0.0079, significantly so on clnlbeam and sparseqp, and
+loses only on **laptime** (1.52x, 4/4) and marginally on poisson.
+laptime is the collocation class — the same transcription family as
+the gaslib KKT, where metis is 3.17x.
+
+So the blanket `MetisND -> Amf` reroute is **right in aggregate and
+wrong on exactly one class**, now measured rather than argued. A global
+routing change in either direction is unsupportable; the mechanism that
+fits the data is per-matrix measurement (the race) or an explicit
+opt-in for the collocation class.
+
+The gate earned its keep: it excluded a corkscrw iterate where amf and
+amd report different inertias, two laptime iterates where amf and metis
+do, and laptime_0000 where metis returns `rel_res` 1.19e-6 against
+amf's 1.91e-10. That last one is worth its own look — a 4-order
+residual gap on one matrix is not a timing question.
+
+* 02:50 :issue203:scotch:kahip:same-defect:
+Asked whether scotch and kahip need the same fix. Read both drivers.
+**Both have the identical architecture to pre-fix metis.**
+
+`feral-scotch/src/node_nd.rs::multilevel_node_bisection`: coarsen, best
+of `n_sep_trials` initial bisection, then uncoarsen calling
+`halo_fm_refine` on **2-way labels `{PART_A, PART_B}`** at every level,
+and only after the loop call `compute_vertex_separator` — once, at the
+finest level.
+
+`feral-kahip/src/node_nd.rs::recurse`: `multilevel_bisection` (K5, an
+edge bisection) then `flow_node_separator` (K4) lifts it to a node
+separator — again once, at the finest level.
+
+So all three crates shared "refine the edge cut through the hierarchy,
+build the node separator at the end". Only metis has been fixed.
+
+Measured on gaslib nfe=48 (n=224,646), with metis now fixed:
+
+| backend             | nnz_L  | flops    | vs fixed metis |
+| metis (fixed)       | 17.37M | 6.737e9  |  —             |
+| scotch              | 30.30M | 2.264e10 | **3.36x worse** |
+| kahip               | 31.71M | 2.577e10 | **3.82x worse** |
+| real METIS (oracle) | 16.63M | 6.423e9  | 0.95x          |
+
+That is almost exactly where pre-fix metis sat (2.095e10, 3.11x behind),
+which is the corroboration the diagnosis wanted: **scotch's final-level
+separator step is *better* than pre-fix metis's** — a proper two-sided
+FM optimising separator weight directly, against metis's Konig cover
+plus a positive-gain-only greedy pass — and scotch still lands slightly
+*worse* (3.36x vs 3.11x). The final polish is not what decides this.
+The hierarchy is.
+
+* 03:00 :issue203:scotch:kahip:priority:
+Same bug, much smaller blast radius, and I am not fixing it now.
+
+- Neither backend is reachable from `Auto`. `choose_adaptive` routes
+  every would-be-`MetisND` to `Amf`, and issue #50 deleted the
+  very-large-and-sparse `ScotchND` route outright. Only a caller naming
+  `ScotchND` / `KahipND` explicitly is affected.
+- The consumer that prompted all of this uses `feral_ordering=metis`.
+- And the corpus A/B says even *fixed* metis loses to `Amf` in
+  aggregate (0.893 geomean over 42 matrices, p=0.0079), winning only on
+  the collocation class. So the population that would benefit is
+  "explicitly asks for ScotchND or KahipND, on a collocation-shaped
+  problem" — narrow.
+
+The fix itself should port cleanly: scotch already has `halo_fm_refine`
+operating on labels, and the change is to construct the separator at the
+coarsest level and refine *it* down the hierarchy rather than the
+bisection. kahip is further away — `flow_node_separator` is a max-flow
+lift, not an FM, so projecting and re-refining a separator per level
+needs more than a call-site move.
+
+Worth an issue, not worth a session.
+
+* 09:30 :issue203:laptime:resolved:
+Chased the laptime residual/inertia anomaly. **No release blocker. It
+was three separate things, two of them my own harness.**
+
+1. **The 1.19e-6 residual was my harness.** `issue203_corpus_ab` gated
+   on `Solver::solve`, which calls `solve_sparse` — *no iterative
+   refinement*. pounce defaults `refine` to true and calls
+   `solve_refined_into` (`pounce-feral/src/lib.rs:212`). On the refined
+   path metis gets 2.0e-14 on laptime_0000, not 1.19e-6. I was gating on
+   a path the consumer does not use.
+
+2. **The metis-vs-amf inertia split is a pivot-threshold artefact.**
+   `NumericParams::default()` sets `bk.pivot_threshold = 1e-8` (MA27's
+   `cntl[1]`, Ipopt's `ma27_pivtol`); MA57's `CNTL(1)` defaults to 1e-2.
+   Sweeping it on laptime_0015:
+
+   | ordering | pivtol | inertia        | rel_res  |
+   | amf      | 1e-8..1e-1 | (64003, 62025, 0) — unchanged | 5.8e-14 -> 1.6e-16 |
+   | metis    | 1e-8   | (64002, 62026, 0) | 1.8e-10 |
+   | metis    | >= 1e-6| (64003, 62025, 0) | <= 2.7e-14 |
+
+   So the two orderings agree once the threshold is tighter than the
+   default, and metis's accuracy improves six orders. Benign, explained.
+
+3. **feral vs MA57, ~22 apart, is the matrices being numerically
+   singular.** Condition estimate (`estimate_condition_1norm`):
+
+   | matrix        | kappa    | agreement |
+   | laptime_0000  | 1.826e7  | feral (all arms) and MA57 agree exactly |
+   | laptime_0015  | 3.404e20 | everyone disagrees |
+   | laptime_0022  | 3.404e20 | everyone disagrees |
+
+   3.4e20 is past 1/eps (1.8e16): the inertia is not defined at double
+   precision. MA57's own solve on laptime_0015 returns **rel_res
+   2.55e+05**, consistent with the same reading. CLAUDE.md's constraint
+   is explicitly "inertia must be exactly correct **on non-singular
+   matrices**", and the consensus framework's `excluded` bucket exists
+   for exactly this. Note the well-conditioned iterate is the one where
+   everything agrees — which is the result you want to see.
+
+* 09:45 :issue203:corpus-ab:correction:
+Fixing the harness to use `solve_refined` (matching the consumer)
+**changes results I already reported.** Re-ran all three A/Bs:
+
+| policy vs amf | geomean | worst | wins  |   p    |
+| amd           | 1.067   | 0.677 | 25/39 | 0.1081 |
+| metis         | 0.973   | 0.648 | 15/38 | 0.2559 |
+| **autorace**  | **1.116** | **0.931** | 27/38 | **0.0139** |
+
+**Correction 1.** I reported amf vs metis as 0.893 at p=0.0079 and said
+"#67/#73 are vindicated on a real corpus". On the refined path it is
+0.973 at **p=0.2559 — not significant**. The honest statement is that
+neither dominates overall; it is family-dependent, with metis
+significantly better on laptime (1.760) and better on poisson /
+poisson450 (1.165 / 1.177), and amf significantly better on clnlbeam
+(0.852), sparseqp (0.649) and rosenbrock (0.945). That is weaker support
+for the current routing than I claimed, and stronger support for
+measuring per matrix.
+
+**Correction 2.** `poisson450` now appears in the statistics at all — the
+unrefined gate had excluded it on rel_res 1.99e-8.
+
+**AutoRace is the best policy on the corpus**, and the only one that
+significantly beats `Amf`: best geomean (1.116), best worst case
+(0.931), p=0.0139. My suspicion of its fill-based metric was overblown.
+Fill is a poor *predictor of the winner* but min-fill is a safe *floor*,
+and racing four candidates on it beats any fixed arm. That raises a
+release question I cannot settle alone: the new `with_ordering_race`
+(numeric) now has to justify itself against a shipped `AutoRace`
+(symbolic) that measures better than every fixed arm.
+
+* 11:20 :issue203:race:head-to-head:
+Raced the two race features against each other — the measurement I was
+missing when I listed the AutoRace-vs-`with_ordering_race` decision.
+`issue203_policy` gained an `autorace` arm so both are costed the same
+way: first `factor()` plus steady state, totalled over N factorizations
+of one pattern.
+
+Total seconds for N=180 factorizations:
+
+| matrix       |  auto | bestfix | autorace | raceDM | race3 | best arm |
+| gaslib nfe48 | 99.79 |  31.45  |  39.51   | 35.55  | 39.12 | metis    |
+| laptime      | 15.37 |   7.75  |  10.71   |  8.91  |  9.38 | amd      |
+| sparseqp     |  3.75 |   3.71  |   4.82   |  4.34  |  4.51 | amd      |
+| clnlbeam     |  3.17 |   3.10  |   4.01   |  3.48  |  3.77 | amf      |
+
+Ratio vs `auto` (>1 = cheaper overall):
+
+| policy     | geomean | worst | best  |
+| best fixed |  1.596  | 1.009 | 3.173 |  <- oracle, needs expertise
+| raceDM     |  1.398  | 0.863 | 2.807 |
+| race3      |  1.308  | 0.830 | 2.551 |
+| autorace   |  1.222  | 0.778 | 2.526 |
+
+**The numeric race beats `AutoRace` on 4 of 4**: raceDM geomean 1.144x
+cheaper (range 1.110-1.202), race3 1.070x (1.010-1.141).
+
+Two reasons, and only one of them is the metric:
+
+1. **Candidate set, which dominates.** `RACE_CANDIDATES` is
+   `{Amd, MetisND, ScotchND, KahipND}` — four symbolic passes, two of
+   them backends that are expensive to analyse and never win on this
+   set. It also **excludes `Amf`**, which is the best arm on clnlbeam.
+   `raceDM` races two arms and sets up in 8.31 s on gaslib against
+   autorace's 12.72 s.
+2. **Metric, which showed up once.** On laptime min-fill points at
+   `MetisND` (nnz_L 3.28M, half of amd's 6.0M) while measured time
+   prefers `Amd`; race3 adopted `Amd` and amd's total (7.75 s) beats
+   metis's (8.78 s). Real, but worth ~2% in steady state here — the
+   setup cost is what decides these four.
+
+So my worry about the fill metric was, again, overblown; the actual
+problem with `AutoRace` is that it races the wrong *set*.
+
+**What I would recommend, not decide.** The cheap fix is to shrink
+`RACE_CANDIDATES` to `{Amd, Amf, MetisND}` — drop the two backends that
+never win, add the one that sometimes does. That alone should close most
+of the 1.14x, at no new API surface. Whether `AutoRace` should then also
+switch to measured time, and whether `with_ordering_race` survives as
+its customisable form, is a design call with 4 matrices behind it and
+should not be made on this evidence alone.
+
+Caveat on the framing: N=180 favours the race, because setup amortises.
+At small N every race loses to plain `auto`.
+
+* 12:10 :issue203:autorace:candidates:
+Shrank `RACE_CANDIDATES` from `{Amd, MetisND, ScotchND, KahipND}` to
+`{Amd, Amf, MetisND}` and made it `pub`, so `issue127`'s
+"minimum over all raced candidates" test reads the real list instead of
+a local copy that would have silently stopped testing anything.
+
+**Total cost, N=180 factorizations of one pattern:**
+
+| matrix       |  auto | AR before | AR after | raceDM | AR gain |
+| gaslib nfe48 | 99.79 |   39.51   |  35.54   | 35.94  | 1.112x  |
+| laptime      | 15.37 |   10.71   |   9.20   |  9.16  | 1.164x  |
+| sparseqp     |  3.75 |    4.82   |   4.35   |  4.41  | 1.107x  |
+| clnlbeam     |  3.17 |    4.01   |   3.60   |  3.67  | 1.116x  |
+
+| policy    | geomean vs auto | worst |
+| AR before |      1.222      | 0.778 |
+| AR after  |    **1.374**    | 0.861 |
+| raceDM    |      1.360      | 0.850 |
+
+AutoRace improves 11-16% on all four and now **edges the numeric race**
+(geomean 1.011, 3 of 4). A one-line const change did what a whole new
+API feature did, for none of the complexity.
+
+**But the corpus disagrees, and it is measuring something different.**
+`issue203_corpus_ab` times *steady state only* — it warms the symbolic,
+then times factorizations — so setup cost is invisible to it:
+
+| autorace vs amf | geomean | worst |  wins |    p   |
+| before          |  1.116  | 0.931 | 27/38 | 0.0139 |
+| after           |  1.102  | 0.888 | 24/38 | 0.1433 |
+
+Slightly **worse**, and no longer significant. That is not a
+contradiction: dropping two candidates can only make the *pick* worse or
+equal, while it makes the *setup* much cheaper. The change trades a
+little steady-state quality for a lot of one-off cost.
+
+So the answer depends on N. At N=180 — pounce runs 50-180 iterates —
+the setup saving dominates and the change is clearly right. As N grows
+the steady-state quality dominates and the old set eventually wins. I am
+keeping the change because the target consumer sits at N≈180, and
+recording the crossover rather than pretending it is not there.
+
+`cargo test --workspace` 1212 passed, 0 failed.
+
+* 12:20 :issue203:autorace:decision-shift:
+This changes my recommendation on the AutoRace-vs-`with_ordering_race`
+question. Before the candidate fix the numeric race dominated 4/4 and
+the case for keeping it was easy. After it, `AutoRace` is at parity or
+slightly ahead at N=180, for a fraction of the machinery: no probe
+solvers, no configuration inheritance to keep in sync (the
+`with_mc64_cache` bug), no extra numeric factorizations.
+
+What `with_ordering_race` still has that `AutoRace` does not: a
+caller-chosen candidate set (including `External` permutations), a
+correctness gate that declines when arms disagree on inertia, and
+selection on measured time rather than predicted fill — which matters
+where the two disagree, as on laptime. Those are real, and they are
+advanced-use features rather than the default path.
+
+Also fixed `book/src/ordering.md`, which was wrong twice: it listed the
+old candidate set, and it claimed `Auto` picks `MetisND` for larger
+matrices when the #67/#73 catch means it never selects any
+nested-dissection method at all.
+
+* 13:30 :issue204:work-estimate:
+Implemented #204 on this branch at the user's request, in separate
+commits so it can be split out if review wants that — it is an unrelated
+feature and the PR was already +5636/-105.
+
+feral turned out to have most of it already: `peak_contrib_bytes` is
+exactly the multifrontal transient peak the issue asks for (simulated
+over the postorder traversal with children freed as assembled). The
+missing pieces were the work proxy, the largest-front size, and a
+documented struct to hand a host.
+
+Deliberately **no `est_runtime_ms`**. The issue asks for one, and this
+session's own data is the argument against: two orderings within 1.5% on
+`nnz_L` differed 3.5x in factor time, and the flop proxy had the wrong
+sign on a third matrix. A calibrated host rate beats any constant this
+crate could ship, and POUNCE's `predict_factor_overshoot` already
+calibrates.
+
+Also skipped RSLAB's `panels_all_bytes` / `panel_live_peak_bytes` /
+`transient_peak_bytes` trio: those model a **left-looking** panel
+schedule, and feral is multifrontal. Inventing a left-looking estimate
+for a path feral does not run would be a number that is wrong on
+purpose.
+
+* 13:45 :issue204:slack:correction:
+Writing the hand-oracle test caught something that affects claims I made
+earlier in this session. For an order-8 tridiagonal the closed form is
+`nnz(L) = 2n-1 = 15`; `factor_nnz_estimate` returned **18**. The ratio is
+exactly 1.2 — `factor_nnz_estimate = factor_nnz * factor_slack`, and the
+slack is baked in (`symbolic/mod.rs:1500`).
+
+**Every `nnz_L` number I reported this session is that slacked figure.**
+Feral-to-feral ratios are unaffected — the 1.2 cancels — so every
+ordering comparison stands. The **cross-solver** tables do not:
+
+| nfe=96 arm     | as I reported | true fill | vs MA57 reported | vs MA57 true |
+| feral Amd      |  53,651,360   | 44,709,467|      1.61x       |    1.34x     |
+| feral Amf      |  46,412,167   | 38,676,806|      1.39x       |    1.16x     |
+| feral MetisND  |  44,522,475   | 37,102,062|      1.34x       |    1.11x     |
+| MA57 realMETIS |  33,298,561   |     —     |                  |              |
+
+And at nfe=48 the direction **flips**: I reported feral MetisND 17.37M
+against MA57's 15.32M (feral 13% worse); the true fill is 14.48M, so
+feral is 5.5% *better*.
+
+Caveat against over-correcting: MA57's `INFO(5)` is a forecast of reals
+to hold the factors in a multifrontal solver, so it is a dense-block
+figure and also not `nnz(L)`. The honest statement is that **the nnz
+column in my cross-solver tables was never like-for-like in either
+direction.** The flops column was computed from `col_counts` (unslacked)
+throughout, and every conclusion in this session rested on flops and
+wall-clock, not on that nnz column.
+
+`WorkEstimate` now exposes `factor_nnz` (true) and `factor_alloc_nnz`
+(slacked) as separate documented fields so the next person cannot make
+this mistake from the API.
+
+`cargo test --workspace` 1218 passed, 0 failed.
+
+* 14:30 :issue205:ordering-info:
+Implemented #205 — `FactorStats::ordering_info`, the ordering
+counterpart to the existing `scaling_info`.
+
+Most of it already existed and was simply not surfaced:
+`SymbolicFactorization` carries `resolved_method` and
+`resolved_preprocess` (I have been reading them through
+`issue203_fill_probe` all session). The work was packaging them with
+`requested`, the escalation flag, `pattern_reused`, and the two cheap
+structural numbers, then hanging it off `FactorStats` so it costs no
+`with_profiling(true)`.
+
+The design point worth keeping: **`used` is written as a falsifiable
+claim.** `auto_reports_a_concrete_method_that_reproduces_the_same_factor`
+takes whatever `Auto` reports, requests that method directly, and asserts
+the factor and inertia match. A mislabelled field fails that test, so the
+API cannot quietly drift into decoration.
+
+This closes a gap the issue names in #203 itself: measurements taken
+under `Auto` could not say which orderer produced the fill, so runs were
+not comparable without pinning the ordering by hand. I hit exactly that
+and worked around it by reading `resolved_method` out of a diagnostics
+binary; a consumer had no such option.
+
+`cargo test --workspace` 1224 passed, 0 failed.

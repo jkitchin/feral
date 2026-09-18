@@ -17,7 +17,7 @@ use feral_metis::internals::initial_partition::{PART_A, PART_B};
 use feral_metis::internals::rng::SplitMix;
 use feral_ordering_core::{CscPattern, OrderingError};
 
-use crate::cycle::{graph_to_undirected, multilevel_bisection};
+use crate::cycle::{graph_to_undirected, multilevel_bisection, multilevel_node_separator};
 use crate::data_reduction::{expand_permutation, reduce_graph, ReduceOptions};
 use crate::node_separator::flow_node_separator;
 use crate::{KahipMode, KahipOptions, KahipStats};
@@ -137,21 +137,29 @@ fn recurse(
         return amd_leaf(subgraph, vtx_map, offset, iperm);
     }
 
-    // K5: edge bisection.
-    let mut labels = multilevel_bisection(subgraph, opts, rng, stats);
-
-    // K4: lift the edge bisection to a node separator.
-    let ug = graph_to_undirected(subgraph);
-    match flow_node_separator(&ug, &labels, None) {
-        Some(sep) => {
-            labels = sep.part;
+    // K5 + K4. With `node_refine` the separator is built at the
+    // coarsest level and refined down the hierarchy; otherwise the
+    // pre-2026-09-18 path refines the bisection and lifts once here.
+    let labels = if opts.node_refine {
+        match multilevel_node_separator(subgraph, opts, rng, stats) {
+            Some(l) => l,
+            // Degenerate (no cross edges at the coarsest level): fall
+            // back to the bisection path below.
+            None => multilevel_bisection(subgraph, opts, rng, stats),
         }
-        None => {
-            // No cross edges → degenerate. Fall through with A/B only,
-            // which means both sides are independent and we can just
-            // recurse directly on the connected components of A and B.
+    } else {
+        let labels = multilevel_bisection(subgraph, opts, rng, stats);
+        let ug = graph_to_undirected(subgraph);
+        match flow_node_separator(&ug, &labels, None) {
+            Some(sep) => sep.part,
+            None => {
+                // No cross edges → degenerate. Fall through with A/B
+                // only, which means both sides are independent and we
+                // can just recurse on the connected components.
+                labels
+            }
         }
-    }
+    };
 
     let mut a_verts: Vec<i32> = Vec::new();
     let mut b_verts: Vec<i32> = Vec::new();
@@ -478,7 +486,11 @@ mod tests {
         let (cp, ri) = csc_from_triples(144, &t);
         let pat = CscPattern::new(144, &cp, &ri).unwrap();
         for mode in [KahipMode::Fast, KahipMode::Eco, KahipMode::Strong] {
-            let opts = KahipOptions { seed: 3, mode };
+            let opts = KahipOptions {
+                seed: 3,
+                mode,
+                ..KahipOptions::default()
+            };
             let mut stats = KahipStats::default();
             let perm = kahip_nd_order(&pat, &opts, &mut stats)
                 .unwrap_or_else(|_| panic!("mode {:?} failed", mode));

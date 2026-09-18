@@ -6010,3 +6010,97 @@ evaluation, including the falsifiers that would flip the answer and the
 reproduction code for every number above, is in
 `dev/research/krylov-recycling-evaluation-2026-09-01.md`. Read that before
 re-opening the question.
+
+## 2026-09-17 — chain (front-to-back time) ordering for collocation KKTs (issue #203)
+
+**Tried.** Issue #203 proposes that the long-horizon collocation KKT from
+pounce#947 is a block chain with a mathematically available linear-fill
+elimination order, and asks whether `OrderingMethod::External` with a
+hand-built front-to-back permutation recovers it. Built exactly that: every
+row and column of `K` sorted by its time key (state variables and their
+residual rows by collocation point, path constraints by point, controls and
+ramp constraints at their knot's point), in two within-slab variants —
+all-variables-then-all-constraints, and interleaved variable/constraint
+pairs. Replayed through feral's own symbolic pipeline as `External`, so the
+only thing that differs from the default run is the permutation.
+
+**Symptoms.** The chain ordering is exactly linear and unusable. `nnz_L`
+grows 2.01x per doubling of `nfe` and flops 2.02x — the issue's arithmetic
+is right — but the constant is catastrophic:
+
+| nfe | Auto nnz_L | chain nnz_L | Auto flops | chain flops | flop ratio |
+|-----|-----------:|------------:|-----------:|------------:|-----------:|
+| 6   |      0.90M |       80.5M |    5.36e7  |    1.745e11 |      3254x |
+| 12  |      2.37M |      165.1M |    2.97e8  |    3.609e11 |      1214x |
+| 24  |      6.45M |      334.3M |    1.83e9  |    7.336e11 |       401x |
+| 48  |      17.6M |      672.7M |    1.09e10 |    1.479e12 |       135x |
+
+`front_max` pins at 3299 at every size — the width of one element's time
+slab — because a time-slice separator here is 775 states wide and
+eliminating front-to-back densifies it at every one of the `3*nfe` cuts.
+The interleaved variant changes nothing (79.5M vs 80.5M at nfe=6).
+Extrapolating both curves, the crossover where the chain order would win is
+past `nfe ~ 1000`, well beyond any horizon in play.
+
+**Why the premise fails.** The matrix is not a chain of small blocks. The
+reproducer's embedded spatial coupling is 775x775 with 1977 nonzeros (2.55
+per row) — a near-tree gas network — crossed with a time path of `3*nfe`
+points. That is a 2-D product graph whose *spatial* extent (775) exceeds its
+*temporal* extent (18 to 648 over the whole sweep). Ordering along time only
+is the classic band/profile ordering for a 2-D grid, with fill
+`O(n * bandwidth)`.
+
+**What this rejects.** Both the `External` chain permutation and the
+chain/near-banded detection heuristic proposed for `Auto` dispatch: on this
+pattern such a heuristic would fire and lose two orders of magnitude.
+
+**What it does not reject.** A better *nested dissection*. Replaying MA57's
+bundled real-METIS ordering through feral's pipeline gives 1.70x fewer flops
+than feral's best at nfe=48 and 2.89x fewer at nfe=96, with the gap widening
+as the horizon grows. The deficit is in `feral-metis` / `feral-scotch`
+separator quality, not in a missing chain heuristic. Full evidence in
+`dev/research/issue-203-collocation-kkt-ordering-2026-09-17.md`.
+
+## 2026-09-17 — geometry-matched proxies for the #67/#73 ordering families
+
+**Tried.** To re-decide `choose_adaptive`'s blanket `MetisND -> Amf` reroute
+without the corpus, built stand-ins for the two #67/#73 families whose
+structure is public and unambiguous: `dtoc` (narrow discrete-time optimal
+control chain, matched to dtoc2's n=104k) and `pde2d` (elliptic
+PDE-constrained control on a grid, matched to cont5_1_l's n=181k). Both as
+augmented systems with an analytic inertia oracle, run through the same
+paired A/B harness on the production parallel path.
+
+**Symptoms.** The proxies do not reproduce the result they were built to
+re-test. Run against the *old* `feral-metis` — `node_refine: false`, i.e.
+byte-for-byte the code #67/#73 measured:
+
+| proxy | old metis vs auto, measured here | what #73 reports for the real family |
+|---|---|---|
+| `dtoc_wide` (n=103,992) | **1.129x, metis faster** | dtoc2: 2.49x, **AMF** faster |
+| `pde2d` (n=181,548) | **1.037x, metis faster** | cont5_1_l: 2.75x, **AMF** faster |
+
+The proxies put MetisND ahead on the exact code that put AMF ahead by
+2.5-2.8x on the real families — the sign is wrong, not just the magnitude.
+Anything they then say about the *new* metis is uninterpretable, so the
+whole arm was discarded.
+
+**Why they fail, as far as it was chased.** `dtoc_wide`'s `max_front` is 31.
+At that width the numeric phase is all per-front overhead and no arithmetic,
+so the comparison measures supernode count rather than flops, and MetisND's
+fewer-but-wider fronts win for reasons that have nothing to do with dtoc2.
+Widening the chain from `(nx,nu) = (4,2)` to `(8,4)` moved `max_front` only
+24 -> 31; the real dtoc2's avg_deg of 17.5 is not reachable by this
+construction at the right `n`.
+
+**This was already on the record.**
+`external_benchmarks/chain_proxy/README.md` documents geometry-matched
+proxies producing the wrong answer and says to prefer the real corpus. That
+warning was read during this session and the proxies were built anyway.
+
+**What survives.** Nothing about routing. The non-proxy measurements in the
+same session stand on their own and are recorded in
+`dev/research/issue-203-auto-routing-2026-09-17.md`: on the issue #203
+patterns MetisND is 1.62x faster sequentially and 3.5x in parallel, and
+`nnz_L`, `flop_proxy` and `max_front` were each checked as routing guards
+and each mispredicts.

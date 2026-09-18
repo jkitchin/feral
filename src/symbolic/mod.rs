@@ -104,12 +104,12 @@ pub enum OrderingMethod {
     /// then runs the chosen concrete method.
     Auto,
     /// Race-based dispatcher: runs full symbolic factorization on each
-    /// concrete candidate in {`Amd`, `MetisND`, `ScotchND`, `KahipND`}
-    /// and returns the one with the smallest `factor_nnz_estimate`.
+    /// concrete candidate in [`RACE_CANDIDATES`] and returns the one
+    /// with the smallest `factor_nnz_estimate`.
     ///
     /// Unlike [`Auto`], which guesses the winner from cheap pattern
     /// features, `AutoRace` measures the actual symbolic outcome. Cost
-    /// is ~4× a single symbolic pass (~50–500 ms total at n≈10⁵), paid
+    /// is ~3× a single symbolic pass, paid
     /// once per problem because symbolic factorization is reused across
     /// numeric refactorizations with the same sparsity pattern.
     ///
@@ -847,13 +847,124 @@ fn run_external_ordering(
     Ok((out, actual))
 }
 
-/// Concrete candidates raced by [`OrderingMethod::AutoRace`]. See the
-/// variant docstring for rationale.
-const RACE_CANDIDATES: &[OrderingMethod] = &[
+/// A-priori memory and work estimate for a factorization, read off the
+/// symbolic analysis (issue #204).
+///
+/// Every field is structural — it comes from the supernode tree, so
+/// producing it costs nothing beyond the analysis that has already run.
+/// The point is to let a deadline- or memory-bounded host decide
+/// *before* committing to a numeric factorization, rather than learning
+/// the cost by overrunning once.
+///
+/// **Sizes assume `f64` values.** feral has no other value type today;
+/// if one is added, the `*_bytes` fields are the places that change.
+///
+/// **There is deliberately no `est_runtime_ms`.** Converting
+/// [`WorkEstimate::factor_flops`] into a time needs a
+/// machine-calibrated rate, and a flop proxy is a poor predictor of
+/// wall-clock on its own: measured on this repo's corpus, two orderings
+/// within 1.5% of each other on `nnz_L` differed by 3.5x in factor
+/// time, and the `ncol·nrow²` proxy had the wrong *sign* on a third
+/// matrix (`dev/research/issue-203-auto-routing-2026-09-17.md`). A host
+/// that calibrates `factor_flops` against its own observed rate will do
+/// better than any constant this crate could ship, which is what
+/// POUNCE's `predict_factor_overshoot` already does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkEstimate {
+    /// Order of the matrix.
+    pub n: usize,
+    /// Number of supernodes in the elimination tree.
+    pub n_supernodes: usize,
+    /// **True** nonzeros in `L`: the sum of its column counts, with no
+    /// slack. This is the fill number to compare against another
+    /// solver's, and it is *not* the same as
+    /// [`SymbolicFactorization::factor_nnz_estimate`], which carries a
+    /// 1.2x allocation slack (see [`Self::factor_alloc_nnz`]).
+    pub factor_nnz: usize,
+    /// The slacked figure feral sizes its allocation against —
+    /// `factor_nnz * factor_slack`, slack 1.2 by default. This is the
+    /// number to budget memory with; `factor_nnz` is the number to
+    /// compare fill with. Conflating the two overstates feral's fill by
+    /// 20% against any solver that reports an unslacked count.
+    pub factor_alloc_nnz: usize,
+    /// [`Self::factor_alloc_nnz`] in bytes — i.e. what feral will try to
+    /// allocate for the factor, not the information-theoretic size.
+    pub factor_bytes: usize,
+    /// Peak bytes held in *transient* contribution blocks, simulated
+    /// over the postorder traversal with children freed as they are
+    /// assembled. This is the multifrontal working set that sits on top
+    /// of the resident factor and is invisible to a caller who only
+    /// measures the factor.
+    pub peak_contrib_bytes: usize,
+    /// `factor_bytes + peak_contrib_bytes` — the headline number to
+    /// compare against a memory budget.
+    pub peak_bytes: usize,
+    /// Rows in the largest frontal matrix. Bounds the biggest dense
+    /// block the numeric phase will work on.
+    pub max_front_rows: usize,
+    /// Bytes in the largest frontal matrix (`max_front_rows²`).
+    pub max_front_bytes: usize,
+    /// Geometric work proxy, `Σ ncol · nrow²` over supernodes — the
+    /// dominant term in dense multifrontal factorization cost. See the
+    /// struct docs for why this is not converted to a time.
+    pub factor_flops: f64,
+}
+
+impl SymbolicFactorization {
+    /// Read an a-priori [`WorkEstimate`] off this analysis (issue #204).
+    ///
+    /// `O(n_supernodes)`, allocation-free.
+    pub fn work_estimate(&self) -> WorkEstimate {
+        let vb = std::mem::size_of::<f64>();
+        let mut flops = 0.0f64;
+        let mut max_front_rows = 0usize;
+        for sn in &self.supernodes {
+            let nrow = sn.nrow as f64;
+            flops += sn.ncol as f64 * nrow * nrow;
+            max_front_rows = max_front_rows.max(sn.nrow);
+        }
+        let factor_nnz: usize = self.col_counts.iter().sum();
+        let factor_bytes = self.factor_nnz_estimate * vb;
+        WorkEstimate {
+            n: self.n,
+            n_supernodes: self.supernodes.len(),
+            factor_nnz,
+            factor_alloc_nnz: self.factor_nnz_estimate,
+            factor_bytes,
+            peak_contrib_bytes: self.peak_contrib_bytes,
+            peak_bytes: factor_bytes + self.peak_contrib_bytes,
+            max_front_rows,
+            max_front_bytes: max_front_rows * max_front_rows * vb,
+            factor_flops: flops,
+        }
+    }
+}
+
+/// Concrete candidates raced by [`OrderingMethod::AutoRace`].
+///
+/// Public so callers (and tests) can see what the race covers without
+/// duplicating the list and letting the copy rot.
+///
+/// **Changed 2026-09-18** from `{Amd, MetisND, ScotchND, KahipND}`.
+/// Measured over four real KKT patterns, costing each policy as
+/// first-`factor()` plus steady state over 180 factorizations of one
+/// pattern (`dev/research/scotch-kahip-node-separator-2026-09-18.md`
+/// and the session journal):
+///
+/// * `ScotchND` and `KahipND` **never won** and are the two most
+///   expensive candidates to analyse, so the race paid for four
+///   symbolic passes to use one of two. Dropping them is most of the
+///   cost.
+/// * `Amf` was **missing** and is the fastest arm on some patterns
+///   (`clnlbeam`), so the race could not reach the right answer there
+///   at any price.
+///
+/// This keeps the race's reach while cutting its cost. The remaining
+/// candidates are the three that actually win on the corpus.
+pub const RACE_CANDIDATES: &[OrderingMethod] = &[
     OrderingMethod::Amd,
+    OrderingMethod::Amf,
     OrderingMethod::MetisND,
-    OrderingMethod::ScotchND,
-    OrderingMethod::KahipND,
 ];
 
 /// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the

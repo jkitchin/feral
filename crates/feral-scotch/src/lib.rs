@@ -89,6 +89,17 @@ pub struct ScotchOptions {
     pub fm_pass_cap: u32,
     /// Imbalance tolerance (SCOTCH default: 0.05).
     pub max_imbalance: f64,
+    /// Carry the **node separator** through uncoarsening and refine it
+    /// at every level, instead of refining the 2-way bisection with
+    /// halo FM and building the separator once at the finest level.
+    ///
+    /// The old path optimised the wrong objective at every level: halo
+    /// FM minimises an edge cut, and minimum edge cut and minimum
+    /// vertex separator are different problems. `feral-metis` had the
+    /// identical defect and fixing it there was worth 3.1x on a
+    /// collocation KKT; the same measurement for this crate is in
+    /// `dev/research/scotch-kahip-node-separator-2026-09-18.md`.
+    pub node_refine: bool,
     /// Deterministic RNG seed for coarsening matching.
     pub seed: u64,
 }
@@ -104,6 +115,7 @@ impl Default for ScotchOptions {
             fm_move_cap: 200,
             fm_pass_cap: 32,
             max_imbalance: 0.05,
+            node_refine: true,
             seed: 0xDEAD_BEEF,
         }
     }

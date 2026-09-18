@@ -47,6 +47,57 @@ use std::sync::{Arc, Mutex};
 /// (`FatalError`, `Err(NumericallyRankDeficient)`) clear the
 /// snapshot alongside the existing `last_factors` / `last_inertia`
 /// reset, so a stale stats blob cannot survive a failed retry.
+/// What the adaptive routing actually chose for a factorization
+/// (issue #205).
+///
+/// `OrderingMethod::Auto` and `OrderingPreprocess::Auto` pick a concrete
+/// method from pattern features, and before this existed a caller knew
+/// the fill it got but not which ordering produced it. A routing change
+/// is invisible in every other number — fill, time and inertia can all
+/// move for a routing reason and read as a numeric one, or stay put
+/// while the route silently changes — so it gets reported on every
+/// factorization rather than only profiled ones.
+///
+/// The `requested` / `used` pair is the load-bearing part: it separates
+/// "I asked for AMD and got AMD" from "I asked for `Auto` and got
+/// whatever today's heuristics chose". `used` is always a concrete
+/// method; it is never `Auto` or `AutoRace`.
+///
+/// This is the ordering counterpart to
+/// [`crate::scaling::ScalingInfo`], which already did the same job for
+/// `ScalingStrategy::Auto`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderingInfo {
+    /// The method the caller configured, verbatim — including the
+    /// `Auto` / `AutoRace` sentinels.
+    pub requested: OrderingMethod,
+    /// The concrete method the analysis actually ran. Never a sentinel.
+    ///
+    /// Requesting this method directly must reproduce the same factor;
+    /// `tests/issue205_ordering_info.rs` pins that, so the field is a
+    /// falsifiable claim rather than a label.
+    pub used: OrderingMethod,
+    /// The resolved ordering preprocessor. Never
+    /// [`OrderingPreprocess::Auto`].
+    pub preprocess: crate::symbolic::OrderingPreprocess,
+    /// True when ordering escalation fired for this pattern — the
+    /// "routed, then re-routed after observing pivot growth" case, the
+    /// same shape as `ScalingInfo`'s MC64-fallback variant.
+    pub escalated: bool,
+    /// True when this factorization reused a cached symbolic analysis
+    /// rather than running a new one. Mirrors
+    /// [`FactorStats::pattern_reused`]; repeated here so a caller
+    /// logging `ordering_info` alone can tell a fresh routing decision
+    /// from a replayed one.
+    pub pattern_reused: bool,
+    /// Supernodes in the elimination tree — cheap, already computed,
+    /// and usually the first thing you want when explaining a fill
+    /// number.
+    pub n_supernodes: usize,
+    /// Rows in the largest frontal matrix.
+    pub max_front_rows: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactorStats {
     /// `CscMatrix::nnz()` of the matrix passed to `factor()`.
@@ -72,6 +123,9 @@ pub struct FactorStats {
     /// Scaling outcome of the numeric phase. Mirrors
     /// [`Solver::scaling_info`].
     pub scaling_info: crate::scaling::ScalingInfo,
+    /// Which ordering the adaptive routing actually chose (issue #205).
+    /// The counterpart to `scaling_info`, for `OrderingMethod::Auto`.
+    pub ordering_info: OrderingInfo,
     /// MUMPS `INFO(25)` / NBTINYW equivalent: count of pivots that
     /// were statically perturbed to `sign(d)·floor` during this
     /// factor() call, summed across all supernodes. Counts both 1×1
@@ -184,6 +238,102 @@ struct Mc64ScalingCache {
 /// reuse the symbolic analysis. The β refactor (scaling moved from
 /// symbolic to numeric phase) makes this cache reuse correct even
 /// across stage-1 quality escalation.
+/// One arm's outcome in an ordering race. See
+/// [`Solver::with_ordering_race`].
+#[derive(Debug, Clone)]
+pub struct RaceArm {
+    /// The ordering this arm ran.
+    pub method: OrderingMethod,
+    /// Wall time of a **steady-state** `factor()` for this arm — the
+    /// arm's second factorization, with its symbolic analysis already
+    /// cached. `None` if the arm failed.
+    ///
+    /// This, and not the first `factor()`, is what the race compares.
+    /// The first call is dominated by the symbolic analysis, which an
+    /// interior-point host pays once and then reuses across every
+    /// iterate; ranking arms by it picks the ordering that is cheapest
+    /// to *analyse* rather than the one that is cheapest to *use*. On
+    /// the issue #203 matrix at n=224,646 that inverted the answer.
+    pub factor_us: Option<u128>,
+    /// Wall time of the arm's first `factor()`, which includes its
+    /// symbolic analysis. Reported for cost accounting, not used for
+    /// ranking.
+    pub first_factor_us: Option<u128>,
+    /// The inertia the arm reported, or `None` if it failed.
+    pub inertia: Option<Inertia>,
+    /// True for the arm the race adopted.
+    pub winner: bool,
+}
+
+/// What an ordering race decided, for logging by the host.
+#[derive(Debug, Clone)]
+pub struct RaceResult {
+    /// One entry per arm, in the order the caller listed them.
+    pub arms: Vec<RaceArm>,
+    /// Index into `arms` of the adopted arm, or `None` when the race
+    /// declined (every arm failed, or the survivors disagreed on
+    /// inertia — see [`Solver::with_ordering_race`]).
+    pub winner: Option<usize>,
+    /// True when two arms both succeeded and reported different
+    /// inertias. The race declines to choose in that case: the
+    /// disagreement is a correctness signal, not a timing question.
+    pub inertia_disagreement: bool,
+}
+
+/// Pick the arm to adopt from `(time, inertia)` outcomes.
+///
+/// Pure so the policy can be tested without running a factorization.
+/// Rules, in order:
+///
+/// 1. arms that failed (`None` time) are ignored;
+/// 2. if no arm succeeded, decline (`None`);
+/// 3. if two surviving arms report different inertias, decline — the
+///    orderings disagree about the matrix, which is a correctness
+///    question and not one a stopwatch should settle;
+/// 4. otherwise take the fastest, **unless** it beats the runner-up by
+///    less than `margin` (relative), in which case take the arm
+///    earliest in the caller's list. Near-ties go to the caller's
+///    stated preference rather than to timing noise.
+fn pick_race_winner(
+    outcomes: &[(Option<u128>, Option<Inertia>)],
+    margin: f64,
+) -> (Option<usize>, bool) {
+    let live: Vec<usize> = (0..outcomes.len())
+        .filter(|&i| outcomes[i].0.is_some())
+        .collect();
+    if live.is_empty() {
+        return (None, false);
+    }
+    let mut disagree = false;
+    let mut seen: Option<&Inertia> = None;
+    for &i in &live {
+        if let Some(inr) = outcomes[i].1.as_ref() {
+            match seen {
+                Some(prev) if prev != inr => disagree = true,
+                None => seen = Some(inr),
+                _ => {}
+            }
+        }
+    }
+    if disagree {
+        return (None, true);
+    }
+    let us = |i: usize| outcomes[i].0.unwrap_or(u128::MAX) as f64;
+    let best = *live
+        .iter()
+        .min_by(|&&a, &&b| us(a).total_cmp(&us(b)))
+        .unwrap_or(&live[0]);
+    // Everything within `margin` of the best is a tie; among ties the
+    // caller's ordering of `arms` breaks it.
+    let cutoff = us(best) * (1.0 + margin);
+    let winner = live
+        .iter()
+        .copied()
+        .find(|&i| us(i) <= cutoff)
+        .unwrap_or(best);
+    (Some(winner), false)
+}
+
 pub struct Solver {
     numeric_params: NumericParams,
     snode_params: SupernodeParams,
@@ -301,6 +451,17 @@ pub struct Solver {
     /// 1D-banded KKTs (#33 suggested action §3, supernode-shape
     /// thesis).
     ordering: OrderingMethod,
+    /// Candidate orderings for the measured race (issue #203). Empty
+    /// disables it, which is the default; fewer than two entries is a
+    /// no-op. See [`Solver::with_ordering_race`].
+    race_arms: Vec<OrderingMethod>,
+    /// Relative margin inside which two arms count as tied. Default
+    /// 0.05.
+    race_margin: f64,
+    /// Outcome of the race for the currently cached pattern. `Some`
+    /// means the race has already run for this pattern and must not
+    /// run again; cleared with the symbolic cache on a pattern miss.
+    race_result: Option<RaceResult>,
     /// Issue #102 follow-up: pivot-growth ceiling above which `factor()`
     /// escalates the ordering. When `OrderingPreprocess::Auto` dropped an
     /// available `LdltCompress` (predicate fired but the fill verify chose
@@ -436,6 +597,9 @@ impl Solver {
             workspace: FactorWorkspace::new(),
             use_parallel: Self::default_use_parallel(),
             parallel_pool: None,
+            race_arms: Vec::new(),
+            race_margin: 0.05,
+            race_result: None,
             ordering: OrderingMethod::Auto,
             ordering_escalation_growth: Some(1e24),
             ordering_escalated: false,
@@ -926,6 +1090,209 @@ impl Solver {
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
     /// `solve` against it). See plan §`factor()` flow.
+    /// Opt into a **measured** ordering race (issue #203).
+    ///
+    /// On the first `factor()` for a given pattern, every listed
+    /// ordering is run end to end on a probe solver that carries this
+    /// solver's full configuration, the wall times are compared, and
+    /// the fastest is adopted for this pattern. Subsequent `factor()`
+    /// calls on the same pattern reuse the winner with no extra cost;
+    /// a pattern change re-races.
+    ///
+    /// **Why measure instead of predict.** Every cheap predictor was
+    /// checked on 2026-09-17 and all of them mispredict: `nnz_L` (two
+    /// orderings within 1.5% of each other while wall-clock differed
+    /// 3.52x), the `ncol * nrow^2` flop proxy (predicted 1.37x against
+    /// a measured 3.52x, and the wrong *sign* on a third matrix) and
+    /// `max_front` (right on three of six). The dominant term on the
+    /// matrix that motivated this was a scheduling effect — wide
+    /// fronts serialise — that no symbolic quantity captures. See
+    /// `dev/research/issue-203-auto-routing-2026-09-17.md`.
+    ///
+    /// **What is compared.** Each arm's *steady-state* factorization —
+    /// its second `factor()`, with the symbolic analysis already
+    /// cached — not its first. The first call is dominated by the
+    /// analysis, which the host pays once and reuses; ranking on it
+    /// picks the ordering cheapest to analyse rather than the one
+    /// cheapest to use, and on the issue #203 matrix at n=224,646 that
+    /// inverts the answer (`Amf` analyses faster, `MetisND` factors
+    /// 3.5x faster). So each arm runs twice.
+    ///
+    /// **Cost.** `k` analyses and `3k` factorizations, once per
+    /// pattern — one to build each arm's analysis and two more per arm
+    /// to time its steady state, taking the minimum. That pays
+    /// for itself in an interior-point host, which factors the same
+    /// pattern on every iterate and reuses the symbolic across them;
+    /// it is a straight loss for a caller that factors once. Hence
+    /// opt-in, off by default.
+    ///
+    /// **It never changes the answer.** The race picks which ordering
+    /// to use; the factorization it produces is the one that ordering
+    /// would have produced anyway. If two arms report *different*
+    /// inertias the race declines to choose, keeps the configured
+    /// ordering, and flags it in [`RaceResult::inertia_disagreement`]
+    /// — a disagreement is a correctness signal, not a timing question.
+    ///
+    /// Fewer than two arms is a no-op.
+    pub fn with_ordering_race(mut self, arms: Vec<OrderingMethod>) -> Self {
+        self.race_arms = arms;
+        self.race_result = None;
+        self
+    }
+
+    /// Relative margin inside which two race arms count as tied
+    /// (default `0.05`). Among tied arms the one listed earliest in
+    /// [`Solver::with_ordering_race`] wins, so near-ties go to the
+    /// caller's stated preference rather than to timing noise.
+    ///
+    /// Negative or non-finite values are clamped to `0.0`.
+    pub fn with_race_margin(mut self, margin: f64) -> Self {
+        self.race_margin = if margin.is_finite() && margin > 0.0 {
+            margin
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// A-priori memory and work estimate for the currently cached
+    /// symbolic analysis (issue #204), or `None` if no analysis has run
+    /// yet — i.e. before the first `factor()` on a pattern.
+    ///
+    /// The estimate is a property of the *pattern*, so it is stable
+    /// across refactorizations with new values and costs nothing to
+    /// read. See [`crate::symbolic::WorkEstimate`] for what each field
+    /// means and why there is no predicted runtime.
+    pub fn work_estimate(&self) -> Option<crate::symbolic::WorkEstimate> {
+        self.last_symbolic.as_ref().map(|s| s.work_estimate())
+    }
+
+    /// What the last ordering race decided, or `None` if no race has
+    /// run for the current pattern.
+    pub fn last_race(&self) -> Option<&RaceResult> {
+        self.race_result.as_ref()
+    }
+
+    /// A probe solver carrying this solver's configuration and none of
+    /// its cached state.
+    ///
+    /// Every builder-settable field must be copied here; a field left
+    /// out means the race times an arm under a configuration the real
+    /// solver will not use. `race_arms` is deliberately **not** copied
+    /// — that is what stops a probe from racing recursively.
+    /// `parallel_pool` is shared (it is an `Arc`) so the race does not
+    /// build `k` thread pools and every arm is timed on the same
+    /// threads.
+    fn race_probe(&self) -> Solver {
+        let mut p = Solver::with_params(self.numeric_params.clone(), self.snode_params.clone());
+        p.pivtol_max = self.pivtol_max;
+        p.quality_level = self.quality_level;
+        p.use_parallel = self.use_parallel;
+        p.parallel_pool = self.parallel_pool.clone();
+        p.ordering_escalation_growth = self.ordering_escalation_growth;
+        p.auto_cascade_break_beta = self.auto_cascade_break_beta;
+        p.mc64_cache_enabled = self.mc64_cache_enabled;
+        // Profiling is the one configuration deliberately *not*
+        // inherited: a probe's profile is not the caller's, and
+        // collecting it would slow the very thing being timed.
+        p.profiling_enabled = false;
+        p
+    }
+
+    /// Run the ordering race for `matrix` and adopt the winner.
+    ///
+    /// Sets `self.ordering` and moves the winning probe's symbolic
+    /// analysis into this solver's cache — the analysis is the
+    /// expensive half (seconds, on the matrices this was built for),
+    /// so it is worth moving rather than recomputing. The numeric
+    /// factorization is *not* adopted: it re-runs on the real solver
+    /// so that quality escalation, inertia checking and status
+    /// reporting all follow their normal path.
+    fn run_ordering_race(&mut self, matrix: &CscMatrix) {
+        let arms = self.race_arms.clone();
+        let mut probes: Vec<Option<Solver>> = Vec::with_capacity(arms.len());
+        let mut outcomes: Vec<(Option<u128>, Option<Inertia>)> = Vec::with_capacity(arms.len());
+
+        let mut firsts: Vec<Option<u128>> = Vec::with_capacity(arms.len());
+        for arm in &arms {
+            let mut probe = self.race_probe();
+            probe.ordering = arm.clone();
+            // First call: builds the symbolic analysis. Timed for cost
+            // accounting but deliberately *not* used for ranking — see
+            // `RaceArm::factor_us`.
+            let t = std::time::Instant::now();
+            let first = probe.factor(matrix, None);
+            let first_us = t.elapsed().as_micros();
+            if !matches!(first, FactorStatus::Success) {
+                outcomes.push((None, None));
+                firsts.push(None);
+                probes.push(None);
+                continue;
+            }
+            // Subsequent calls: the symbolic is cached and every
+            // warm-start cache is populated, so these are the
+            // per-iterate cost the host will actually pay. Rank on the
+            // **minimum** of `STEADY_SAMPLES` of them — a single sample
+            // was measured drifting 50% high on a loaded machine, which
+            // is enough to invert the pick between two arms that are
+            // genuinely close.
+            const STEADY_SAMPLES: usize = 2;
+            let mut steady_us = u128::MAX;
+            let mut steady = FactorStatus::Success;
+            for _ in 0..STEADY_SAMPLES {
+                let t = std::time::Instant::now();
+                steady = probe.factor(matrix, None);
+                if !matches!(steady, FactorStatus::Success) {
+                    break;
+                }
+                steady_us = steady_us.min(t.elapsed().as_micros());
+            }
+            match steady {
+                FactorStatus::Success => {
+                    outcomes.push((Some(steady_us), probe.last_inertia.clone()));
+                    firsts.push(Some(first_us));
+                    probes.push(Some(probe));
+                }
+                _ => {
+                    outcomes.push((None, None));
+                    firsts.push(None);
+                    probes.push(None);
+                }
+            }
+        }
+
+        let (winner, disagree) = pick_race_winner(&outcomes, self.race_margin);
+        self.race_result = Some(RaceResult {
+            arms: arms
+                .iter()
+                .enumerate()
+                .map(|(i, m)| RaceArm {
+                    method: m.clone(),
+                    factor_us: outcomes[i].0,
+                    first_factor_us: firsts[i],
+                    inertia: outcomes[i].1.clone(),
+                    winner: winner == Some(i),
+                })
+                .collect(),
+            winner,
+            inertia_disagreement: disagree,
+        });
+
+        if let Some(w) = winner {
+            self.ordering = arms[w].clone();
+            // Adopt the winner's symbolic analysis. Safe because the
+            // probe factored this exact matrix, so its cached pattern
+            // and fingerprint describe `matrix`.
+            if let Some(p) = probes.into_iter().nth(w).flatten() {
+                if p.last_symbolic.is_some() {
+                    self.last_symbolic = p.last_symbolic;
+                    self.last_pattern = p.last_pattern;
+                    self.last_pattern_fingerprint = p.last_pattern_fingerprint;
+                }
+            }
+        }
+    }
+
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
         // Step 0: reject non-finite input. A single +∞ / -∞ / NaN
         // entry sends the BK pivot-search loop into pathological
@@ -1006,6 +1373,17 @@ impl Solver {
             // the pattern fingerprint — a new pattern may not be singular,
             // so the retry is allowed to run again.
             self.mc64_retry_not_adopted = false;
+            // The race is pattern-bound: a new pattern re-races.
+            self.race_result = None;
+        }
+
+        // Step 2.5: the measured ordering race (issue #203). Runs at
+        // most once per pattern, before the symbolic below, and may
+        // replace `self.ordering` and pre-populate the symbolic cache
+        // with the winner's analysis. `race_arms` is empty by default,
+        // so this is a single `len()` check on every existing path.
+        if self.race_arms.len() >= 2 && self.race_result.is_none() {
+            self.run_ordering_race(matrix);
         }
 
         // Step 3: ensure symbolic is cached.
@@ -2140,6 +2518,22 @@ impl Solver {
         let max_abs_pivot = factors.max_pivot_magnitude().unwrap_or(0.0);
         let scaling_info = factors.scaling_info.clone();
         let n_tiny = factors.n_tiny();
+        let sym = self.last_symbolic.as_ref()?;
+        let mut n_supernodes = 0usize;
+        let mut max_front_rows = 0usize;
+        for sn in &sym.supernodes {
+            n_supernodes += 1;
+            max_front_rows = max_front_rows.max(sn.nrow);
+        }
+        let ordering_info = OrderingInfo {
+            requested: self.ordering.clone(),
+            used: sym.resolved_method.clone(),
+            preprocess: sym.resolved_preprocess,
+            escalated: self.ordering_escalated,
+            pattern_reused,
+            n_supernodes,
+            max_front_rows,
+        };
         Some(FactorStats {
             nnz_a,
             nnz_l,
@@ -2149,6 +2543,7 @@ impl Solver {
             max_abs_pivot,
             pattern_reused,
             scaling_info,
+            ordering_info,
             n_tiny,
         })
     }
@@ -4586,5 +4981,141 @@ mod tests {
                 )
                 | (ScalingStrategy::Auto, ScalingStrategy::Auto)
         )
+    }
+
+    // ---- ordering race selection policy (issue #203) ----------------
+    //
+    // `pick_race_winner` is pure so the policy can be pinned without
+    // running a factorization, where timing noise would make the
+    // assertions flaky.
+
+    fn inr(p: usize, n: usize) -> Inertia {
+        Inertia {
+            positive: p,
+            negative: n,
+            zero: 0,
+        }
+    }
+
+    #[test]
+    fn race_picks_the_fastest_arm_outside_the_margin() {
+        let o = vec![
+            (Some(1000u128), Some(inr(5, 5))),
+            (Some(400), Some(inr(5, 5))),
+            (Some(900), Some(inr(5, 5))),
+        ];
+        assert_eq!(pick_race_winner(&o, 0.05), (Some(1), false));
+    }
+
+    #[test]
+    fn race_breaks_near_ties_by_caller_order() {
+        // 400 vs 410 is inside a 5% margin: the earlier-listed arm wins,
+        // so timing noise cannot flip the choice.
+        let o = vec![
+            (Some(410u128), Some(inr(5, 5))),
+            (Some(400), Some(inr(5, 5))),
+        ];
+        assert_eq!(pick_race_winner(&o, 0.05), (Some(0), false));
+        // Outside the margin the fastest wins.
+        assert_eq!(pick_race_winner(&o, 0.001), (Some(1), false));
+    }
+
+    #[test]
+    fn race_ignores_failed_arms() {
+        let o = vec![(None, None), (Some(700u128), Some(inr(5, 5))), (None, None)];
+        assert_eq!(pick_race_winner(&o, 0.05), (Some(1), false));
+    }
+
+    #[test]
+    fn race_declines_when_every_arm_failed() {
+        let o = vec![(None, None), (None, None)];
+        assert_eq!(pick_race_winner(&o, 0.05), (None, false));
+    }
+
+    #[test]
+    fn race_declines_on_inertia_disagreement() {
+        // Two orderings that disagree about the matrix is a correctness
+        // signal; a stopwatch must not settle it.
+        let o = vec![
+            (Some(100u128), Some(inr(5, 5))),
+            (Some(900), Some(inr(6, 4))),
+        ];
+        assert_eq!(pick_race_winner(&o, 0.05), (None, true));
+    }
+
+    #[test]
+    fn race_margin_is_clamped_to_non_negative() {
+        let s = Solver::new().with_race_margin(-1.0);
+        assert_eq!(s.race_margin, 0.0);
+        let s = Solver::new().with_race_margin(f64::NAN);
+        assert_eq!(s.race_margin, 0.0);
+        let s = Solver::new().with_race_margin(0.2);
+        assert_eq!(s.race_margin, 0.2);
+    }
+
+    #[test]
+    fn race_is_off_by_default() {
+        let s = Solver::new();
+        assert!(s.race_arms.is_empty());
+        assert!(s.last_race().is_none());
+    }
+
+    /// Every configuration field a builder can set must reach the race
+    /// probe. A field left behind means the race times an arm under a
+    /// configuration the real solver never uses — which is how
+    /// `mc64_cache_enabled` was caught. When a new `with_*` builder
+    /// adds a field, this test is where it must be registered.
+    #[test]
+    fn race_probe_inherits_every_configured_field() {
+        let s = Solver::new()
+            .with_parallel(false)
+            .with_fma(true)
+            .with_fma_large_fronts(4096)
+            .with_static_pivoting(true)
+            .with_cascade_break(3.5)
+            .with_auto_cascade_break(2.5)
+            .with_mc64_cache(false)
+            .with_scaling(ScalingStrategy::Identity)
+            .with_cascade_break_eps(1e-7)
+            .with_static_pivot_threshold(1e-9)
+            .with_partial_singular_warning(true)
+            .with_sqd_mode(true)
+            .with_ordering_escalation(Some(12.0))
+            .with_ordering_race(vec![OrderingMethod::Amd, OrderingMethod::Amf]);
+        let p = s.race_probe();
+
+        // Everything the `with_*` builders write into `numeric_params`.
+        // `NumericParams` is not `PartialEq`, so compare its `Debug`
+        // rendering — that covers every field without needing the
+        // derive, and a new field shows up in it automatically.
+        assert_eq!(
+            format!("{:?}", p.numeric_params),
+            format!("{:?}", s.numeric_params),
+            "numeric_params"
+        );
+        assert_eq!(p.snode_params.nemin, s.snode_params.nemin, "snode_params");
+        // Top-level configuration fields.
+        assert_eq!(p.use_parallel, s.use_parallel, "use_parallel");
+        assert_eq!(p.pivtol_max, s.pivtol_max, "pivtol_max");
+        assert_eq!(p.quality_level, s.quality_level, "quality_level");
+        assert_eq!(
+            p.ordering_escalation_growth, s.ordering_escalation_growth,
+            "ordering_escalation_growth"
+        );
+        assert_eq!(
+            p.auto_cascade_break_beta, s.auto_cascade_break_beta,
+            "auto_cascade_break_beta"
+        );
+        assert_eq!(
+            p.mc64_cache_enabled, s.mc64_cache_enabled,
+            "mc64_cache_enabled"
+        );
+
+        // And the two things a probe must NOT inherit.
+        assert!(
+            p.race_arms.is_empty(),
+            "a probe that inherited race_arms would recurse"
+        );
+        assert!(!p.profiling_enabled, "a probe must not collect profiles");
     }
 }

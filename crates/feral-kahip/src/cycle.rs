@@ -21,7 +21,92 @@ use feral_metis::MetisOptions;
 
 use crate::flow_refine::flow_refine_bisection;
 use crate::graph::UndirectedGraph;
+use crate::node_separator::flow_node_separator;
 use crate::{KahipMode, KahipOptions, KahipStats};
+use feral_metis::internals::fm_refine::refine_separator_fm;
+
+/// Multilevel **node separator**. Returns labels in
+/// `{PART_A, PART_B, PART_SEP}`.
+///
+/// The counterpart to [`multilevel_bisection`] for `node_refine`. It
+/// reuses the same coarsening and the same best-of-`n_sep_trials`
+/// initial bisection, then lifts to a node separator at the
+/// **coarsest** level with KaHIP's flow reduction and refines that
+/// separator at every uncoarsening level with FM.
+///
+/// The lift stays at the coarsest level on purpose:
+/// `flow_node_separator` is a max-flow vertex-cover reduction, and
+/// running it per level would cost far more than the refinement is
+/// worth. The FM pass down the hierarchy is what fixes the objective —
+/// see `dev/research/scotch-kahip-node-separator-2026-09-18.md`.
+pub(crate) fn multilevel_node_separator(
+    graph: &Graph,
+    opts: &KahipOptions,
+    rng: &mut SplitMix,
+    stats: &mut KahipStats,
+) -> Option<Vec<u8>> {
+    let p = tune(opts.mode);
+    let metis_opts = MetisOptions {
+        seed: opts.seed,
+        niparts: p.n_sep_trials,
+        coarsen_floor: p.coarsen_floor,
+        nd_to_amd_switch: p.amd_switch,
+        two_hop_ratio_threshold: 0.85,
+        max_imbalance: p.max_imbalance,
+        fm_passes: p.fm_pass_cap,
+        ..MetisOptions::default()
+    };
+
+    let mut counters = CoarsenCounters::default();
+    let levels = coarsen(graph, &metis_opts, rng, &mut counters);
+    stats.cycles = stats.cycles.saturating_add(1);
+
+    let coarsest: &Graph = match levels.last() {
+        Some(cg) => &cg.graph,
+        None => graph,
+    };
+    let total: i64 = coarsest.vwgt.iter().map(|&w| w as i64).sum();
+    let target = total / 2;
+
+    let mut best_labels: Vec<u8> = vec![PART_A; coarsest.nvtxs as usize];
+    let mut best_cut: i32 = i32::MAX;
+    for trial in 0..p.n_sep_trials {
+        let mut trial_labels = if trial % 2 == 0 {
+            initial_bisect_ggp(coarsest, rng, target)
+        } else {
+            initial_bisect_bfs(coarsest, rng, target)
+        };
+        let cut = refine_bisection(coarsest, &mut trial_labels, p.max_imbalance, p.fm_pass_cap);
+        if cut < best_cut {
+            best_cut = cut;
+            best_labels = trial_labels;
+        }
+    }
+
+    // Lift to a node separator at the coarsest level. A `None` here
+    // means no cross edges, i.e. the bisection is already separated;
+    // the caller falls back to the bisection path.
+    let ug = graph_to_undirected(coarsest);
+    let mut labels = flow_node_separator(&ug, &best_labels, None)?.part;
+    refine_separator_fm(coarsest, &mut labels, p.max_imbalance, p.fm_pass_cap);
+
+    for level_idx in (0..levels.len()).rev() {
+        let cg = &levels[level_idx];
+        let prev_graph: &Graph = if level_idx == 0 {
+            graph
+        } else {
+            &levels[level_idx - 1].graph
+        };
+        let prev_n = prev_graph.nvtxs as usize;
+        let mut proj: Vec<u8> = vec![PART_A; prev_n];
+        for (v, p_out) in proj.iter_mut().enumerate().take(prev_n) {
+            *p_out = labels[cg.cmap[v] as usize];
+        }
+        labels = proj;
+        refine_separator_fm(prev_graph, &mut labels, p.max_imbalance, p.fm_pass_cap);
+    }
+    Some(labels)
+}
 
 /// Multilevel edge bisection. Returns labels in `{PART_A, PART_B}`.
 ///
@@ -306,7 +391,11 @@ mod tests {
     fn all_modes_produce_valid_bisection() {
         let g = build_graph(144, &grid_triples(12, 12));
         for mode in [KahipMode::Fast, KahipMode::Eco, KahipMode::Strong] {
-            let opts = KahipOptions { seed: 7, mode };
+            let opts = KahipOptions {
+                seed: 7,
+                mode,
+                ..KahipOptions::default()
+            };
             let mut rng = SplitMix::new(opts.seed);
             let mut stats = KahipStats::default();
             let labels = multilevel_bisection(&g, &opts, &mut rng, &mut stats);

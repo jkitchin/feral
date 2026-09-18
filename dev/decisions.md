@@ -7646,3 +7646,132 @@ high standard — researched, measured, documented — and still went unused. Th
 gap was not quality but demand: none originated in a request from pounce or
 discopt. Feature work on the solver should start from a consumer-demonstrated
 need, not from an improvement that is available to make.
+
+## 2026-09-17 — feral-metis refines the node separator, not the edge cut
+
+**Decision.** `MetisOptions::node_refine` defaults to `true`:
+`feral-metis` now builds the node separator at the coarsest level and
+FM-refines *the separator* at every uncoarsening level, as METIS does
+(`libmetis/refine.c::Refine2WayNode`,
+`libmetis/sfm.c::FM_2WayNodeRefine1Sided`). The previous structure — edge-cut
+FM through uncoarsening, König min-cover conversion once at the finest level,
+one greedy positive-gain-only separator pass — remains reachable with
+`node_refine: false`.
+
+**Why.** Elimination flops (`sum_j (c_j-1)^2`, every permutation replayed
+through feral's own symbolic pipeline, MA57's bundled real METIS as the
+external oracle):
+
+| graph | before | after | real METIS |
+|---|---|---|---|
+| gaslib collocation KKT, nfe=48 | 2.10e10 | 6.74e9 | 6.42e9 |
+| nfe=96 | 6.89e10 | 2.91e10 | 1.75e10 |
+| grid3d 40^3 | 2.31e10 | 2.18e10 | 1.67e10 |
+
+2.4x-3.5x on collocation KKTs, 6-10% on grid Laplacians, never worse on any
+of the 40 matrices measured, and not slower (`MetisND` symbolic at nfe=96:
+6.31 s -> 7.30 s, inside the 1.5x guardrail).
+
+**The acceptance table in `dev/plans/metis-node-separator-fm.md` was missed
+on 3 of its 4 rows** (nfe=96, grid2d, grid3d) and the default was flipped
+anyway. Those targets were written as "match real METIS" before any code
+existed; using them as a gate would have withheld a change that is a strict
+improvement everywhere it was measured. Recording the miss here rather than
+quietly restating the targets.
+
+**What is deliberately *not* changed: `choose_adaptive`.** It still reroutes
+every would-be-`MetisND` decision to `Amf` (issues #67/#73), so `Auto` is
+bit-identical to before and still picks the 1.74x-worse ordering at nfe=96.
+That override was established on real factor+solve wall-clock across the IPM
+corpus, and `tried-and-rejected.md` (2026-05, fill-guarded race) already
+records one attempt to re-decide it on fill that was rejected because fill
+does not predict speed — nql180 has 0.98x the fill under MetisND and is still
+2.05x slower end to end. Re-opening it needs a wall-clock A/B on the corpus
+machine, not a symbolic argument.
+
+**Evidence.** `dev/research/feral-metis-node-separator-fm-2026-09-17.md`;
+`cargo test --workspace` 1199 passed / 0 failed / 25 ignored;
+`cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`
+clean.
+
+## 2026-09-17 — the ordering choice can be measured, opt-in
+
+**Decision.** `Solver::with_ordering_race(arms)` runs every listed ordering
+on the first `factor()` of each pattern and adopts the fastest. Opt-in, off
+by default, fewer than two arms is a no-op.
+
+**Why measured rather than predicted.** Three predictors were checked
+against every matrix measured on 2026-09-17 and all three mispredict:
+`nnz_L` (arms within 1.5% while wall-clock differed 3.52x), the `ncol·nrow²`
+flop proxy (1.37x predicted against 3.52x measured, and the wrong sign on a
+third matrix), `max_front` (right on 3 of 6). The dominant term on the
+motivating matrix is a scheduling effect — wide fronts serialise — that no
+symbolic quantity captures. A race needs no predictor; its worst case is
+spending the race cost on a near-tie.
+
+**Why this is not the race rejected in 2026-05.** That one guarded on fill,
+the metric since shown to be anti-correlated with speed, and was priced as
+per-solve overhead. This one measures numeric time directly and amortises
+over the iterates an IPM host runs against one pattern
+(`pounce-feral/src/lib.rs:17` reuses the symbolic across them).
+
+**Ranking is on steady state, and that is load-bearing.** The first
+implementation ranked on each arm's first `factor()` and picked `Amf` over
+`MetisND` on the issue #203 matrix — the wrong arm, because the first call
+is dominated by the analysis and `MetisND` analyses slower while factoring
+3.5x faster. Each arm now factors once to build its analysis and twice more
+with it cached, scoring on the minimum.
+
+**A tie is not settled by the stopwatch.** Arms within `race_margin` (5%)
+are ranked by the caller's listed order, and arms that *disagree on inertia*
+cause the race to decline entirely rather than pick — a disagreement is a
+correctness signal.
+
+**Cost, measured.** On the issue #203 KKT at n=224,646: first `factor()`
+2.30x an un-raced one, each subsequent ~4.6x faster, break-even at 14-24
+factorizations of the same pattern. A clear win for an IPM host, a straight
+loss for a single-shot caller — hence opt-in.
+
+**`choose_adaptive` is still untouched.** The race is orthogonal; the
+#67/#73 routing question still needs the corpus A/B
+(`dev/research/issue-203-auto-routing-2026-09-17.md`).
+
+**Evidence.** `dev/plans/ordering-race.md`; `cargo test --workspace` 1211
+passed, 0 failed, 25 ignored; fmt and clippy clean.
+
+## 2026-09-18 — the node-separator fix lands in scotch and kahip too
+
+**Decision.** `ScotchOptions::node_refine` and `KahipOptions::node_refine`
+default to `true`, mirroring `MetisOptions::node_refine` (2026-09-17). All
+three ND backends now build the node separator at the coarsest level and
+refine *the separator* down the hierarchy, instead of refining a 2-way edge
+bisection and converting once at the finest level.
+
+**Why, given a narrow audience.** Neither backend is reachable from `Auto`,
+so nobody gets this by default. It was done anyway because leaving a known,
+measured, 2-3.6x deficiency in two of three backends through a release is
+worse than the audience is small — a later user who reaches for `ScotchND`
+has no way to know it is the un-fixed one.
+
+**Results** (gaslib nfe=48, elimination flops): scotch 2.264e10 -> 1.017e10
+(2.23x), kahip 2.577e10 -> 7.184e9 (3.59x). On the pounce corpus both are
+neutral in wall-clock (scotch geomean vs `Amf` 1.060 -> 1.045, kahip 1.118 ->
+1.102) — the same "large win on collocation, inert elsewhere" profile metis
+had.
+
+**KaHIP keeps its flow lift at the coarsest level only**, rather than
+re-running it per level. `flow_node_separator` is a max-flow vertex-cover
+reduction and per-level use would cost more than the refinement is worth; the
+FM pass down the hierarchy is what fixes the objective. A side effect is that
+kahip's analysis roughly halves, since the max-flow now runs on the smallest
+graph rather than the largest.
+
+**Corroboration worth keeping.** Scotch's finest-level separator step was
+already *better* than pre-fix metis's — a two-sided FM optimising separator
+weight directly, against a König cover plus a positive-gain-only greedy pass
+— and scotch still measured slightly worse than pre-fix metis (3.36x vs
+3.11x behind). That is independent evidence for the original diagnosis: the
+final polish is not what decides this, the hierarchy is.
+
+**Evidence.** `dev/research/scotch-kahip-node-separator-2026-09-18.md`;
+`cargo test --workspace` 1212 passed, 0 failed; fmt and clippy clean.
