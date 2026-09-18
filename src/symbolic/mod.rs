@@ -104,12 +104,12 @@ pub enum OrderingMethod {
     /// then runs the chosen concrete method.
     Auto,
     /// Race-based dispatcher: runs full symbolic factorization on each
-    /// concrete candidate in {`Amd`, `MetisND`, `ScotchND`, `KahipND`}
-    /// and returns the one with the smallest `factor_nnz_estimate`.
+    /// concrete candidate in [`RACE_CANDIDATES`] and returns the one
+    /// with the smallest `factor_nnz_estimate`.
     ///
     /// Unlike [`Auto`], which guesses the winner from cheap pattern
     /// features, `AutoRace` measures the actual symbolic outcome. Cost
-    /// is ~4× a single symbolic pass (~50–500 ms total at n≈10⁵), paid
+    /// is ~3× a single symbolic pass, paid
     /// once per problem because symbolic factorization is reused across
     /// numeric refactorizations with the same sparsity pattern.
     ///
@@ -847,13 +847,31 @@ fn run_external_ordering(
     Ok((out, actual))
 }
 
-/// Concrete candidates raced by [`OrderingMethod::AutoRace`]. See the
-/// variant docstring for rationale.
-const RACE_CANDIDATES: &[OrderingMethod] = &[
+/// Concrete candidates raced by [`OrderingMethod::AutoRace`].
+///
+/// Public so callers (and tests) can see what the race covers without
+/// duplicating the list and letting the copy rot.
+///
+/// **Changed 2026-09-18** from `{Amd, MetisND, ScotchND, KahipND}`.
+/// Measured over four real KKT patterns, costing each policy as
+/// first-`factor()` plus steady state over 180 factorizations of one
+/// pattern (`dev/research/scotch-kahip-node-separator-2026-09-18.md`
+/// and the session journal):
+///
+/// * `ScotchND` and `KahipND` **never won** and are the two most
+///   expensive candidates to analyse, so the race paid for four
+///   symbolic passes to use one of two. Dropping them is most of the
+///   cost.
+/// * `Amf` was **missing** and is the fastest arm on some patterns
+///   (`clnlbeam`), so the race could not reach the right answer there
+///   at any price.
+///
+/// This keeps the race's reach while cutting its cost. The remaining
+/// candidates are the three that actually win on the corpus.
+pub const RACE_CANDIDATES: &[OrderingMethod] = &[
     OrderingMethod::Amd,
+    OrderingMethod::Amf,
     OrderingMethod::MetisND,
-    OrderingMethod::ScotchND,
-    OrderingMethod::KahipND,
 ];
 
 /// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the

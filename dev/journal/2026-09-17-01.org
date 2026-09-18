@@ -936,3 +936,67 @@ should not be made on this evidence alone.
 
 Caveat on the framing: N=180 favours the race, because setup amortises.
 At small N every race loses to plain `auto`.
+
+* 12:10 :issue203:autorace:candidates:
+Shrank `RACE_CANDIDATES` from `{Amd, MetisND, ScotchND, KahipND}` to
+`{Amd, Amf, MetisND}` and made it `pub`, so `issue127`'s
+"minimum over all raced candidates" test reads the real list instead of
+a local copy that would have silently stopped testing anything.
+
+**Total cost, N=180 factorizations of one pattern:**
+
+| matrix       |  auto | AR before | AR after | raceDM | AR gain |
+| gaslib nfe48 | 99.79 |   39.51   |  35.54   | 35.94  | 1.112x  |
+| laptime      | 15.37 |   10.71   |   9.20   |  9.16  | 1.164x  |
+| sparseqp     |  3.75 |    4.82   |   4.35   |  4.41  | 1.107x  |
+| clnlbeam     |  3.17 |    4.01   |   3.60   |  3.67  | 1.116x  |
+
+| policy    | geomean vs auto | worst |
+| AR before |      1.222      | 0.778 |
+| AR after  |    **1.374**    | 0.861 |
+| raceDM    |      1.360      | 0.850 |
+
+AutoRace improves 11-16% on all four and now **edges the numeric race**
+(geomean 1.011, 3 of 4). A one-line const change did what a whole new
+API feature did, for none of the complexity.
+
+**But the corpus disagrees, and it is measuring something different.**
+`issue203_corpus_ab` times *steady state only* — it warms the symbolic,
+then times factorizations — so setup cost is invisible to it:
+
+| autorace vs amf | geomean | worst |  wins |    p   |
+| before          |  1.116  | 0.931 | 27/38 | 0.0139 |
+| after           |  1.102  | 0.888 | 24/38 | 0.1433 |
+
+Slightly **worse**, and no longer significant. That is not a
+contradiction: dropping two candidates can only make the *pick* worse or
+equal, while it makes the *setup* much cheaper. The change trades a
+little steady-state quality for a lot of one-off cost.
+
+So the answer depends on N. At N=180 — pounce runs 50-180 iterates —
+the setup saving dominates and the change is clearly right. As N grows
+the steady-state quality dominates and the old set eventually wins. I am
+keeping the change because the target consumer sits at N≈180, and
+recording the crossover rather than pretending it is not there.
+
+`cargo test --workspace` 1212 passed, 0 failed.
+
+* 12:20 :issue203:autorace:decision-shift:
+This changes my recommendation on the AutoRace-vs-`with_ordering_race`
+question. Before the candidate fix the numeric race dominated 4/4 and
+the case for keeping it was easy. After it, `AutoRace` is at parity or
+slightly ahead at N=180, for a fraction of the machinery: no probe
+solvers, no configuration inheritance to keep in sync (the
+`with_mc64_cache` bug), no extra numeric factorizations.
+
+What `with_ordering_race` still has that `AutoRace` does not: a
+caller-chosen candidate set (including `External` permutations), a
+correctness gate that declines when arms disagree on inertia, and
+selection on measured time rather than predicted fill — which matters
+where the two disagree, as on laptime. Those are real, and they are
+advanced-use features rather than the default path.
+
+Also fixed `book/src/ordering.md`, which was wrong twice: it listed the
+old candidate set, and it claimed `Auto` picks `MetisND` for larger
+matrices when the #67/#73 catch means it never selects any
+nested-dissection method at all.

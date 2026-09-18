@@ -65,16 +65,33 @@ better orderings than greedy methods on large, mesh-like graphs.
 
 - **`Auto`** chooses a method from a few cheap pattern metrics: very
   large, very sparse graphs are sent to `Amd` (nested dissection's
-  separator search does not pay off there), and everything else follows
-  the size-based default — `Amf` for smaller matrices, `MetisND` for
-  larger ones. The crossover and the "very large, very sparse" gate are
-  tuned against the benchmark corpus and may change between releases.
-- **`AutoRace`** runs the symbolic analysis for several candidate
-  orderings (`Amd`, `MetisND`, `ScotchND`, `KahipND`) and keeps the one
-  whose factor is predicted smallest. It costs roughly the sum of those
-  symbolic passes — worth it when one factorization is reused for many
-  solves, since symbolic analysis is amortized and the numeric phase
-  dominates.
+  separator search does not pay off there), and everything else resolves
+  to `Amf`.
+
+  > Note: `Auto` does **not** currently select any nested-dissection
+  > method. The size rule would pick `MetisND` above `n = 10_000`, but a
+  > later catch (issues #67 and #73, measured on real factor-and-solve
+  > wall-clock across the corpus) reroutes every such decision to `Amf`.
+  > If you want nested dissection you must ask for it by name, or use
+  > `AutoRace` / `Solver::with_ordering_race`. The gates are tuned
+  > against the benchmark corpus and may change between releases.
+- **`AutoRace`** runs the symbolic analysis for each candidate ordering
+  in `feral::symbolic::RACE_CANDIDATES` — `Amd`, `Amf`, `MetisND` — and
+  keeps the one whose factor is predicted smallest. It costs roughly the
+  sum of those symbolic passes, worth it when one factorization is
+  reused for many solves, since symbolic analysis is amortized and the
+  numeric phase dominates.
+
+  The candidate list shrank in 0.18.0. It previously raced `ScotchND`
+  and `KahipND` instead of `Amf`; measured over four real KKT patterns
+  those two never won and were the most expensive to analyse, while
+  `Amf` — which was missing — is the fastest arm on some patterns. The
+  race now reaches more answers for less work.
+
+  Selection is by predicted fill, which is not the same as predicted
+  speed. When the two disagree it can pick a slightly slower ordering;
+  `Solver::with_ordering_race` measures the numeric factorization
+  instead, at a higher one-off cost.
 
 > Symbolic analysis (ordering + supernode detection) runs once and is
 > cached on the `Solver`; refactorizing the same pattern with new values

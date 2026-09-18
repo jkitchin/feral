@@ -88,12 +88,10 @@ fn assert_same_symbolic(
 /// and its estimate must be the minimum over all raced candidates.
 #[test]
 fn autorace_matches_winning_concrete_method() {
-    let candidates = [
-        OrderingMethod::Amd,
-        OrderingMethod::MetisND,
-        OrderingMethod::ScotchND,
-        OrderingMethod::KahipND,
-    ];
+    // Read the real list rather than duplicating it: a local copy would
+    // silently stop testing "the minimum over all raced candidates" the
+    // moment `RACE_CANDIDATES` changed, which it did on 2026-09-18.
+    let candidates = feral::symbolic::RACE_CANDIDATES;
     for &preprocess in &[OrderingPreprocess::None, OrderingPreprocess::Auto] {
         for k in [6usize, 10, 15] {
             let m = grid_laplacian(k);
