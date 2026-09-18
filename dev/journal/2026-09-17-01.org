@@ -755,3 +755,59 @@ amd report different inertias, two laptime iterates where amf and metis
 do, and laptime_0000 where metis returns `rel_res` 1.19e-6 against
 amf's 1.91e-10. That last one is worth its own look — a 4-order
 residual gap on one matrix is not a timing question.
+
+* 02:50 :issue203:scotch:kahip:same-defect:
+Asked whether scotch and kahip need the same fix. Read both drivers.
+**Both have the identical architecture to pre-fix metis.**
+
+`feral-scotch/src/node_nd.rs::multilevel_node_bisection`: coarsen, best
+of `n_sep_trials` initial bisection, then uncoarsen calling
+`halo_fm_refine` on **2-way labels `{PART_A, PART_B}`** at every level,
+and only after the loop call `compute_vertex_separator` — once, at the
+finest level.
+
+`feral-kahip/src/node_nd.rs::recurse`: `multilevel_bisection` (K5, an
+edge bisection) then `flow_node_separator` (K4) lifts it to a node
+separator — again once, at the finest level.
+
+So all three crates shared "refine the edge cut through the hierarchy,
+build the node separator at the end". Only metis has been fixed.
+
+Measured on gaslib nfe=48 (n=224,646), with metis now fixed:
+
+| backend             | nnz_L  | flops    | vs fixed metis |
+| metis (fixed)       | 17.37M | 6.737e9  |  —             |
+| scotch              | 30.30M | 2.264e10 | **3.36x worse** |
+| kahip               | 31.71M | 2.577e10 | **3.82x worse** |
+| real METIS (oracle) | 16.63M | 6.423e9  | 0.95x          |
+
+That is almost exactly where pre-fix metis sat (2.095e10, 3.11x behind),
+which is the corroboration the diagnosis wanted: **scotch's final-level
+separator step is *better* than pre-fix metis's** — a proper two-sided
+FM optimising separator weight directly, against metis's Konig cover
+plus a positive-gain-only greedy pass — and scotch still lands slightly
+*worse* (3.36x vs 3.11x). The final polish is not what decides this.
+The hierarchy is.
+
+* 03:00 :issue203:scotch:kahip:priority:
+Same bug, much smaller blast radius, and I am not fixing it now.
+
+- Neither backend is reachable from `Auto`. `choose_adaptive` routes
+  every would-be-`MetisND` to `Amf`, and issue #50 deleted the
+  very-large-and-sparse `ScotchND` route outright. Only a caller naming
+  `ScotchND` / `KahipND` explicitly is affected.
+- The consumer that prompted all of this uses `feral_ordering=metis`.
+- And the corpus A/B says even *fixed* metis loses to `Amf` in
+  aggregate (0.893 geomean over 42 matrices, p=0.0079), winning only on
+  the collocation class. So the population that would benefit is
+  "explicitly asks for ScotchND or KahipND, on a collocation-shaped
+  problem" — narrow.
+
+The fix itself should port cleanly: scotch already has `halo_fm_refine`
+operating on labels, and the change is to construct the separator at the
+coarsest level and refine *it* down the hierarchy rather than the
+bisection. kahip is further away — `flow_node_separator` is a max-flow
+lift, not an FM, so projecting and re-refining a separator per level
+needs more than a call-site move.
+
+Worth an issue, not worth a session.

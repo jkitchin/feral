@@ -111,6 +111,7 @@ fn main() {
         ("amf".to_string(), OrderingMethod::Amf),
         ("metis".to_string(), OrderingMethod::MetisND),
         ("scotch".to_string(), OrderingMethod::ScotchND),
+        ("kahip".to_string(), OrderingMethod::KahipND),
         ("auto".to_string(), OrderingMethod::Auto),
     ];
     for path in &args[1..] {
