@@ -60,9 +60,16 @@ All notable changes to FERAL will be documented in this file.
   | collocation KKT, n=449,286 | 6.89e10 | 2.91e10 | 1.75e10 |
   | 40^3 grid Laplacian | 2.31e10 | 2.18e10 | 1.67e10 |
 
-  2.4x-3.5x on long-horizon collocation / optimal-control KKTs, 6-10% on grid
-  Laplacians, never worse on any matrix measured, and inside a 1.16x symbolic
-  cost increase at n=449,286.
+  2.4x-3.5x on long-horizon collocation / optimal-control KKTs.
+- **Not a uniform win.** Timed in wall-clock afterwards (min over 3 runs of 5
+  paired samples, ranges non-overlapping), the grid Laplacians split: a 40^3
+  grid factors **12.8% faster** (331.6 ms -> 289.0 ms) while a 300x300 grid
+  factors **5.8% slower** (23.6 ms -> 25.0 ms) *despite* 10.3% less fill.
+  Fill did not predict speed there either. On every other matrix measured —
+  seven real IPM families up to n=607,500 and 37 of 38 parity matrices — the
+  permutation is bit-identical, and the one that moves (`sawpath_kkt`) grows
+  `nnz_L` by 0.08%. Symbolic analysis costs 1.16x more where the ordering
+  changes and ~11% less where it does not.
 - **`Auto` is unchanged.** `choose_adaptive` still routes every
   would-be-`MetisND` decision to `Amf` (issues #67/#73), so the default path
   produces bit-identical orderings. Callers on long-horizon collocation

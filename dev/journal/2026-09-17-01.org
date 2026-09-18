@@ -596,3 +596,42 @@ numerics, bit-identical output on every one, against a large win on
 the one class where it engages (independently confirmed end-to-end by
 the reporter at n=503k). That retires the "validated by one 1,575-row
 matrix" objection.
+
+* 00:45 :metis:grids:wallclock:correction:
+User asked whether the improvement is unambiguous. It is not, and
+timing the grids — which I had only ever measured *symbolically* while
+quoting as wins — produced a counterexample.
+
+Min over 3 independent runs of 5 paired samples each, ranges
+non-overlapping in both cases:
+
+| grid            | metis fill old -> new | factor old -> new     | verdict |
+| grid3d 40^3     | 25.17M -> 21.60M  (-14.2%) | 331.6 -> 289.0 ms | **12.8% faster** |
+| grid2d 300x300  |  3.91M ->  3.51M  (-10.3%) |  23.6 ->  25.0 ms | **5.8% slower**  |
+
+grid3d: 289025 / 297443 / 294225 against 331577 / 341092 / 351900.
+grid2d: 24976 / 25141 / 25753 against 23623 / 24121 / 23607.
+
+**So the change makes a 2-D grid 5.8% slower while giving it 10.3%
+less fill.** Fill mispredicts again, and this time against my own
+change rather than in its favour.
+
+Scope of the regression: `Auto` never routes a 90k 2-D grid to
+`MetisND` (the #67/#73 reroute sends it to `Amf`), and on that matrix
+metis is already the worse arm before the change — 0.937 against auto.
+So the affected configuration is "caller explicitly asks for MetisND on
+a 2-D grid", which was already a bad choice and is now 5.8% worse. Real,
+bounded, and worth stating rather than burying.
+
+* 00:55 :metis:claims:retract:
+I had written "never worse, and is not slower" into **CHANGELOG.md** and
+into the `node_refine` doc comment in `crates/feral-metis/src/lib.rs`,
+on the strength of symbolic fill alone. That claim is now measured
+false. Corrected both to state the split result with the numbers, and
+to say plainly that fill did not predict speed there either.
+
+Lesson, and it is the same one three times in this session: this repo's
+own `tried-and-rejected` entry says fill does not predict speed. I used
+fill to characterise my own change anyway, and shipped a claim that
+wall-clock contradicts. Symbolic evidence is fine for *finding* an
+effect and not for *claiming* one.

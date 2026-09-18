@@ -110,9 +110,17 @@ pub struct MetisOptions {
     /// oracle (`dev/research/feral-metis-node-separator-fm-2026-09-17.md`),
     /// on the six matrices in this repo large enough for nested
     /// dissection to engage, `node_refine` cuts the elimination flop
-    /// count by 2.4-3.5x on collocation KKTs and 5-9% on grid
-    /// Laplacians, is never worse, and is not slower. Set to `false`
-    /// to recover the pre-2026-09-17 edge-cut behaviour.
+    /// count by 2.4-3.5x on collocation KKTs. It is **not a uniform
+    /// win**: measured in wall-clock on grid Laplacians (min over 3
+    /// runs of 5 pairs each, non-overlapping), a 40^3 grid factors
+    /// 12.8% *faster* while a 300x300 grid factors 5.8% **slower**
+    /// despite 10.3% less fill — one more case of fill not predicting
+    /// speed. On every other matrix measured (seven real IPM families
+    /// up to n=607,500, and 37 of 38 parity matrices) the permutation
+    /// is bit-identical, so there is nothing to win or lose.
+    ///
+    /// Set to `false` to recover the pre-2026-09-17 edge-cut
+    /// behaviour.
     pub node_refine: bool,
     /// Pull near-dense columns out of the ND graph before recursive
     /// bisection and append them at the *end* of the returned
