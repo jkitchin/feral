@@ -635,3 +635,54 @@ own `tried-and-rejected` entry says fill does not predict speed. I used
 fill to characterise my own change anyway, and shipped a claim that
 wall-clock contradicts. Symbolic evidence is fine for *finding* an
 effect and not for *claiming* one.
+
+* 01:30 :issue203:policy:data:
+User declined to choose between "recommend metis and require expertise"
+and "recommend the race and pay for it" without data. Built
+`issue203_policy`: per matrix it measures first-`factor()` and
+steady-state cost for each policy, then totals them over N
+factorizations of one pattern and reports break-even against `auto`.
+
+Total seconds for N=180 factorizations of one pattern (a realistic IPM
+run), and the ratio against today's default:
+
+| family       | auto s | amf  | amd  | metis | race2 | vs auto: amd / metis / race2 |
+| gaslib nfe48 |  99.85 |100.03| 96.64| 31.45 | 35.84 | 1.03 / **3.17** / 2.79 |
+| laptime      |  15.83 | 15.53|  7.84|  8.65 |  9.32 | **2.02** / 1.83 / 1.70 |
+| poisson450   |  81.52 | 90.71| 78.89| 79.31 | 84.11 | 1.03 / 1.03 / 0.97 |
+| grid2d_300   |   4.27 |  4.38|  3.92|  4.82 |  4.78 | 1.09 / 0.89 / 0.89 |
+| optcontrol   |   3.83 |  3.59|  3.66|  5.77 |  4.18 | 1.05 / **0.66** / 0.92 |
+| sparseqp     |   3.80 |  3.81|  3.69|  6.21 |  4.42 | 1.03 / **0.61** / 0.86 |
+
+| geomean vs auto | amf 0.99 | amd 1.17 | metis 1.14 | race2 1.22 |
+| worst case      | amf 0.90 | amd 1.03 | metis 0.61 | race2 0.86 |
+
+**The headline is not the race.** `Amd` beats `Auto` on **all six**
+families — geomean 1.17x, worst case 1.03x, best on three of six, and
+2.02x on laptime. It costs nothing, needs no expertise and has no
+setup. `Auto` prefers `Amf`, and on this corpus `Amf` is the worst of
+the three fixed arms (geomean 0.99, i.e. slightly worse than `Auto`
+itself, which sometimes routes to `Amd` via the #50 branch).
+
+metis-always has the best single result (3.17x on gaslib) and the worst
+(0.61x on sparseqp) — exactly the "needs expertise" profile.
+
+race2 has the best geomean (1.22x) and bounds the downside at 0.86x. It
+is insurance: ~10-14% premium on adverse workloads for 2.79x on the
+target one. `raceDM` (`[Amd, MetisND]`) edges it on both families tried
+(gaslib 35.82 vs 35.84, laptime 9.05 vs 9.32), which follows from `Amd`
+being the better fixed arm.
+
+* 01:40 :issue203:policy:caution:
+What this does **not** license. Six families, one machine, one iterate
+per family. #67/#73 decided the current routing over 41 families. The
+`Amd > Amf` result is a strong hint and not a verdict, and it is the
+same evidence bar I refused to change routing on this morning — it
+would be inconsistent to treat it differently now because the answer is
+more convenient.
+
+It does reframe the priority list. "Fix Auto's Amf preference" is now
+ahead of "fix Auto's MetisND reroute": it is cheaper (no race, no new
+API), it never lost on this corpus, and it is worth 1.17x geomean
+against the reroute question's 1.14x — on a corpus that includes two
+members of the class the reroute is wrong about.
