@@ -76,17 +76,23 @@ better orderings than greedy methods on large, mesh-like graphs.
   > `AutoRace` / `Solver::with_ordering_race`. The gates are tuned
   > against the benchmark corpus and may change between releases.
 - **`AutoRace`** runs the symbolic analysis for each candidate ordering
-  in `feral::symbolic::RACE_CANDIDATES` — `Amd`, `Amf`, `MetisND` — and
+  in `feral::symbolic::RACE_CANDIDATES` — `Amd` and `MetisND` — and
   keeps the one whose factor is predicted smallest. It costs roughly the
   sum of those symbolic passes, worth it when one factorization is
   reused for many solves, since symbolic analysis is amortized and the
   numeric phase dominates.
 
-  The candidate list shrank in 0.18.0. It previously raced `ScotchND`
-  and `KahipND` instead of `Amf`; measured over four real KKT patterns
-  those two never won and were the most expensive to analyse, while
-  `Amf` — which was missing — is the fastest arm on some patterns. The
-  race now reaches more answers for less work.
+  The candidate list shrank in 0.18.0: it previously raced `ScotchND`
+  and `KahipND` as well, and measured over four real KKT patterns those
+  two never won and were the two most expensive to analyse.
+
+  > **Changing this list changes solver outcomes, not just timing.**
+  > Selection is by predicted fill, and least fill is not the same as
+  > most numerically sound. On a near-singular KKT the arm the race
+  > keeps decides which inertia an interior-point host sees, and so
+  > which trajectory it takes. An `Amf` arm was tried during 0.18.0
+  > development and made one collocation model converge to a point of
+  > local infeasibility; it was removed again.
 
   Selection is by predicted fill, which is not the same as predicted
   speed. When the two disagree it can pick a slightly slower ordering;

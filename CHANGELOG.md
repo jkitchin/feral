@@ -119,6 +119,24 @@ alters no behaviour. Dependents of `feral-metis` (`feral-scotch`,
 - **Default behaviour is unchanged.** With no `with_ordering_race` call the
   only new work on any path is one `len()` check.
 
+### Changed — `AutoRace` races `{Amd, MetisND}` (issues #203, #208)
+
+- **What.** `RACE_CANDIDATES` is now `{Amd, MetisND}`, down from
+  `{Amd, MetisND, ScotchND, KahipND}` in 0.17.0. `ScotchND` and `KahipND`
+  never won on the measured set and are the two most expensive candidates
+  to analyse, so the race paid for four symbolic passes to use one of two.
+- **Changing this list changes solver outcomes, not just timing.**
+  `AutoRace` ranks on predicted fill, and least fill is not the same as most
+  numerically sound: on a near-singular KKT the arm the race keeps decides
+  which inertia an interior-point host sees, and so which trajectory it
+  takes. An `Amf` arm was added during development and removed again after
+  it made a collocation model converge to a point of local infeasibility
+  where every other candidate set solved it (#208). `RACE_CANDIDATES` is
+  now `pub`, with that history in its docs and a guard-rail test.
+- **Effect.** Total cost over 180 factorizations of one pattern, geomean
+  against `Auto` over four real KKT patterns: 1.222 for the 0.17.0 set,
+  **1.401** for `{Amd, MetisND}`; worst case 0.778 → 0.869.
+
 ### Improved — `MetisND` refines the node separator, not the edge cut (issue #203)
 
 - **What changed.** `feral-metis` now builds the node separator at the

@@ -1085,3 +1085,68 @@ and worked around it by reading `resolved_method` out of a diagnostics
 binary; a consumer had no such option.
 
 `cargo test --workspace` 1224 passed, 0 failed.
+
+* 16:10 :issue208:regression:bisect:
+#208: `auto_race` exits "converged to a point of local infeasibility" on
+pounce's `laptime` at the 0.18.0 candidate, where 0.17.0 and 839b866
+both solve it. The issue names `dbdbb00` (the `RACE_CANDIDATES` change)
+as the unverified suspect. It is mine, so I verified it.
+
+**Feral-level check first, and it pointed the wrong way.** On the
+laptime *main-solve* iterates in the corpus, `metis` wins the fill
+ranking by 2x under both the old and the new candidate set (3.28M
+against 5.9-7.7M), and `AutoRace` resolves to `MetisND/None` —
+byte-identical to forced `metis`. So nothing in the main solve explains
+it, and I nearly concluded the suspect was wrong.
+
+**Reproduced it properly instead.** Repointed pounce's
+`[patch.crates-io]` at the local feral tree and ran the model. First
+pass: 357 iterations, "Converged to a point of local infeasibility" —
+the exact iteration count in the issue. My first run *looked* fine
+because pounce's second-opinion ladder re-solved with
+`feral_scaling=mc64` and recovered; the failure is only visible in the
+first pass.
+
+**Bisected by candidate set**, rebuilding pounce against each:
+
+| candidate set                              | outcome                     |
+| {Amd, MetisND, ScotchND, KahipND} (0.17.0) | Optimal, 342 it             |
+| {Amd, Amf, MetisND} (dbdbb00, shipped)     | **local infeasibility, 357**|
+| {Amd, MetisND}                             | Optimal, 349 it             |
+
+So **adding `Amf` was the regression**; dropping `ScotchND`/`KahipND`
+was safe and is what made the race cheaper.
+
+* 16:25 :issue208:fix:
+Fix: `RACE_CANDIDATES = {Amd, MetisND}`. Verified end to end — laptime
+now solves in 349 it / 70.8 s with no ladder, against 0.17.0's 396 it /
+84 s.
+
+And dropping `Amf` is **not** a cost. Total over 180 factorizations of
+one pattern, geomean against `Auto` over four real KKT patterns:
+
+| candidate set            | geomean | worst |
+| {Amd, Metis, Scotch, Kahip} | 1.222 | 0.778 |
+| {Amd, Amf, MetisND}         | 1.374 | 0.861 |
+| **{Amd, MetisND}**          | **1.401** | **0.869** |
+
+Better on all four individually (1.004x-1.039x). So my justification for
+adding `Amf` — "it is the fastest arm on clnlbeam, so the race could not
+reach the right answer there at any price" — was wrong in effect: the
+race ranks on *fill*, `Amd`'s fill is usually close to `Amf`'s, so the
+arm rarely won anyway and just cost a symbolic pass. I added it on a
+reach argument without measuring whether it changed the pick, and it
+cost correctness.
+
+**The deeper point, now documented on `RACE_CANDIDATES`.** `AutoRace`
+ranks on `factor_nnz_estimate`, and least fill is not the same as most
+numerically sound. laptime has iterates at condition 3.4e20 where
+orderings report inertias differing by ~22 (measured earlier this
+session), so the arm the race keeps decides which inertia the IPM sees
+and therefore which trajectory it takes. **Editing that list is a
+behavioural change, not a performance tweak** — the docs, the book and
+the CHANGELOG now all say so, and `race_candidates_exclude_amf_issue_208`
+pins it with the reasoning attached, since a unit test cannot reproduce
+an IPM-trajectory outcome.
+
+`cargo test --workspace` 1225 passed, 0 failed.
