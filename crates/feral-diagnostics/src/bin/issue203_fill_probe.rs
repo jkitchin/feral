@@ -113,6 +113,7 @@ fn main() {
         ("scotch".to_string(), OrderingMethod::ScotchND),
         ("kahip".to_string(), OrderingMethod::KahipND),
         ("auto".to_string(), OrderingMethod::Auto),
+        ("autorace".to_string(), OrderingMethod::AutoRace),
     ];
     for path in &args[1..] {
         let perm = match read_perm(path) {

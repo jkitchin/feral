@@ -945,27 +945,38 @@ impl SymbolicFactorization {
 /// Public so callers (and tests) can see what the race covers without
 /// duplicating the list and letting the copy rot.
 ///
-/// **Changed 2026-09-18** from `{Amd, MetisND, ScotchND, KahipND}`.
-/// Measured over four real KKT patterns, costing each policy as
-/// first-`factor()` plus steady state over 180 factorizations of one
-/// pattern (`dev/research/scotch-kahip-node-separator-2026-09-18.md`
-/// and the session journal):
+/// **Changing this list changes solver outcomes, not just timing.**
+/// `AutoRace` ranks on `factor_nnz_estimate`, and least fill is not the
+/// same as most numerically sound. On a near-singular KKT — pounce's
+/// `laptime` collocation model has iterates at condition 3.4e20, where
+/// different orderings report inertias differing by ~22 — the arm the
+/// race keeps decides which inertia an interior-point host sees, and so
+/// which trajectory it takes. Treat an edit here as a behavioural
+/// change and re-run a real solve, not just a fill comparison.
 ///
-/// * `ScotchND` and `KahipND` **never won** and are the two most
-///   expensive candidates to analyse, so the race paid for four
-///   symbolic passes to use one of two. Dropping them is most of the
-///   cost.
-/// * `Amf` was **missing** and is the fastest arm on some patterns
-///   (`clnlbeam`), so the race could not reach the right answer there
-///   at any price.
+/// **History.** Through 0.17.0 this was
+/// `{Amd, MetisND, ScotchND, KahipND}`. It briefly became
+/// `{Amd, Amf, MetisND}` before 0.18.0 shipped, and adding `Amf` made
+/// pounce's `laptime` exit "converged to a point of local
+/// infeasibility" where every other candidate set solved it
+/// (issue #208). Bisected: dropping `ScotchND` / `KahipND` was safe and
+/// is what made the race cheaper; adding `Amf` was the regression.
 ///
-/// This keeps the race's reach while cutting its cost. The remaining
-/// candidates are the three that actually win on the corpus.
-pub const RACE_CANDIDATES: &[OrderingMethod] = &[
-    OrderingMethod::Amd,
-    OrderingMethod::Amf,
-    OrderingMethod::MetisND,
-];
+/// The current pair was measured as both correct and the fastest of the
+/// three sets, over four real KKT patterns costed as first-`factor()`
+/// plus steady state across 180 factorizations of one pattern:
+///
+/// | candidate set | geomean vs `Auto` | worst |
+/// |---|---|---|
+/// | `{Amd, MetisND, ScotchND, KahipND}` | 1.222 | 0.778 |
+/// | `{Amd, Amf, MetisND}` (regressed) | 1.374 | 0.861 |
+/// | `{Amd, MetisND}` | **1.401** | **0.869** |
+///
+/// `Amf` is deliberately absent: it cost a symbolic pass, rarely won the
+/// fill ranking (`Amd`'s fill is usually close), and changed an outcome.
+/// `ScotchND` / `KahipND` are absent because they never won on the
+/// measured set and are the most expensive candidates to analyse.
+pub const RACE_CANDIDATES: &[OrderingMethod] = &[OrderingMethod::Amd, OrderingMethod::MetisND];
 
 /// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the
 /// `SymbolicFactorization` with the smallest `factor_nnz_estimate`.

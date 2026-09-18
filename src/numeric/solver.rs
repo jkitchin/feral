@@ -240,7 +240,7 @@ struct Mc64ScalingCache {
 /// across stage-1 quality escalation.
 /// One arm's outcome in an ordering race. See
 /// [`Solver::with_ordering_race`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RaceArm {
     /// The ordering this arm ran.
     pub method: OrderingMethod,
@@ -266,7 +266,7 @@ pub struct RaceArm {
 }
 
 /// What an ordering race decided, for logging by the host.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RaceResult {
     /// One entry per arm, in the order the caller listed them.
     pub arms: Vec<RaceArm>,

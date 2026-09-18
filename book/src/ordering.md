@@ -76,17 +76,23 @@ better orderings than greedy methods on large, mesh-like graphs.
   > `AutoRace` / `Solver::with_ordering_race`. The gates are tuned
   > against the benchmark corpus and may change between releases.
 - **`AutoRace`** runs the symbolic analysis for each candidate ordering
-  in `feral::symbolic::RACE_CANDIDATES` — `Amd`, `Amf`, `MetisND` — and
+  in `feral::symbolic::RACE_CANDIDATES` — `Amd` and `MetisND` — and
   keeps the one whose factor is predicted smallest. It costs roughly the
   sum of those symbolic passes, worth it when one factorization is
   reused for many solves, since symbolic analysis is amortized and the
   numeric phase dominates.
 
-  The candidate list shrank in 0.18.0. It previously raced `ScotchND`
-  and `KahipND` instead of `Amf`; measured over four real KKT patterns
-  those two never won and were the most expensive to analyse, while
-  `Amf` — which was missing — is the fastest arm on some patterns. The
-  race now reaches more answers for less work.
+  The candidate list shrank in 0.18.0: it previously raced `ScotchND`
+  and `KahipND` as well, and measured over four real KKT patterns those
+  two never won and were the two most expensive to analyse.
+
+  > **Changing this list changes solver outcomes, not just timing.**
+  > Selection is by predicted fill, and least fill is not the same as
+  > most numerically sound. On a near-singular KKT the arm the race
+  > keeps decides which inertia an interior-point host sees, and so
+  > which trajectory it takes. An `Amf` arm was tried during 0.18.0
+  > development and made one collocation model converge to a point of
+  > local infeasibility; it was removed again.
 
   Selection is by predicted fill, which is not the same as predicted
   speed. When the two disagree it can pick a slightly slower ordering;
@@ -97,6 +103,41 @@ better orderings than greedy methods on large, mesh-like graphs.
 > cached on the `Solver`; refactorizing the same pattern with new values
 > reuses it. So an expensive ordering like `KahipND` or `AutoRace` is
 > cheap in amortized terms across a Newton run or a refactorization loop.
+
+## Choosing for your workload
+
+`Auto` is tuned for the benchmark corpus as a whole. Two workload shapes do
+measurably better with an explicit choice, and the difference is large enough
+to be worth one line of configuration.
+
+**Collocation, optimal control, PDE-in-time — ask for `MetisND`.** These are
+space-by-time product patterns: a sparse spatial graph crossed with a time
+axis. Nested dissection finds the separators; the local heuristics do not.
+Measured steady-state factor time per iterate, lower is better:
+
+| model | `Amf` (what `Auto` picks) | `MetisND` |
+|---|---|---|
+| gas-network transient control, n = 224,646 | 337.6 ms | **131.4 ms** |
+| 2-D Poisson boundary control, n = 607,500 | 509.5 ms | **440.3 ms** |
+| minimum-lap-time collocation, n = 126,028 | 85.0 ms | **42.7 ms** |
+
+**Thin chains, QPs and small-front problems — leave `Auto` alone.** On the
+same measurement `MetisND` is the wrong answer by a similar margin: 21.9 ms
+against 17.5 ms on a beam-control chain, 30.8 against 20.8 on a
+discrete-time control problem, 33.1 against 23.8 on a sparse QP.
+
+There is no cheap structural test that separates the two groups — average
+degree puts members of each on both sides of the boundary — so this is a
+judgement about your problem, not something the library can infer.
+
+**If you would rather not hardcode it**, and you factor one pattern many
+times (any interior-point or Newton loop),
+[`Solver::with_ordering_race`](https://docs.rs/feral) measures instead of
+guessing: it runs each candidate once and keeps the fastest for that pattern.
+Across the ten families above it lands within 5% of the best fixed arm on 29
+of 31 matrices. It costs a few extra factorizations once per pattern, which
+breaks even after roughly 15 — free inside a solve, a loss for a one-shot
+factorization.
 
 ## References
 

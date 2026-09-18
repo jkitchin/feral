@@ -174,3 +174,39 @@ fn default_symbolic_matches_its_resolution() {
         assert_same_symbolic(&auto, &concrete, &format!("default k={k}"));
     }
 }
+
+/// Issue #208 guard-rail: `Amf` must stay out of `RACE_CANDIDATES`.
+///
+/// Adding it before 0.18.0 shipped made pounce's `laptime` collocation
+/// model exit "converged to a point of local infeasibility" where every
+/// other candidate set solved it. `AutoRace` ranks on
+/// `factor_nnz_estimate`, and least fill is not the same as most
+/// numerically sound: on that model's near-singular iterates
+/// (condition 3.4e20) the arm the race keeps decides which inertia the
+/// interior-point host sees, and so which trajectory it takes.
+///
+/// This test cannot reproduce that — it is an IPM-trajectory outcome,
+/// not a property of one factorization — so it pins the candidate list
+/// instead, with the reasoning attached. If you are here because this
+/// failed: re-run a real solve on a collocation model before changing
+/// the list, not just a fill comparison.
+#[test]
+fn race_candidates_exclude_amf_issue_208() {
+    let c = feral::symbolic::RACE_CANDIDATES;
+    assert!(
+        !c.contains(&OrderingMethod::Amf),
+        "Amf in RACE_CANDIDATES regressed pounce laptime to local \
+         infeasibility (issue #208); see the RACE_CANDIDATES docs"
+    );
+    assert!(
+        c.contains(&OrderingMethod::Amd) && c.contains(&OrderingMethod::MetisND),
+        "the race needs a local and a nested-dissection arm to be worth running"
+    );
+    assert!(
+        c.iter().all(|m| !matches!(
+            m,
+            OrderingMethod::Auto | OrderingMethod::AutoRace | OrderingMethod::External(_)
+        )),
+        "candidates must be concrete methods"
+    );
+}

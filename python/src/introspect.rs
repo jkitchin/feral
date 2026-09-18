@@ -7,7 +7,7 @@ use feral::numeric::factorize::{
     BucketStats as RustBucketStats, ProfileReport as RustProfileReport,
     PrologueBreakdown as RustPrologueBreakdown,
 };
-use feral::numeric::solver::FactorStats as RustFactorStats;
+use feral::numeric::solver::{FactorStats as RustFactorStats, OrderingInfo as RustOrderingInfo};
 use feral::scaling::{Mc64FallbackReason, ScalingInfo as RustScalingInfo};
 use feral::symbolic::{
     StagePct as RustStagePct, SymbolicProfileReport as RustSymbolicProfileReport,
@@ -30,6 +30,46 @@ fn mc64_reason_str(r: Mc64FallbackReason) -> &'static str {
 /// `kind` is one of `"applied"`, `"partial_singular"`,
 /// `"mc64_fallback_to_infnorm"`, `"not_applied"`. `n_unmatched` is set
 /// only for `partial_singular`; `reason` only for the MC64 fallback.
+/// Which ordering the adaptive routing actually chose (feral #205).
+///
+/// The counterpart to `ScalingInfo`, for `OrderingMethod::Auto`.
+/// `requested` is what the caller configured (possibly `"Auto"`);
+/// `used` is the concrete method the analysis ran and is never a
+/// sentinel. A routing change is invisible in fill, time and inertia,
+/// so it is reported on every factorization.
+#[pyclass(module = "feral._feral", frozen)]
+#[derive(Clone)]
+pub struct OrderingInfo {
+    #[pyo3(get)]
+    pub requested: String,
+    #[pyo3(get)]
+    pub used: String,
+    #[pyo3(get)]
+    pub preprocess: String,
+    #[pyo3(get)]
+    pub escalated: bool,
+    #[pyo3(get)]
+    pub pattern_reused: bool,
+    #[pyo3(get)]
+    pub n_supernodes: usize,
+    #[pyo3(get)]
+    pub max_front_rows: usize,
+}
+
+impl From<&RustOrderingInfo> for OrderingInfo {
+    fn from(o: &RustOrderingInfo) -> Self {
+        Self {
+            requested: format!("{:?}", o.requested),
+            used: format!("{:?}", o.used),
+            preprocess: format!("{:?}", o.preprocess),
+            escalated: o.escalated,
+            pattern_reused: o.pattern_reused,
+            n_supernodes: o.n_supernodes,
+            max_front_rows: o.max_front_rows,
+        }
+    }
+}
+
 #[pyclass(module = "feral._feral", frozen)]
 #[derive(Clone)]
 pub struct ScalingInfo {
@@ -99,6 +139,8 @@ pub struct FactorStats {
     #[pyo3(get)]
     pub scaling_info: ScalingInfo,
     #[pyo3(get)]
+    pub ordering_info: OrderingInfo,
+    #[pyo3(get)]
     pub n_tiny: usize,
 }
 
@@ -113,6 +155,7 @@ impl From<RustFactorStats> for FactorStats {
             max_abs_pivot: s.max_abs_pivot,
             pattern_reused: s.pattern_reused,
             scaling_info: (&s.scaling_info).into(),
+            ordering_info: (&s.ordering_info).into(),
             n_tiny: s.n_tiny,
         }
     }
