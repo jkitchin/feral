@@ -2,7 +2,26 @@
 
 All notable changes to FERAL will be documented in this file.
 
-## [Unreleased]
+## [0.18.0] - 2026-09-18
+
+### Ordering-crate versions
+
+The six fill-reducing ordering crates version independently of `feral`.
+This release moves four of them:
+
+| crate | | why |
+|---|---|---|
+| `feral-metis` | 0.2.1 → **0.3.0** | `node_refine` defaults on, changing the ordering it produces; new public `refine_separator_fm` |
+| `feral-scotch` | 0.2.1 → **0.3.0** | same, `node_refine` |
+| `feral-kahip` | 0.2.1 → **0.3.0** | same, `node_refine` |
+| `feral-ordering-core` | 0.2.1 → **0.2.2** | a `needless_late_init` clippy refactor and nothing else — semantically identical, so a patch |
+| `feral-amd`, `feral-amf` | 0.2.1 | unchanged since v0.17.0 |
+
+`feral-ordering-core` is deliberately a patch rather than 0.3.0: a minor
+bump there would break the `^0.2` requirement every sibling declares,
+forcing `feral-amd` and `feral-amf` to change and bump for a refactor that
+alters no behaviour. Dependents of `feral-metis` (`feral-scotch`,
+`feral-kahip`, `feral`) move their requirement to `^0.3`.
 
 ### Added — `FactorStats::ordering_info` names the ordering `Auto` chose (issue #205)
 
