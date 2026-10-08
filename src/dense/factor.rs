@@ -779,6 +779,14 @@ pub enum ZeroPivotAction {
     /// sign (positive or negative — never zero). Sign of `0.0` is
     /// treated as `+1.0`.
     ///
+    /// Which pivots are "tiny": at the threshold-reject sites of the
+    /// non-delaying 1×1 path (`try_reject_1x1_frontal`, `do_1x1_pivot`)
+    /// any pivot that failed the `u · col_max` test with `|d| < abs_floor`
+    /// is perturbed, not only `|d| <= zero_tol` (issue #213). A pivot
+    /// in `(zero_tol, abs_floor)` used to be accepted unperturbed, so
+    /// the L column was divided by a value smaller than the floor this
+    /// action exists to enforce.
+    ///
     /// The factor satisfies `L · D · L^T = A + Δ` exactly (within
     /// roundoff) for the L and D produced, but `Δ` is *not* localised
     /// to the perturbed diagonal entry. `L[i,k] = A[i,k] / d_new`
@@ -816,6 +824,20 @@ fn perturb_to_floor(d: f64, abs_floor: f64) -> f64 {
         -mag
     } else {
         mag
+    }
+}
+
+/// `true` when `on_zero_pivot` is `PerturbToEps { abs_floor }` and
+/// `|d| < abs_floor`. Used at the threshold-reject sites so a pivot that
+/// failed the threshold test in a non-delaying front is floored whenever
+/// it is below the bounded-Δ floor, not only when it is below `zero_tol`
+/// (issue #213: a 2.3e-16 pivot against a 1e-10 floor was accepted
+/// unperturbed, and the L column divided by it grew to 1e16).
+#[inline]
+fn below_perturb_floor(d: f64, params: &BunchKaufmanParams) -> bool {
+    match params.on_zero_pivot {
+        ZeroPivotAction::PerturbToEps { abs_floor } => d.abs() < abs_floor,
+        _ => false,
     }
 }
 
@@ -4659,7 +4681,15 @@ fn try_reject_1x1_frontal(
         //       correct sign, request iterative refinement. Matches
         //       SSIDS/MUMPS convention for degenerate LPs (e.g.
         //       DEGENLPA where MUMPS reports (20, 15, 0)).
-        if d.abs() <= params.zero_tol {
+        //
+        // Issue #213: under `PerturbToEps { abs_floor }` (cascade-break
+        // fronts) every threshold-failing pivot with `|d| < abs_floor`
+        // is floored, not only the strict zeros. Before this, a pivot in
+        // `(zero_tol, abs_floor)` — e.g. 2.3e-16 against a 1e-10 floor —
+        // skipped the perturbation and reached case (b), so the L column
+        // was divided by it and |L| grew to 1e16 (wrong inertia, backward
+        // error 8e3, `n_tiny == 0`).
+        if d.abs() <= params.zero_tol || below_perturb_floor(d, params) {
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
                     // Issue #54: SSIDS-aligned. The strict-zero pivot is
@@ -5282,8 +5312,9 @@ fn do_1x1_pivot(
         // Duff-Reid/MUMPS threshold). Three-way split mirrors
         // try_reject_1x1_frontal: strict-zero (zero L), rank-deficiency
         // band (count zero but keep factor live), or small-but-real
-        // (count by sign).
-        if d.abs() <= params.zero_tol {
+        // (count by sign). Issue #213: under `PerturbToEps` a sub-floor
+        // pivot is perturbed, not accepted as case (b).
+        if d.abs() <= params.zero_tol || below_perturb_floor(d, params) {
             // Truly-zero path: zero L, route by on_zero_pivot.
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
@@ -6527,5 +6558,122 @@ mod packed_schur_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod issue_213_perturb_band_tests {
+    use super::*;
+    use crate::dense::matrix::SymmetricMatrix;
+
+    /// 3×3 front, one fully-summed column, lower triangle column-major:
+    ///
+    /// ```text
+    ///   [ d    .    .  ]
+    ///   [ 1.0  2.0  .  ]
+    ///   [ 0.5  0.0  3.0]
+    /// ```
+    fn front(d: f64) -> SymmetricMatrix {
+        let n = 3;
+        let mut data = vec![0.0f64; n * n];
+        data[0] = d;
+        data[1] = 1.0;
+        data[2] = 0.5;
+        data[n + 1] = 2.0;
+        data[2 * n + 2] = 3.0;
+        SymmetricMatrix { n, data }
+    }
+
+    fn cb_params(on_zero_pivot: ZeroPivotAction) -> BunchKaufmanParams {
+        BunchKaufmanParams {
+            on_zero_pivot,
+            pivot_threshold: 1e-8,
+            ..Default::default()
+        }
+    }
+
+    /// Issue #213: in a non-delaying front (`may_delay = false`, the
+    /// cascade-break configuration) under `PerturbToEps { 1e-10 }`, a
+    /// pivot `d = ±3e-16` fails the threshold test (`3e-16 <= 1e-8 · 1`)
+    /// but sits above `zero_tol = EPS ≈ 2.2e-16`. It used to bypass the
+    /// perturbation and be accepted as case (b): `L = (1/d, 0.5/d) ≈
+    /// 3.3e15`, `n_tiny = 0`. It must now be floored to `±1e-10`.
+    ///
+    /// Oracle (hand calculation): `d' = ±1e-10`, `L21 = (1, 0.5) / d' =
+    /// ±(1e10, 5e9)`, Schur complement `A22 − a21 a21ᵀ / d'` =
+    /// `[[2 ∓ 1e10, ∓5e9], [∓5e9, 3 ∓ 2.5e9]]`.
+    #[test]
+    fn sub_floor_pivot_above_zero_tol_is_perturbed() {
+        for &(d, sign) in &[(3e-16f64, 1.0f64), (-3e-16f64, -1.0f64)] {
+            let params = cb_params(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
+            assert!(
+                d.abs() > params.zero_tol,
+                "test pivot must sit above zero_tol"
+            );
+            for (name, ff) in [
+                ("scalar", factor_frontal(&front(d), 1, false, &params)),
+                (
+                    "blocked",
+                    factor_frontal_blocked(&front(d), 1, false, &params),
+                ),
+            ] {
+                let ff = ff.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert_eq!(ff.nelim, 1, "{name}");
+                assert_eq!(ff.n_tiny, 1, "{name}: perturbed pivot must count as tiny");
+                assert!(ff.needs_refinement, "{name}");
+                assert_eq!(ff.d_diag[0], sign * 1e-10, "{name}: pivot floored");
+                if sign > 0.0 {
+                    assert_eq!((ff.inertia.positive, ff.inertia.negative), (1, 0), "{name}");
+                } else {
+                    assert_eq!((ff.inertia.positive, ff.inertia.negative), (0, 1), "{name}");
+                }
+                assert_eq!(ff.inertia.zero, 0, "{name}");
+                let l = &ff.l;
+                let rel = |x: f64, y: f64| ((x - y) / y).abs();
+                assert!(rel(l[1], sign * 1e10) < 1e-14, "{name}: L10 = {}", l[1]);
+                assert!(rel(l[2], sign * 5e9) < 1e-14, "{name}: L20 = {}", l[2]);
+                let c = &ff.contrib;
+                let cd = ff.contrib_dim;
+                assert_eq!(cd, 2, "{name}");
+                assert!(
+                    rel(c[0], 2.0 - sign * 1e10) < 1e-14,
+                    "{name}: S00 = {}",
+                    c[0]
+                );
+                assert!(rel(c[1], -sign * 5e9) < 1e-14, "{name}: S10 = {}", c[1]);
+                assert!(
+                    rel(c[cd + 1], 3.0 - sign * 2.5e9) < 1e-14,
+                    "{name}: S11 = {}",
+                    c[cd + 1]
+                );
+            }
+        }
+    }
+
+    /// Pivots at or above the floor keep the old case-(b) treatment: a
+    /// threshold-failing `d = 1e-9 > 1e-10` is accepted unperturbed with
+    /// `n_tiny = 0`. Guards against widening the perturbation band past
+    /// the documented `|d| < abs_floor`.
+    #[test]
+    fn pivot_above_floor_is_not_perturbed() {
+        let params = cb_params(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
+        let ff =
+            factor_frontal(&front(1e-9), 1, false, &params).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(ff.n_tiny, 0);
+        assert_eq!(ff.d_diag[0], 1e-9);
+        assert_eq!(ff.inertia.positive, 1);
+    }
+
+    /// `ForceAccept` (the root / non-cascade-break policy) is unchanged:
+    /// a threshold-failing `d = 3e-16 > zero_tol` is accepted by sign
+    /// with its value intact and no perturbation counted.
+    #[test]
+    fn force_accept_band_unchanged() {
+        let params = cb_params(ZeroPivotAction::ForceAccept);
+        let ff =
+            factor_frontal(&front(3e-16), 1, false, &params).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(ff.n_tiny, 0);
+        assert_eq!(ff.d_diag[0], 3e-16);
+        assert_eq!(ff.inertia.positive, 1);
     }
 }
