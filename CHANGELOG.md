@@ -2,6 +2,35 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+### Fixed — cascade-break no longer accepts sub-floor pivots unperturbed (issue #213)
+
+- **What.** In a cascade-break supernode (delay budget exceeded, so
+  `may_delay = false`), the bounded-Δ floor `cascade_break_eps · ‖D·A·D‖∞`
+  was applied only to pivots with `|d| <= zero_tol` (≈ 2.2e-16). A
+  threshold-failing pivot in `(zero_tol, floor)` — e.g. 2.3e-16 against a
+  1e-10 floor — skipped the perturbation and was accepted as is. The L
+  column was then divided by it. On the 151k KKT in the issue this gave
+  |L| up to 9.6e15, two wrong pivot signs, an unrefined backward error of
+  7.8e3, and `n_tiny == 0`. Every threshold-failing pivot below the floor
+  is now perturbed to `sign(d) · floor` and counted in `n_tiny`, as the
+  `cascade_break_eps` contract always stated. Root supernodes and
+  `ForceAccept` are unchanged.
+- **Not verified on the reporter's matrix.** It has to be rebuilt with
+  pounce and was not available to this change. The fix was tested on
+  hand-computed fronts only.
+
+### Added — `FactorStats::n_cascade_break_nodes` (issue #213)
+
+- Counts the non-root supernodes factored under the cascade-break trigger
+  (`SparseFactors::n_cascade_break_nodes()`, `NodeFactors::cascade_break`,
+  and `FactorStats.n_cascade_break_nodes` in Python). When it is nonzero,
+  the `|L| <= 1/u` threshold-pivoting bound does not cover the whole
+  factor, so a caller reading inertia can refactor (different ordering,
+  larger `nemin`) instead of trusting it. `FactorStats` and `NodeFactors`
+  each gain a public field.
+
 ## [0.18.0] - 2026-09-18
 
 ### Ordering-crate versions

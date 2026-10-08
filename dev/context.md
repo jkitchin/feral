@@ -1,131 +1,141 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-09-18T13:36:43Z
+Generated: 2026-10-08T10:28:30Z
 
 ## Latest Session
-File: dev/sessions/2026-09-18-01.md
+File: dev/sessions/2026-10-08-01.md
 ```
-# Session 2026-09-18-01
-
-Continuation of `2026-09-17-01.md` (same unbroken session; that checkpoint
-covers the diagnosis and the `feral-metis` fix and stops there). Read this one
-for everything after.
+# Session 2026-10-08-01
 
 ## Benchmark note (read first)
 
-**`cargo run --bin bench --release` still has not been run against the new
-corpus, and no factor-ratio-vs-MUMPS number is quoted anywhere in this
-session.** That gate needs `*.mumps.json` oracle sidecars, which need a MUMPS
-5.8.2 build that does not exist on this machine (`ref/` is empty). It was
-judged unnecessary for what this branch changes — the ordering permutation is
-bit-identical on 7 of 9 corpus families, so a ratio-vs-MUMPS comparison would
-be measuring unchanged code — but that is a judgement, not a measurement, and
-the next session should say so out loud rather than let it pass silently.
-
-What *was* measured: steady-state numeric factor time, paired, on 135 real KKT
-matrices across 9 families, gated on cross-arm inertia agreement and a refined
-residual. Those numbers are throughout.
+`cargo run --bin bench --release` ran on the in-repo fixtures only
+(`data/benchmark-config.toml` not found, 8 matrices, no oracle timings).
+KKT inertia match 2/2 vs MUMPS, residual pass 2/2, no dense or sparse
+failures. No timing comparison against the previous session is possible
+from this output. The change touches only the threshold-reject branch, which
+the fixtures do not reach.
 
 ## Goal
 
-Finish issue #203: fix the remaining backends, get a real corpus, decide
-whether the work is release-ready.
+Fix issue #213: cascade-break supernodes force-accept threshold-failing
+pivots (2.3e-16), so |L| grows to 1e16, inertia is off by 2, the backward
+error is 8e3, and nothing shows up in `FactorStats`.
 
 ## Accomplished
 
-### `ScotchND` and `KahipND` had the identical defect, now fixed
+- **Root cause.** `ZeroPivotAction::PerturbToEps` (the CB policy, floor
+  `1e-10·‖DAD‖`) only fired under `|d| <= zero_tol = EPS`. The issue's
+  pivots of 2.35e-16 sit just above EPS and fell into case (b), accepted
+  unperturbed. The same structure exists in `try_reject_1x1_frontal` and
+  `do_1x1_pivot`.
+- **Fix.** `below_perturb_floor` widens the gate at both sites: any
+  threshold-failing pivot below `abs_floor` is floored and counted in
+  `n_tiny`. Root and `ForceAccept` behaviour is unchanged.
+- **Diagnostics.** `NodeFactors::cascade_break`,
+  `SparseFactors::n_cascade_break_nodes()`,
+  `FactorStats::n_cascade_break_nodes`, and the Python binding.
+- **Tests.** `issue_213_perturb_band_tests` (3 tests, hand oracle; the key
+  test fails with the gate disabled) and
+  `issue_55_delay_budget::cascade_break_nodes_are_counted`.
+  `cargo test`: 952 passed, 0 failed. fmt and clippy are clean.
 
-All three ND backends refined a 2-way edge bisection through uncoarsening and
-built the node separator once at the finest level. Elimination flops on the
-collocation KKT at n=224,646:
+## Benchmark Results
+```
+8 matrices benchmarked
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+```
 
-| backend | before | after | gain |
-|---|---|---|---|
-| `MetisND` | 2.095e10 | 6.737e9 | 3.11x *(2026-09-17)* |
-| `ScotchND` | 2.264e10 | 1.017e10 | 2.23x |
-| `KahipND` | 2.577e10 | 7.184e9 | 3.59x |
-
-KaHIP's symbolic analysis roughly halves (5,263 -> 2,274 ms) because its
-max-flow lift now runs on the coarsest graph. Corpus wall-clock is neutral for
-both (scotch 1.060 -> 1.045, kahip 1.118 -> 1.102 against `Amf`).
-
-### A real corpus, without AMPL
-
-`scripts/build-pounce-corpus.sh`. pounce's `generate_nl.py` builds six large
-NLPs in Pyomo and writes `.nl` directly, so the AMPL Community Edition licence
-is not needed. 135 matrices, 9 families, covering the shapes the argument
-turns on: `bratu` (#67's `bratu3d`), `poisson` (#73's `cont5_1_l`),
+## Decisions Made
+- `PerturbToEps` floors every threshold-failing pivot below `abs_floor`
+  (`dev/decisions.md` 2026-10-08).
 ```
 
 ## Git Status
 ```
-9bcecac test(bench): laptime anomaly resolved — no blocker, and two of my results corrected
-f25cf3d feat(scotch,kahip): refine the node separator through uncoarsening
-58d8cf4 test(bench): scotch and kahip have the same defect metis had, measured
-3e358af test(bench): corpus A/B settles both routing questions — and retracts my Amd claim
-605536f test(bench): policy break-even data — and Amd beats Auto on all six families
+32c936b Merge pull request #210 from jkitchin/fix/issue-208-autorace
+d3b7c9a api: export the new 0.18.0 types, add PartialEq, expose OrderingInfo to Python
+807ef57 docs(ordering): workload guidance for #209, measured per family
+7cd4e95 fix(autorace): drop Amf from RACE_CANDIDATES — it regressed pounce laptime (#208)
+d699886 Merge pull request #207 from jkitchin/release/0.18.0
 ```
 
 ## Test Status
 ```
-test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test numeric::solve::tests::issue175_wide_thin_tree_is_not_scheduled_in_parallel ... ok
-test numeric::solve::tests::issue175_overhead_term_is_scheduling_only ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 452 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.65s
+test result: ok. 453 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.42s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; no session checkpoint with bench)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-10-08-01.md)
+
+8 matrices benchmarked
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
 ```
 
 ## Recent Decisions
-bisection and converting once at the finest level.
+abs_floor }` now perturbs any pivot that failed `|d| <= u·col_max` and has
+`|d| < abs_floor`. Previously the floor applied only under `|d| <= zero_tol`,
+so a pivot in `(zero_tol, abs_floor)` fell through to case (b) and was
+accepted unperturbed. Only cascade-break fronts run with `PerturbToEps` by
+default, so root fronts and `ForceAccept` callers do not change.
 
-**Why, given a narrow audience.** Neither backend is reachable from `Auto`,
-so nobody gets this by default. It was done anyway because leaving a known,
-measured, 2-3.6x deficiency in two of three backends through a release is
-worse than the audience is small — a later user who reaches for `ScotchND`
-has no way to know it is the un-fixed one.
+**Why.** The `cascade_break_eps` doc already promised `sign(d) · max(|d|,
+floor)` for tiny pivots. Under the default `cascade_break_eps = 1e-10` the
+band `(2.2e-16, 1e-10·‖A‖)` broke that promise silently. Issue #213 is a
+151,392² KKT where 2.3e-16 pivots in 7 CB nodes produced |L| ≈ 9.6e15,
+inertia off by +2, unrefined backward error 7.8e3, and `n_tiny = 0`.
+Flooring at 1e-10 bounds |L| by `col_max / 1e-10` instead of `col_max /
+2e-16`, and makes every such event visible in `n_tiny`.
 
-**Results** (gaslib nfe=48, elimination flops): scotch 2.264e10 -> 1.017e10
-(2.23x), kahip 2.577e10 -> 7.184e9 (3.59x). On the pounce corpus both are
-neutral in wall-clock (scotch geomean vs `Amf` 1.060 -> 1.045, kahip 1.118 ->
-1.102) — the same "large win on collocation, inert elsewhere" profile metis
-had.
+**What it does not do.** CB fronts still do not obey the threshold-pivoting
+bound `|L| <= 1/u` (1e8 at u = 1e-8). A pivot in `[abs_floor, u·col_max]`
+is still case-(b) accepted, with growth up to `col_max / abs_floor`. A
+structural fix (swap-to-boundary delayed pivoting,
+`dev/research/kkt-cascade-amplifier-2026-05-21.md`) would remove CB's
+inertia risk entirely and remains open. To make the remaining risk visible
+now, `FactorStats::n_cascade_break_nodes` reports how many fronts ran
+without delaying.
 
-**KaHIP keeps its flow lift at the coarsest level only**, rather than
-re-running it per level. `flow_node_separator` is a max-flow vertex-cover
-reduction and per-level use would cost more than the refinement is worth; the
-FM pass down the hierarchy is what fixes the objective. A side effect is that
-kahip's analysis roughly halves, since the max-flow now runs on the smallest
-graph rather than the largest.
-
-**Corroboration worth keeping.** Scotch's finest-level separator step was
-already *better* than pre-fix metis's — a two-sided FM optimising separator
-weight directly, against a König cover plus a positive-gain-only greedy pass
-— and scotch still measured slightly worse than pre-fix metis (3.36x vs
-3.11x behind). That is independent evidence for the original diagnosis: the
-final polish is not what decides this, the hierarchy is.
-
-**Evidence.** `dev/research/scotch-kahip-node-separator-2026-09-18.md`;
-`cargo test --workspace` 1212 passed, 0 failed; fmt and clippy clean.
+**Evidence.** New `issue_213_perturb_band_tests` in `src/dense/factor.rs`
+check d → ±1e-10, L, and the Schur complement against a hand calculation on
+both the scalar and blocked kernels. The ±3e-16 test fails with the gate
+disabled. `tests/issue_55_delay_budget.rs::cascade_break_nodes_are_counted`
+shows 3 CB nodes on a budget-zeroed fixture and 0 in budget. `cargo test`:
+952 passed, 0 failed. Not run on the reporter's matrix, which was not
+available.
 
 ## Recent Tried-and-Rejected
 
@@ -220,8 +230,8 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -237,14 +247,6 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -255,28 +257,38 @@ tests/issue177_parallel_entry_point_core.rs
 tests/issue178_refine_cap.rs
 tests/issue178_solve_into.rs
 tests/issue203_ordering_race.rs
+tests/issue204_work_estimate.rs
+tests/issue205_ordering_info.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
+tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
-tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_scaling.rs
-tests/lu_sparse_rhs.rs
 tests/lu_sparse.rs
+tests/lu_sparse_rhs.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -289,13 +301,13 @@ tests/n4_mc64_retry_latch.rs
 tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
-tests/pounce_interface.rs
 tests/pounce710_refine_cap_nrhs2.rs
+tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
 tests/refined_solve_core_stability.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs

@@ -7775,3 +7775,38 @@ final polish is not what decides this, the hierarchy is.
 
 **Evidence.** `dev/research/scotch-kahip-node-separator-2026-09-18.md`;
 `cargo test --workspace` 1212 passed, 0 failed; fmt and clippy clean.
+
+## 2026-10-08 — `PerturbToEps` floors every threshold-failing pivot below `abs_floor`, not only `|d| <= zero_tol` (issue #213)
+
+**Decision.** At the non-delaying 1×1 threshold-reject sites
+(`try_reject_1x1_frontal`, `do_1x1_pivot`), `ZeroPivotAction::PerturbToEps {
+abs_floor }` now perturbs any pivot that failed `|d| <= u·col_max` and has
+`|d| < abs_floor`. Previously the floor applied only under `|d| <= zero_tol`,
+so a pivot in `(zero_tol, abs_floor)` fell through to case (b) and was
+accepted unperturbed. Only cascade-break fronts run with `PerturbToEps` by
+default, so root fronts and `ForceAccept` callers do not change.
+
+**Why.** The `cascade_break_eps` doc already promised `sign(d) · max(|d|,
+floor)` for tiny pivots. Under the default `cascade_break_eps = 1e-10` the
+band `(2.2e-16, 1e-10·‖A‖)` broke that promise silently. Issue #213 is a
+151,392² KKT where 2.3e-16 pivots in 7 CB nodes produced |L| ≈ 9.6e15,
+inertia off by +2, unrefined backward error 7.8e3, and `n_tiny = 0`.
+Flooring at 1e-10 bounds |L| by `col_max / 1e-10` instead of `col_max /
+2e-16`, and makes every such event visible in `n_tiny`.
+
+**What it does not do.** CB fronts still do not obey the threshold-pivoting
+bound `|L| <= 1/u` (1e8 at u = 1e-8). A pivot in `[abs_floor, u·col_max]`
+is still case-(b) accepted, with growth up to `col_max / abs_floor`. A
+structural fix (swap-to-boundary delayed pivoting,
+`dev/research/kkt-cascade-amplifier-2026-05-21.md`) would remove CB's
+inertia risk entirely and remains open. To make the remaining risk visible
+now, `FactorStats::n_cascade_break_nodes` reports how many fronts ran
+without delaying.
+
+**Evidence.** New `issue_213_perturb_band_tests` in `src/dense/factor.rs`
+check d → ±1e-10, L, and the Schur complement against a hand calculation on
+both the scalar and blocked kernels. The ±3e-16 test fails with the gate
+disabled. `tests/issue_55_delay_budget.rs::cascade_break_nodes_are_counted`
+shows 3 CB nodes on a budget-zeroed fixture and 0 in budget. `cargo test`:
+952 passed, 0 failed. Not run on the reporter's matrix, which was not
+available.
