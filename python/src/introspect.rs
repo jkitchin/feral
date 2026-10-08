@@ -142,6 +142,8 @@ pub struct FactorStats {
     pub ordering_info: OrderingInfo,
     #[pyo3(get)]
     pub n_tiny: usize,
+    #[pyo3(get)]
+    pub n_cascade_break_nodes: usize,
 }
 
 impl From<RustFactorStats> for FactorStats {
@@ -157,6 +159,7 @@ impl From<RustFactorStats> for FactorStats {
             scaling_info: (&s.scaling_info).into(),
             ordering_info: (&s.ordering_info).into(),
             n_tiny: s.n_tiny,
+            n_cascade_break_nodes: s.n_cascade_break_nodes,
         }
     }
 }
@@ -165,8 +168,8 @@ impl From<RustFactorStats> for FactorStats {
 impl FactorStats {
     fn __repr__(&self) -> String {
         format!(
-            "FactorStats(nnz_a={}, nnz_l={}, fill_ratio={:.3}, n_tiny={})",
-            self.nnz_a, self.nnz_l, self.fill_ratio, self.n_tiny
+            "FactorStats(nnz_a={}, nnz_l={}, fill_ratio={:.3}, n_tiny={}, n_cascade_break_nodes={})",
+            self.nnz_a, self.nnz_l, self.fill_ratio, self.n_tiny, self.n_cascade_break_nodes
         )
     }
 }

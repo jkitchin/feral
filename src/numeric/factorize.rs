@@ -1306,6 +1306,21 @@ impl SparseFactors {
             .sum()
     }
 
+    /// Number of non-root supernodes factored under the cascade-break
+    /// trigger (`may_delay = false` because the node's delay budget was
+    /// exceeded). Nonzero means some threshold-failing pivots were
+    /// perturbed (counted in [`n_tiny`](Self::n_tiny)) or accepted in
+    /// place instead of being delayed, so the factor is not covered by
+    /// the threshold-pivoting growth bound `|L| <= 1/u`. A caller that
+    /// reads inertia should treat it as less reliable when this is
+    /// nonzero (issue #213).
+    pub fn n_cascade_break_nodes(&self) -> usize {
+        self.node_factors
+            .iter()
+            .filter(|nf| nf.cascade_break)
+            .count()
+    }
+
     /// Single pass over the D blocks returning `(min|λ|, max|λ|)`.
     /// Shared by [`min_pivot_magnitude`](Self::min_pivot_magnitude) and
     /// [`max_pivot_magnitude`](Self::max_pivot_magnitude). 2×2 detection
@@ -1390,6 +1405,11 @@ pub struct NodeFactors {
     pub frontal_factors: FrontalFactors,
     /// Inertia of this node's eliminated pivots.
     pub inertia: Inertia,
+    /// `true` iff the cascade-break trigger fired at this node: it was
+    /// factored with `may_delay = false` despite not being a root, so
+    /// threshold-failing pivots were perturbed or accepted in place
+    /// instead of being delayed to the parent (issue #213).
+    pub cascade_break: bool,
 }
 
 /// Caller-owned scratch pool for sparse numeric factorization.
@@ -1704,6 +1724,7 @@ pub fn dense_fast_factor_with_workspace(
         row_indices,
         frontal_factors: ff,
         inertia: inertia.clone(),
+        cascade_break: false,
     };
 
     Ok((
@@ -2431,6 +2452,7 @@ fn factor_one_supernode(
                 negative: 0,
                 zero: 0,
             },
+            cascade_break: false,
         });
     }
 
@@ -2739,6 +2761,7 @@ fn factor_one_supernode(
         row_indices,
         frontal_factors: ff,
         inertia: node_inertia,
+        cascade_break,
     })
 }
 
@@ -2817,6 +2840,7 @@ fn factor_one_small_leaf(
                 negative: 0,
                 zero: 0,
             },
+            cascade_break: false,
         });
     }
 
@@ -2897,6 +2921,7 @@ fn factor_one_small_leaf(
         row_indices,
         frontal_factors: ff,
         inertia: node_inertia,
+        cascade_break: false,
     })
 }
 

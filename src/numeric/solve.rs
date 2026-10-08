@@ -2965,6 +2965,7 @@ mod tests {
                 zero_tol_2x2: 0.0,
             },
             inertia: Inertia::new(0, 0, 0),
+            cascade_break: false,
         }
     }
 

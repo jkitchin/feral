@@ -130,3 +130,73 @@ fn budget_exceeded_cb_fallback_does_not_error() {
         Err(e) => panic!("unexpected error: {e:?}"),
     }
 }
+
+/// Issue #213: a factor that went through the cascade-break branch
+/// must say so. `n_cascade_break_nodes()` counts the non-root nodes
+/// factored with `may_delay = false` because their delay budget was
+/// exceeded; a factor with room to delay reports 0.
+///
+/// Fixture: binary-tree graphs with tiny diagonals (`1e-14`) and unit
+/// off-diagonals, `nemin = 1` so the assembly tree has several levels.
+/// With `pivot_threshold = 1e-8` every 1×1 pivot fails the threshold, so
+/// a leaf delays into its non-root parent, whose zeroed budget then
+/// trips the cascade-break trigger.
+#[test]
+fn cascade_break_nodes_are_counted() {
+    // Three disjoint copies of a 7-node binary tree — leaves {0,1} -> 2,
+    // {3,4} -> 5, {2,5} -> 6 — so n = 21 clears the n <= 16 dense
+    // fast path and the factor runs multifrontal.
+    let copies = 3usize;
+    let n = 7 * copies;
+    let edges = [(2, 0), (2, 1), (5, 3), (5, 4), (6, 2), (6, 5)];
+    let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+    for c in 0..copies {
+        let o = 7 * c;
+        for j in 0..7 {
+            rows.push(o + j);
+            cols.push(o + j);
+            vals.push(1e-14);
+        }
+        for &(i, j) in &edges {
+            rows.push(o + i);
+            cols.push(o + j);
+            vals.push(1.0);
+        }
+    }
+    let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("matrix must build");
+    let sn = SupernodeParams {
+        nemin: 1,
+        ..SupernodeParams::default()
+    };
+    let mut sym = symbolic_factorize(&m, &sn).expect("symbolic ok");
+    assert!(sym.supernodes.len() > 2, "fixture needs a multi-level tree");
+    let base = NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: 1e-8,
+            ..BunchKaufmanParams::default()
+        },
+        ..NumericParams::default()
+    };
+
+    let (clean, _) = factorize_multifrontal(&m, &sym, &base).expect("factor ok");
+    assert_eq!(
+        clean.n_cascade_break_nodes(),
+        0,
+        "in-budget factor engaged CB"
+    );
+
+    for s in sym.supernodes.iter_mut() {
+        s.delayed_capacity = 0;
+    }
+    let params = NumericParams {
+        cascade_break_ratio: Some(0.5),
+        cascade_break_eps: Some(1e-10),
+        ..base
+    };
+    let (f, _) = factorize_multifrontal(&m, &sym, &params).expect("CB absorbs the overflow");
+    assert!(
+        f.n_cascade_break_nodes() > 0,
+        "budget overflow under CB must be reported by n_cascade_break_nodes"
+    );
+}
