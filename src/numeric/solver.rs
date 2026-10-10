@@ -1315,6 +1315,19 @@ impl Solver {
     }
 
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
+        self.factor_impl(matrix, check_inertia, None)
+    }
+
+    /// Body of [`Solver::factor`]. `reentry_pattern_reused` is `Some` only
+    /// on the ordering-escalation re-entry, which keeps the pattern
+    /// fingerprint (so the escalation latch survives) and would otherwise
+    /// report its outer call's fresh analysis as a reuse (issue #215).
+    fn factor_impl(
+        &mut self,
+        matrix: &CscMatrix,
+        check_inertia: Option<Inertia>,
+        reentry_pattern_reused: Option<bool>,
+    ) -> FactorStatus {
         // Step 0: reject non-finite input. A single +∞ / -∞ / NaN
         // entry sends the BK pivot-search loop into pathological
         // behavior (every threshold test fails against the inf
@@ -1369,7 +1382,9 @@ impl Solver {
             && self.last_pattern.as_ref().is_some_and(|(cp, ri)| {
                 cp.as_slice() == matrix.col_ptr && ri.as_slice() == matrix.row_idx
             });
-        let pattern_reused = cache_valid;
+        // The reported reuse signal; the escalation re-entry passes its
+        // outer call's value through.
+        let pattern_reused = reentry_pattern_reused.unwrap_or(cache_valid);
 
         // Step 2: invalidate cache on pattern change.
         if !cache_valid {
@@ -1621,7 +1636,7 @@ impl Solver {
         // share the same fingerprint contract, so a `true` value here
         // implies the workspace's cached permute structure is still
         // valid for this matrix.
-        effective_params.pattern_reused_hint = pattern_reused;
+        effective_params.pattern_reused_hint = cache_valid;
 
         // Step 4: numeric factor via the pooled workspace; map errors.
         // Both drivers share the same signature and a bit-exact
@@ -1942,7 +1957,7 @@ impl Solver {
                         {
                             self.ordering_escalated = true;
                             self.last_symbolic = None;
-                            return self.factor(matrix, check_inertia);
+                            return self.factor_impl(matrix, check_inertia, Some(pattern_reused));
                         }
                     }
                 }

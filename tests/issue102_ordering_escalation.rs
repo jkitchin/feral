@@ -34,6 +34,15 @@ fn cont5_late_kkt_escalates_ordering_to_stable_pivots() {
         auto.factor(&csc, None),
         feral::FactorStatus::Success
     ));
+    // Issue #215: the escalation re-runs factor() internally on the same
+    // pattern; the first factor on a fresh Solver must still report a
+    // fresh (not reused) analysis.
+    let st = auto.last_factor_stats().expect("stats");
+    assert!(st.ordering_info.escalated, "fixture must escalate");
+    assert!(
+        !st.pattern_reused,
+        "first factor on a fresh Solver reported pattern_reused = true"
+    );
     let min_piv = auto.min_pivot_magnitude().expect("min pivot");
     let max_piv = auto.max_pivot_magnitude().expect("max pivot");
     let growth = max_piv / min_piv;
