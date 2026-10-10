@@ -1,0 +1,77 @@
+#+TITLE: Session 2026-10-10-01 — issue #215 (wrong inertia on reused analysis)
+
+* 10:14 :issue-215:reproduction:cascade-break:warm-state:
+Rebuilt column25_integral iterates 0-4 (kkt_solve_001) with pounce 43cbb488
+patched to feral fdef8b1 (path patch, scratch worktree). Matrices match the
+issue: min|d| per iterate is identical (7.15e-10, 2.55e-9, 2.90e-9, 3.04e-9,
+3.11e-9). Pounce's own dumps report num_neg_evals_actual = 75596 at every
+iterate, and its log shows no regularization through iteration 5. So the
+pounce failure did NOT reproduce on this machine (Apple M4 Pro, 14 cores).
+
+Replay probe (examples/seq215_probe.rs, not committed), it004 results:
+| mode | neg | cb | n_tiny | tfa | min abs d |
+| warm (seq 0-4) | 75596 | 1 | 8 | 13 | 3.11e-9 |
+| warm, mc64 cache off | 75596 | 1 | 8 | 13 | 3.11e-9 |
+| warm, invalidate_symbolic_cache before it004 | 75596 | 4 | 62 | 46 | 1.72e-9 |
+| fresh | 75596 | 4 | 62 | 46 | 1.72e-9 |
+| issue, warm | 75597 | 6 | 111 | 156 | 3.11e-9 |
+| issue, fresh | 75596 | 2 | 37 | 20 | 1.72e-9 |
+FERAL_PARALLEL=0 gives the same numbers. No FERAL_* env vars set.
+
+Conclusions: (1) the cached symbolic is the state that matters; resetting it
+alone reproduces the fresh factor exactly. The MC64 scaling cache never hits
+(mc64hits 0). (2) The symbolic is value-dependent: OrderingInfo shows
+used=Amf, preprocess=LdltCompress, escalated=true for both, but 25024 vs
+24684 supernodes. (3) Same matrices, different CB counts than the issue's
+run, so something in the reporter's environment differs (platform, env, or
+build). The +1 is a sign flip at a round-off margin, so it is plausible it
+only shows on some platforms. (4) pattern_reused reads true on a fresh
+Solver's first factor; escalated=true suggests the escalation pass re-enters
+factor(). Separate stats bug, to confirm.
+
+* 11:40 :issue-215:cascade-break:warm-state:design:
+Implemented auto re-analysis on cascade-break (user-chosen fix). Gate:
+pattern_reused && resolved_preprocess == LdltCompress && n_cascade_break_nodes
+> 0 && miss latch < 2. Action: re-run symbolic with the Step-3 config
+(LdltCompress forced if escalated), refactor with the same effective params,
+keep the new factor iff (cb, tfa+tiny) is lexicographically smaller; the
+incumbent keeps exact ties. Counters auto_reanalyse_count / _adopted_count,
+opt-out with_auto_reanalyse_on_cb(false).
+
+Unit fixture: paired_blocks(n, shift), tridiagonal sum of [[eps,1],[1,eps]]
+blocks with delta=1e-3 coupling; shift moves the pairing by one. Inertia
+(n/2, n/2, 0) by Weyl (perturbation eps+2delta < 1). Stale analysis simulated
+by zeroing delayed_capacity of the cached symbolic after a shift=false factor.
+Without re-analysis the shift=true refactor engages CB (asserted); with it,
+one re-analysis is adopted, CB 0, inertia exact.
+
+A natural small reproducer did not exist: a 600x600 KKT with the matching
+flipped between factors gave cb 0 both times (examples/cbprobe215.rs, not
+committed), so the capacity-zeroing simulation is used instead.
+
+Stats bug confirmed and fixed: the escalation re-entry keeps the
+fingerprint, so pattern_reused read true on a fresh Solver's first factor.
+factor() -> factor_impl(.., reentry_pattern_reused); escalation passes the
+outer value. pattern_reused_hint (permute cache) still uses cache_valid;
+that cache validates perm_inv, so a changed analysis cannot reuse a stale
+permutation. Regression assertion added to tests/issue102_ordering_escalation
+(cont5 fixture, SKIP when absent); mutation check: reverting the fix makes it
+fail with "first factor on a fresh Solver reported pattern_reused = true".
+
+* 11:55 :issue-215:benchmark:cascade-break:
+seq215 replay (column25 it000-it004, this machine), default re-analysis on:
+| iter | time | neg | cb | reanalyse adopted/run |
+| 0 | 12.1s | 75596 | 1 | 0/0 |
+| 1 | 6.39s | 75596 | 1 | 0/1 |
+| 2 | 6.64s | 75596 | 1 | 0/2 |
+| 3 | 0.26s | 75596 | 1 | 0/2 (latched) |
+| 4 | 0.24s | 75596 | 1 | 0/2 |
+With NOREANALYSE warm iterates are 0.33-0.38s. A re-analysis costs ~6s
+(LdltCompress symbolic incl. MC64 + one factor), ~20 warm factors. Here the
+reused analysis is better (cb 1 vs fresh cb 4), so both re-analyses are
+declined and the latch stops after two.
+
+Changed the miss rule after this run: first version counted "winner still has
+CB" as a miss. In the reporter's run fresh also has CB (cb 2 vs warm 6), so
+adopted improvements would have counted as misses and latched before it004.
+Now a miss = not adopted; adoption resets the streak.

@@ -1,147 +1,149 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-10-10T01:18:02Z
+Generated: 2026-10-10T14:54:29Z
 
 ## Latest Session
-File: dev/sessions/2026-10-09-01.md
+File: dev/sessions/2026-10-10-01.md
 ```
-# Session 2026-10-09-01
+# Session 2026-10-10-01
 
-## Benchmark note (read first)
+## Benchmark note (read first): factor-ratio p90 is worse, and the cause is machine load
 
-`cargo run --bin bench --release` ran on the full local KKT corpus
-(156 929 matrices, 2339 parse-skipped) for both this branch and
-`origin/main` (32c936b, detached worktree), same machine, back to back.
-Correctness lines are identical: dense inertia 154429/154482, residual
-154149/154482; sparse inertia vs MUMPS 154531/154590, residual
-154258/154590; 48 both-path inertia mismatches; 78 sparse-only, 33
-dense-only failures. Factor-ratio p90 vs MUMPS:
+`cargo run --bin bench --release` on the full local KKT corpus gave the same
+correctness lines as 2026-10-09-01: dense inertia 154429/154482, residual
+154149/154482; sparse inertia vs MUMPS 154531/154590, residual 154258/154590;
+48 both-path inertia mismatches; 78 sparse-only and 33 dense-only failures.
+The factor-ratio p90 vs MUMPS is **worse**:
 
-| bucket | main | this branch |
+| bucket | 2026-10-09-01 | this session |
 |---|---|---|
-| dense small (<200) | 1.61 | 1.61 |
-| dense medium (<500) | 2.00 | 2.00 |
-| sparse small (<200) | 1.58 | 1.59 |
-| sparse medium (<500) | 1.58 | 1.59 |
+| dense small (<200) | 1.61 | 1.75 |
+| dense medium (<500) | 2.00 | 2.18 |
+| sparse small (<200) | 1.59 | 1.91 |
+| sparse medium (<500) | 1.59 | 1.91 |
 
-The sparse p90 is 0.01 worse on this branch. Two repeat runs of this branch
-moved the dense p90 by 0.03–0.04 (1.58/1.96 vs 1.61/2.00), so 0.01 is
-within run-to-run noise; it is reported, not explained away.
+The bench calls `symbolic_factorize` + `factorize_multifrontal` directly
+(src/bin/bench.rs:1924-1942) and never constructs a `Solver`, so this
+session's change (all inside `Solver::factor`) cannot reach it. During the
+run the load average was 80 on 14 cores: two unrelated python jobs at ~83%
+CPU each, plus mds_stores and WindowServer. I attribute the shift to load
+but did not confirm it with a quiet-machine rerun. The next session should
+rerun the bench on an idle machine before comparing.
 
 ## Goal
 
-Review PR #214 (issue #213: cascade-break floor) and fix what the review
-found: the `n_cascade_break_nodes` overclaim, the missing case-(b) counter,
-the semver label, the unverified records, and the undocumented
-`zero_tol`-only gates.
+Issue #215: pounce#999 `column25_integral` still stalls after #214. A
+`Solver` reused across IPM iterates 0-4 reported neg 75597 at iterate 4 on
+the reporter's machine; a fresh `Solver` reports 75596. The user chose the
+fix "auto re-analyse on cascade-break".
 
 ## Accomplished
 
-- **Review evidence.** Full `cargo test --release` with the corpus passes.
-  kkt-mittelmann (613/618 readable) main vs PR: inertia identical, 0 oracle
-  mismatches, no unrefined residual worse by more than 3×. The floor fired on
-  marine_1600_0011/0013/0016 and qcqp1500-1nc_0000 (n_tiny 0 → 2263).
-- **Reporter's matrix, rebuilt (integral, default settings).** max|L|
-  2.98e16 → 6.63e12; min|d| 5.9e-16 → 1.03e-9; entries |L|>1e8 3982 →
-  2275; unrefined resid 4.69 → 0.234; refined 3.5e-13 both; inertia
-  (75796, 75596, 0) both, which is the expected count, so the issue's +2 did not
-  reproduce. n_tiny 24, ncb 2, new tfa counter 16. Derivative form: no
-  CB, unchanged (resid 1.9e-5, max|L| 9.17e7, tfa 0).
-- **nemin sweep (unrefined resid main → PR):** 4: 179 → 16.1; 8: 3.38 →
-  3.77; 16: 4.69 → 0.234; 32: 3.6e-5 both; 64: 8.6e-4 both.
-- **`n_threshold_fail_accepts`** added at the 1×1 reject sites (scalar and
-  blocked), on `FrontalFactors`, `SparseFactors`, `FactorStats`, Python.
-- **Docs:** `n_cascade_break_nodes`/`cascade_break` now say the bound *may*
-  fail (marine_1600_0009: ncb 1, n_tiny 0, resid 4e-16). `PerturbToEps`
-  explains why the `count_1x1_inertia` and trailing-pivot paths keep the
-  `zero_tol` gate (col_max = 0).
+- **Reproduction (journal §10:14).** Rebuilt the iterates with pounce
+  43cbb488 patched to this feral. The matrices match the issue (same min|d|
+  per iterate). The +1 does **not** reproduce on this machine: warm and
+  fresh both give 75596. The cached symbolic is the state that matters.
+  `invalidate_symbolic_cache()` before it004 reproduces the fresh factor
+  exactly; the MC64 cache never hits. The analysis is value-dependent under
+  escalation-forced `LdltCompress` (25024 vs 24684 supernodes on the same
+  pattern). CB counts here (warm 1, fresh 4) differ from the reporter's
+  (6, 2).
+- **Auto re-analysis (c8048bf).** Gate: reused analysis, `resolved_preprocess
+  == LdltCompress`, `n_cascade_break_nodes > 0`, miss latch < 2. Re-run the
+  symbolic, refactor, and keep the new factor if `(cb, tfa + tiny)` is
+  lexicographically smaller. Opt-out:
+  `with_auto_reanalyse_on_cb(false)`. Counters: `auto_reanalyse_count`,
+  `auto_reanalyse_adopted_count`.
+- **Stats fix (e7f4675).** The escalation re-entry reported
 ```
 
 ## Git Status
 ```
+c8048bf feat(solver): re-analyse when a reused LdltCompress analysis hits cascade-break
+e7f4675 fix(solver): report pattern_reused=false on an escalated first factor
+fdef8b1 Merge pull request #214 from jkitchin/claude/modest-dirac-fzfm5b
+9632f30 docs: session checkpoint 2026-10-09-01 (PR #214 review fixes)
 a90e63d docs(changelog): mark #213 struct fields breaking, record verified numbers
-33b8847 feat(numeric): count threshold-failing pivots kept unchanged; fix CB docs (#213)
-1959ecc docs(dev): session 2026-10-08-01 checkpoint, journal, decision, changelog for #213
-949aac7 feat(stats): report cascade-break supernodes in FactorStats (#213)
-6e683df fix(cascade-break): floor threshold-failing pivots below abs_floor, not only below zero_tol (#213)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
-test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
+test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 456 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.76s
+test result: ok. 461 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 12.10s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-10-09-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-10-10-01.md)
 
 KKT summary: 156929 matrices (154482 dense-eligible n <= 1000, 108 skipped n > 1000, 2339 parse-skipped)
   Inertia match: 154429/154482 (100.0%)
   Residual pass: 154149/154482 (99.8%)
+  Parse-skipped: 2339
   Worst residual: 2.46e-1 (POLAK6_0021)
-Sparse solver: 154590/156929 total
-  Inertia match vs MUMPS: 154531/154590 (100.0%)
-  Residual pass: 154258/154590 (99.8%)
-  Worst residual: 2.94e-4 (ERRINBAR_0824)
+
+
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-small-frontal (<200)     147982     1.61     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.75     <= 2.0     PASS
+medium (<500)            152145     2.18     <= 3.0     PASS
+
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-small-frontal (<200)     153455     1.59     <= 2.0     PASS
-medium (<500)            153560     1.59     <= 3.0     PASS
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.91     <= 2.0     PASS
+medium (<500)            153560     1.91     <= 3.0     PASS
 
 ```
 
 ## Recent Decisions
-**Decision.** Count 1×1 pivots that fail `|d| <= max(u·col_max,
-null_pivot_tol)` but are kept live and unchanged because the front cannot
-delay (case a' under `ForceAccept`, case b), in
-`FrontalFactors::n_threshold_fail_accepts`, summed to
-`FactorStats::n_threshold_fail_accepts`. Zeroed or floored pivots stay in
-`n_tiny`; the two counters do not overlap. `n_cascade_break_nodes` is
-documented as "the `|L| <= 1/u` bound *may* not cover the factor", not
-"does not". The zero-off-diagonal path (`count_1x1_inertia`) and the
-trailing pivot of dense `factor` keep the `|d| <= zero_tol` gate, and the
-reason is now in the `PerturbToEps` doc: `col_max = 0`, so these pivots
-cannot fail the threshold and no L column is divided by them. The new
-public fields on exhaustive structs make the next release 0.19.0.
+after 2 consecutive non-adopted re-analyses (reset on adoption and on
+pattern change). On by default, opt out with
+`with_auto_reanalyse_on_cb(false)`. The user chose this option over
+exact-inertia swap-to-boundary (multi-session) and a caller-driven
+re-analysis.
 
-**Why.** The 2026-10-08 entry left case-(b) pivots in `[abs_floor,
-u·col_max]` accepted but invisible. The CB flag comes from the delay
-budget, so it fires on clean fronts too: marine_1600_0009 has 1 CB node,
-`n_tiny` 0, and a backward error of 4e-16. A caller needs the per-pivot
-count to tell the two apart. On the rebuilt issue #213 matrix the counter
-reads 16 after the fix, so these pivots are present there.
+**Why.** The `LdltCompress` analysis is value-dependent (its MC64
+matching picks the 2×2 pairs), so on a drifting IPM sequence it goes
+stale. On pounce#999 `column25_integral`, iterate 4 on a reused `Solver`
+gave neg 75597 (true 75596) on the reporter's machine. Here the reused and
+fresh analyses differ (25024 vs 24684 supernodes), and resetting the
+symbolic cache alone reproduces the fresh factor exactly. Neither analysis
+is better on every machine: here warm has cb 1 and fresh cb 4, while the
+reporter saw warm cb 6 and fresh cb 2. So the rule compares the two factors
+instead of always preferring one. A miss is "not adopted", not "CB remains",
+because in the reporter's run the fresh analysis also has CB. Counting that
+as a miss would have latched before iterate 4.
 
-**Verification of the 2026-10-08 change** (that entry said it was not run
-on the reporter's matrix): see `dev/sessions/2026-10-09-01.md`. In short,
-max|L| went from 2.98e16 to 6.63e12 and the unrefined backward error from
-4.69 to 0.234. Inertia was correct before and after. kkt-mittelmann
-inertia is unchanged.
+**Limits.** This is a mitigation. A factor that still engages
+cascade-break can have a wrong inertia. A pattern-only analysis
+(preprocess `None`) is never re-analysed because it would come back
+identical. Cost per re-analysis is one `LdltCompress` symbolic (including
+MC64) plus one factor, about 6 s on column25 (n=151392) against a 0.33 s
+warm factor.
 
-**Evidence.** `cascade_break_pivots_show_in_counters`: legacy CB gives
-(tfa, n_tiny) = (8, 0) and bounded CB gives (0, 8).
-`threshold_fail_accepts_counts_only_unchanged_accepts` has 5 kernel cases.
-`cargo test --release` with the corpus: 956 passed, 0 failed.
+**Evidence.** Unit tests `issue_215_*` in `solver.rs` (Weyl-inertia
+fixture, with a stale analysis simulated by zeroing `delayed_capacity`).
+seq215 replay in `dev/journal/2026-10-10-01.org` §11:55. The
+`pattern_reused` re-entry fix is pinned in
+`tests/issue102_ordering_escalation.rs`, which fails with the fix reverted.
 
 ## Recent Tried-and-Rejected
 
