@@ -1,5 +1,7 @@
 # Plan: issue #215, auto re-analyse on cascade-break
 
+Status: REJECTED, code removed. See `tried-and-rejected.md` 2026-10-10.
+
 Research: `dev/research/issue-215-reused-analysis-cb.md`.
 
 1. Tests first, in the `solver.rs` unit tests (they need private access to

@@ -34,40 +34,6 @@ use crate::symbolic::{
 };
 use std::sync::{Arc, Mutex};
 
-/// Issue #215: consecutive non-adopted cascade-break re-analyses after
-/// which the re-analysis stops firing on a pattern.
-const AUTO_REANALYSE_MAX_MISSES: usize = 2;
-
-/// Issue #215: how much cascade-break a factor needed, for choosing
-/// between the reused analysis's factor and the re-analysed one.
-#[derive(Clone, Copy, Debug)]
-struct CbScore {
-    /// Fronts that ran under cascade-break.
-    cb: usize,
-    /// Threshold-failing pivots accepted (floored) under cascade-break.
-    tfa: usize,
-    /// Tiny pivots perturbed to the floor.
-    tiny: usize,
-}
-
-impl CbScore {
-    fn of(f: &SparseFactors) -> Self {
-        CbScore {
-            cb: f.n_cascade_break_nodes(),
-            tfa: f.n_threshold_fail_accepts(),
-            tiny: f.n_tiny(),
-        }
-    }
-}
-
-/// Issue #215: does the re-analysed factor (`new`) beat the incumbent
-/// (`old`)? Fewer cascade-break nodes wins; on a tie, fewer floored
-/// pivots (`tfa + tiny`) wins; an exact tie keeps the incumbent, which
-/// avoids replacing the cached analysis for no gain.
-fn reanalysis_wins(old: &CbScore, new: &CbScore) -> bool {
-    (new.cb, new.tfa + new.tiny) < (old.cb, old.tfa + old.tiny)
-}
-
 /// Snapshot of per-`factor()` diagnostic state for issue #52
 /// (opt-in instrumentation). Phase A surface — every field is read
 /// off state `Solver` already maintains, so producing this snapshot
@@ -553,21 +519,6 @@ pub struct Solver {
     /// next iter. With latching we pay the CB cost permanently after
     /// the first observed cascade rather than oscillating.
     auto_arm_latched: bool,
-    /// Issue #215: re-analyse when a factor on a *reused*, value-dependent
-    /// (`LdltCompress`) analysis engages cascade-break. Default `true`.
-    /// See [`Solver::with_auto_reanalyse_on_cb`].
-    auto_reanalyse_on_cb: bool,
-    /// Issue #215: consecutive re-analyses on this pattern that were not
-    /// adopted (the reused analysis's factor was as good or better). At
-    /// [`AUTO_REANALYSE_MAX_MISSES`] the re-analysis stops firing on this
-    /// pattern, so a matrix whose reused analysis is already the better
-    /// one does not pay an extra symbolic + numeric factor on every
-    /// iterate. Reset on pattern change and on every adoption.
-    reanalyse_miss_streak: usize,
-    /// Issue #215: re-analyses run (lifetime of this `Solver`).
-    auto_reanalyse_count: usize,
-    /// Issue #215: re-analyses whose factor was adopted.
-    auto_reanalyse_adopted_count: usize,
     /// Track B2 master switch for the value-bounded MC64 scaling
     /// cache. Default `true`; flip off with `with_mc64_cache(false)`
     /// for tests/probes that need every factor to recompute scaling
@@ -676,10 +627,6 @@ impl Solver {
             auto_cascade_break_beta: None,
             prev_max_n_delayed_in: None,
             auto_arm_latched: false,
-            auto_reanalyse_on_cb: true,
-            reanalyse_miss_streak: 0,
-            auto_reanalyse_count: 0,
-            auto_reanalyse_adopted_count: 0,
             mc64_cache_enabled: true,
             mc64_scaling_cache: None,
             mc64_cache_hit_count: 0,
@@ -916,36 +863,6 @@ impl Solver {
     /// without user intervention.
     pub fn with_auto_cascade_break(mut self, beta: f64) -> Self {
         self.auto_cascade_break_beta = Some(beta);
-        self
-    }
-
-    /// Issue #215: toggle the automatic re-analysis on cascade-break.
-    /// Default `true`.
-    ///
-    /// With `LdltCompress` preprocessing (explicit, or forced by ordering
-    /// escalation) the symbolic analysis depends on the matrix *values*:
-    /// its MC64 matching picks the 2×2 pairs. An IPM driver reuses that
-    /// analysis across iterates whose values drift, and on a late
-    /// iterate the stale pairing can overflow the analysis's delay
-    /// budget, sending fronts through cascade-break, which floors
-    /// threshold-failing pivots and can flip a round-off-sized sign
-    /// (pounce#999 `column25_integral`).
-    ///
-    /// When on, a `factor()` that reused such an analysis and engaged
-    /// cascade-break re-runs the analysis on the current values,
-    /// refactors, and keeps the factor with fewer cascade-break nodes
-    /// (ties: fewer threshold-fail accepts + tiny pivots; the original
-    /// factor keeps exact ties). An adopted analysis replaces the cached
-    /// one. This lowers the risk of a wrong inertia; it does not make
-    /// cascade-break exact. After two consecutive re-analyses that are
-    /// not adopted, re-analysis stops for the pattern (it resumes on a
-    /// new pattern). Each re-analysis costs one symbolic analysis plus
-    /// one numeric factor, and the `LdltCompress` analysis includes an
-    /// MC64 matching, so it can cost many warm factors.
-    /// Counters: [`Solver::auto_reanalyse_count`],
-    /// [`Solver::auto_reanalyse_adopted_count`].
-    pub fn with_auto_reanalyse_on_cb(mut self, on: bool) -> Self {
-        self.auto_reanalyse_on_cb = on;
         self
     }
 
@@ -1480,8 +1397,6 @@ impl Solver {
             // means the prior n_delayed observation no longer applies.
             self.prev_max_n_delayed_in = None;
             self.auto_arm_latched = false;
-            // Issue #215: the re-analysis miss latch is pattern-bound.
-            self.reanalyse_miss_streak = 0;
             // Issue #102 follow-up: a new pattern re-tries the fill-preferred
             // (fast) ordering; escalation is re-decided from its pivot growth.
             self.ordering_escalated = false;
@@ -2046,12 +1961,6 @@ impl Solver {
                         }
                     }
                 }
-                // Issue #215: cascade-break on a reused value-dependent
-                // analysis → re-analyse on the current values and keep the
-                // better factor. See `with_auto_reanalyse_on_cb`.
-                let inertia = self
-                    .maybe_reanalyse_on_cb(matrix, pattern_reused, &effective_params, pool.as_ref())
-                    .unwrap_or(inertia);
                 if partial_singular {
                     FactorStatus::Singular
                 } else if let Some(expected) = check_inertia {
@@ -2085,100 +1994,6 @@ impl Solver {
                 FactorStatus::FatalError(e)
             }
         }
-    }
-
-    /// Issue #215: the auto re-analysis behind
-    /// [`Solver::with_auto_reanalyse_on_cb`]. Runs after a successful
-    /// factor has been stored. Returns the new inertia when the
-    /// re-analysed factor was adopted, `None` otherwise (including every
-    /// case where the gate does not fire). On adoption the new analysis,
-    /// factor and inertia replace the stored ones.
-    fn maybe_reanalyse_on_cb(
-        &mut self,
-        matrix: &CscMatrix,
-        pattern_reused: bool,
-        effective_params: &NumericParams,
-        pool: Option<&Arc<rayon::ThreadPool>>,
-    ) -> Option<Inertia> {
-        if !self.auto_reanalyse_on_cb
-            || !pattern_reused
-            || self.reanalyse_miss_streak >= AUTO_REANALYSE_MAX_MISSES
-        {
-            return None;
-        }
-        let old = CbScore::of(self.last_factors.as_ref()?);
-        if old.cb == 0 {
-            return None;
-        }
-        // A pattern-only analysis would come back identical; only the
-        // value-dependent `LdltCompress` matching can change.
-        if self.last_symbolic.as_ref()?.resolved_preprocess
-            != crate::symbolic::OrderingPreprocess::LdltCompress
-        {
-            return None;
-        }
-        self.auto_reanalyse_count += 1;
-
-        // Same analysis configuration as the Step 3 symbolic in `factor`.
-        let mut sp = self.snode_params.clone();
-        if self.ordering_escalated {
-            sp.preprocess = crate::symbolic::OrderingPreprocess::LdltCompress;
-        }
-        let Ok(mut new_sym) = symbolic_factorize_with_method(matrix, &sp, self.ordering.clone())
-        else {
-            self.reanalyse_miss_streak += 1;
-            return None;
-        };
-        self.symbolic_call_count += 1;
-
-        // The scaling does not depend on the analysis, so the effective
-        // params (including any MC64 cache hit) carry over unchanged.
-        // Same #154 pool-or-sequential dispatch as the main factor.
-        let result = if let (true, Some(p)) = (self.use_parallel, pool) {
-            p.install(|| {
-                factorize_multifrontal_parallel_with_workspace(
-                    matrix,
-                    &new_sym,
-                    effective_params,
-                    &mut self.workspace,
-                )
-            })
-        } else {
-            factorize_multifrontal_with_workspace(
-                matrix,
-                &new_sym,
-                effective_params,
-                &mut self.workspace,
-            )
-        };
-        // Same one-shot MC64 invariant as the main path (issue #38).
-        new_sym.cached_mc64 = None;
-        let Ok((factors, inertia)) = result else {
-            self.reanalyse_miss_streak += 1;
-            return None;
-        };
-
-        // A miss is a re-analysis that did not beat the reused analysis.
-        // An adopted one resets the streak even if CB remains: the
-        // re-analysis is still paying for itself.
-        if !reanalysis_wins(&old, &CbScore::of(&factors)) {
-            self.reanalyse_miss_streak += 1;
-            return None;
-        }
-        self.reanalyse_miss_streak = 0;
-        self.auto_reanalyse_adopted_count += 1;
-        self.prev_max_n_delayed_in = Some(
-            factors
-                .node_factors
-                .iter()
-                .map(|nf| nf.n_delayed_in)
-                .max()
-                .unwrap_or(0),
-        );
-        self.last_symbolic = Some(new_sym);
-        self.last_factors = Some(factors);
-        self.last_inertia = Some(inertia.clone());
-        Some(inertia)
     }
 
     /// Drop any stored numeric factor (and its inertia), so the next
@@ -2650,19 +2465,6 @@ impl Solver {
         self.symbolic_call_count
     }
 
-    /// Issue #215: number of cascade-break re-analyses run by this
-    /// `Solver`. See [`Solver::with_auto_reanalyse_on_cb`].
-    pub fn auto_reanalyse_count(&self) -> usize {
-        self.auto_reanalyse_count
-    }
-
-    /// Issue #215: number of cascade-break re-analyses whose factor was
-    /// adopted (it had fewer cascade-break nodes, or the same count and
-    /// fewer floored pivots).
-    pub fn auto_reanalyse_adopted_count(&self) -> usize {
-        self.auto_reanalyse_adopted_count
-    }
-
     /// `ScalingInfo` from the most recent successful `factor()`.
     /// Returns `None` if no factor is stored. Use this to detect
     /// `Mc64FallbackToInfnorm` (issue #24) or `PartialSingular`
@@ -2858,173 +2660,6 @@ impl Default for Solver {
 mod tests {
     use super::*;
     use crate::dense::factor::BunchKaufmanParams;
-
-    /// Issue #215 fixture: an `n×n` (n even) tridiagonal matrix that is a
-    /// direct sum of strong 2×2 blocks `[[ε, 1], [1, ε]]` plus weak `δ`
-    /// couplings between neighbouring blocks. `shift = false` puts the
-    /// blocks on pairs (0,1), (2,3), ...; `shift = true` puts them on
-    /// (1,2), (3,4), ... with diagonal singletons +1 at 0 and -1 at n-1.
-    /// The pattern is the same either way, so a `Solver` reuses its
-    /// analysis between the two.
-    ///
-    /// Inertia oracle (Weyl's inequality): the unperturbed block matrix
-    /// has eigenvalues ±1 from each block plus the singletons ±1, i.e.
-    /// exactly n/2 positive and n/2 negative. ε and the δ couplings
-    /// perturb by at most ε + 2δ < 1, so no eigenvalue crosses zero and
-    /// the inertia is exactly (n/2, n/2, 0) for both variants.
-    fn paired_blocks(n: usize, shift: bool) -> CscMatrix {
-        const EPS: f64 = 1e-14;
-        const DELTA: f64 = 1e-3;
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        let mut vals = Vec::new();
-        for j in 0..n {
-            let d = if shift && j == 0 {
-                1.0
-            } else if shift && j == n - 1 {
-                -1.0
-            } else {
-                EPS
-            };
-            rows.push(j);
-            cols.push(j);
-            vals.push(d);
-            if j + 1 < n {
-                // Strong when (j, j+1) is a block pair.
-                let strong = if shift { j % 2 == 1 } else { j % 2 == 0 };
-                rows.push(j + 1);
-                cols.push(j);
-                vals.push(if strong { 1.0 } else { DELTA });
-            }
-        }
-        CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("valid CSC")
-    }
-
-    fn ldlt_compress_solver() -> Solver {
-        let np = NumericParams {
-            scaling: ScalingStrategy::Identity,
-            ..NumericParams::default()
-        };
-        let sn = SupernodeParams {
-            preprocess: crate::symbolic::OrderingPreprocess::LdltCompress,
-            ..SupernodeParams::default()
-        };
-        Solver::with_params(np, sn)
-    }
-
-    /// Simulate a stale analysis: factor `shift = false`, then zero the
-    /// cached analysis's delay capacity so any delay on the refactor must
-    /// go through cascade-break.
-    fn stale_solver(n: usize, auto_reanalyse: bool) -> Solver {
-        let mut s = ldlt_compress_solver().with_auto_reanalyse_on_cb(auto_reanalyse);
-        let a = paired_blocks(n, false);
-        assert!(matches!(s.factor(&a, None), FactorStatus::Success));
-        let sym = s.last_symbolic.as_mut().expect("symbolic cached");
-        for sn in sym.supernodes.iter_mut() {
-            sn.delayed_capacity = 0;
-        }
-        s
-    }
-
-    #[test]
-    fn issue_215_stale_analysis_engages_cb_without_reanalysis() {
-        let n = 200;
-        let mut s = stale_solver(n, false);
-        let b = paired_blocks(n, true);
-        assert!(matches!(s.factor(&b, None), FactorStatus::Success));
-        let st = s.last_factor_stats().expect("stats");
-        assert!(st.pattern_reused);
-        assert!(
-            st.n_cascade_break_nodes > 0,
-            "fixture must engage CB on the stale analysis, got {st:?}"
-        );
-        assert_eq!(s.auto_reanalyse_count(), 0, "opt-out must not re-analyse");
-    }
-
-    #[test]
-    fn issue_215_cb_on_reused_ldlt_compress_triggers_reanalysis() {
-        let n = 200;
-        let mut s = stale_solver(n, true);
-        let sym_calls = s.symbolic_call_count();
-        let b = paired_blocks(n, true);
-        assert!(matches!(s.factor(&b, None), FactorStatus::Success));
-        assert_eq!(s.auto_reanalyse_count(), 1);
-        assert_eq!(s.auto_reanalyse_adopted_count(), 1);
-        assert_eq!(s.symbolic_call_count(), sym_calls + 1);
-        let st = s.last_factor_stats().expect("stats");
-        assert_eq!(st.n_cascade_break_nodes, 0, "fresh analysis must avoid CB");
-        assert_eq!(
-            s.inertia(),
-            Some(&Inertia {
-                positive: n / 2,
-                negative: n / 2,
-                zero: 0
-            })
-        );
-        // The adopted analysis has real capacity again: a further refactor
-        // on the same values reuses it without CB and without re-analysing.
-        assert!(matches!(s.factor(&b, None), FactorStatus::Success));
-        assert_eq!(s.auto_reanalyse_count(), 1);
-        assert_eq!(
-            s.last_factor_stats().expect("stats").n_cascade_break_nodes,
-            0
-        );
-    }
-
-    #[test]
-    fn issue_215_miss_latch_suppresses_and_pattern_change_resets() {
-        let n = 200;
-        let mut s = stale_solver(n, true);
-        s.reanalyse_miss_streak = AUTO_REANALYSE_MAX_MISSES;
-        let b = paired_blocks(n, true);
-        assert!(matches!(s.factor(&b, None), FactorStatus::Success));
-        assert_eq!(s.auto_reanalyse_count(), 0, "latched: must not re-analyse");
-        assert!(s.last_factor_stats().expect("stats").n_cascade_break_nodes > 0);
-        // A new pattern clears the latch.
-        assert!(matches!(
-            s.factor(&paired_blocks(n + 2, false), None),
-            FactorStatus::Success
-        ));
-        assert_eq!(s.reanalyse_miss_streak, 0);
-    }
-
-    #[test]
-    fn issue_215_no_reanalysis_for_pattern_only_analysis() {
-        // preprocess None: the analysis depends on the pattern only, so a
-        // re-analysis would reproduce it and is skipped even under CB.
-        let n = 200;
-        let np = NumericParams {
-            scaling: ScalingStrategy::Identity,
-            ..NumericParams::default()
-        };
-        let sn = SupernodeParams {
-            preprocess: crate::symbolic::OrderingPreprocess::None,
-            ..SupernodeParams::default()
-        };
-        let mut s = Solver::with_params(np, sn);
-        assert!(matches!(
-            s.factor(&paired_blocks(n, false), None),
-            FactorStatus::Success
-        ));
-        for sn in s.last_symbolic.as_mut().expect("sym").supernodes.iter_mut() {
-            sn.delayed_capacity = 0;
-        }
-        let _ = s.factor(&paired_blocks(n, true), None);
-        assert_eq!(s.auto_reanalyse_count(), 0);
-    }
-
-    #[test]
-    fn issue_215_reanalysis_comparator() {
-        let c = |cb, tfa, tiny| CbScore { cb, tfa, tiny };
-        // Fewer CB nodes wins regardless of the tie-break counts.
-        assert!(reanalysis_wins(&c(2, 0, 0), &c(1, 50, 50)));
-        assert!(!reanalysis_wins(&c(1, 50, 50), &c(2, 0, 0)));
-        // Equal CB: fewer floored pivots (tfa + tiny) wins.
-        assert!(reanalysis_wins(&c(3, 10, 10), &c(3, 5, 14)));
-        assert!(!reanalysis_wins(&c(3, 5, 14), &c(3, 10, 10)));
-        // Exact tie keeps the incumbent.
-        assert!(!reanalysis_wins(&c(3, 10, 10), &c(3, 12, 8)));
-    }
 
     fn solver_with_scaling(scaling: ScalingStrategy) -> Solver {
         let np = NumericParams {

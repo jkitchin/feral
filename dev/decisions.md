@@ -7883,3 +7883,21 @@ fixture, with a stale analysis simulated by zeroing `delayed_capacity`).
 seq215 replay in `dev/journal/2026-10-10-01.org` §11:55. The
 `pattern_reused` re-entry fix is pinned in
 `tests/issue102_ordering_escalation.rs`, which fails with the fix reverted.
+
+## 2026-10-10 — Withdraw automatic re-analysis on cascade-break (issue #215)
+
+**Decision.** Remove `Solver::with_auto_reanalyse_on_cb` and its
+machinery, added in c8048bf and recorded in the entry above. This entry
+supersedes that one. The `pattern_reused` fix for escalated first factors
+(e7f4675) stays.
+
+**Why.** The reporter's pounce test (issue #215 comment 6099359505)
+showed that the reused and the fresh analysis of `i011_s002` both give
+the wrong count (+1), and the comparator made iterate 1 of the original
+sequence wrong. The cause is the CB floor itself (see
+`dev/research/issue-215-delay-budget-exact-inertia.md`), so choosing
+between CB factors cannot help. The full record is in
+`tried-and-rejected.md`, 2026-10-10.
+
+**Follow-up.** Replace the K=4 per-node delay budget with a front-growth
+backstop and report floored pivots. That work goes on a new branch.

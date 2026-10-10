@@ -1,6 +1,6 @@
 # Issue #215: cascade-break on a reused value-dependent analysis
 
-Date: 2026-10-10. Status: research note before implementation.
+Date: 2026-10-10. Status: REJECTED. The fix was implemented (c8048bf) and removed after the reporter's pounce test; see `tried-and-rejected.md` 2026-10-10 and `issue-215-delay-budget-exact-inertia.md`.
 
 ## Problem
 

@@ -9,32 +9,6 @@ All notable changes to FERAL will be documented in this file.
 fields below. Code that builds them with a struct literal or destructures
 them without `..` stops compiling.
 
-### Added — automatic re-analysis when a reused analysis hits cascade-break (issue #215)
-
-- **What.** With `LdltCompress` preprocessing (explicit, or forced by
-  ordering escalation), the symbolic analysis depends on the matrix values
-  through its MC64 matching. An IPM driver reuses that analysis across
-  iterates. When a `factor()` on a reused analysis of this kind engages
-  cascade-break, the `Solver` now re-runs the analysis on the current
-  values and refactors. It keeps whichever factor has fewer cascade-break
-  nodes; a tie goes to the one with fewer threshold-fail accepts plus tiny
-  pivots, and an exact tie keeps the original. An adopted analysis replaces
-  the cached one. After two re-analyses in a row that are not adopted,
-  re-analysis stops for that pattern.
-- **Why.** On pounce#999 `column25_integral`, a reused `Solver` reported
-  75597 negative eigenvalues at IPM iterate 4 where a fresh `Solver` reports
-  the true 75596, on the reporter's machine. Under cascade-break a pivot
-  whose sign comes from round-off can flip the count. This is a mitigation
-  that picks the factor that floored fewer pivots. It does not make
-  cascade-break exact.
-- **Cost.** One symbolic analysis plus one numeric factor per
-  re-analysis. On the column25 sequence that is about 6 s against a 0.33 s
-  warm factor. On that machine both re-analyses were declined (the reused
-  analysis had 1 cascade-break node, the fresh one 4), so the latch
-  stopped after two.
-- **API.** `Solver::with_auto_reanalyse_on_cb(bool)` (default `true`),
-  `Solver::auto_reanalyse_count()`, `Solver::auto_reanalyse_adopted_count()`.
-
 ### Fixed — `pattern_reused` no longer reads `true` on an escalated first factor (issue #215)
 
 - Ordering escalation re-enters `factor()` with the pattern fingerprint
