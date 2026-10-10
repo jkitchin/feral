@@ -4,10 +4,14 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-**Breaking (next release is 0.19.0).** `FactorStats`, `NodeFactors` and
-`FrontalFactors` are exhaustive public structs, and each gains public
-fields below. Code that builds them with a struct literal or destructures
-them without `..` stops compiling.
+## [0.19.0] - 2026-10-10
+
+**Breaking.** `FactorStats`, `NodeFactors` and `FrontalFactors` are
+exhaustive public structs, and each gains public fields below. Code that
+builds them with a struct literal or destructures them without `..` stops
+compiling. The public constants `DELAY_CAPACITY_MULTIPLIER` and
+`DELAY_CAPACITY_MIN_FLOOR` are replaced by `DELAY_GROWTH_ROWS` and
+`DELAY_FRONT_ROW_FLOOR` (issue #215, below).
 
 ### Fixed — the delay budget no longer forces sign-noise pivots on thin supernodes (issue #215)
 
