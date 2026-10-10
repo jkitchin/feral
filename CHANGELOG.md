@@ -9,6 +9,36 @@ All notable changes to FERAL will be documented in this file.
 fields below. Code that builds them with a struct literal or destructures
 them without `..` stops compiling.
 
+### Fixed — the delay budget no longer forces sign-noise pivots on thin supernodes (issue #215)
+
+- A supernode that receives more delayed pivots than its budget engages
+  cascade-break, which sets threshold-failing pivots to `sign(d)·eps`.
+  When `|d|` is round-off, `sign(d)` is noise and the inertia count can
+  be wrong. The budget was `max(4·own_ncol, 16)`, so it scaled with the
+  supernode's width. Thin supernodes in IPM KKTs exceeded it with modest
+  delay catchment: pounce#999 `column25` miscounted by +1 to +3 on 3 of
+  9 inertia-preserving rescalings of one iterate.
+- The budget now bounds front growth instead:
+  `min(subtree_ncol − own_ncol, max(3·nrow, 4096 − nrow))`. Fronts can
+  grow to 4× their rows (16× area), and fronts under 4096 rows are capped
+  only by the worst-case bound. Cascade-break becomes a memory backstop.
+- Across the 613 readable kkt-mittelmann matrices, the old budget bound
+  on only 6. Those now factor without cascade-break, with unchanged
+  inertia. On `qcqp1500-1nc_0000`, cascade-break used to floor 2263
+  pivots (correct only by luck). The factor is now exact with no
+  floored pivots, at +52% `nnz(L)` and about 4.6× factor time. On
+  column25 the factor is smaller and faster than before.
+- **Breaking:** the public constants `symbolic::supernode::DELAY_CAPACITY_MULTIPLIER`
+  and `DELAY_CAPACITY_MIN_FLOOR` are replaced by `DELAY_GROWTH_ROWS` (3)
+  and `DELAY_FRONT_ROW_FLOOR` (4096).
+
+### Added — `FactorStats::inertia_uncertain()` (issue #215)
+
+- Returns the number of pivots set to `sign(d)·floor` (`n_tiny`). When it
+  is nonzero the inertia is not guaranteed and may be off by up to that
+  count, so an IPM driving inertia correction should treat it as
+  unknown.
+
 ### Fixed — `pattern_reused` no longer reads `true` on an escalated first factor (issue #215)
 
 - Ordering escalation re-enters `factor()` with the pattern fingerprint

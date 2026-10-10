@@ -7901,3 +7901,33 @@ between CB factors cannot help. The full record is in
 
 **Follow-up.** Replace the K=4 per-node delay budget with a front-growth
 backstop and report floored pivots. That work goes on a new branch.
+
+## 2026-10-10 — The delay budget bounds front growth, not supernode width (issue #215)
+
+**Decision.** `assign_delayed_capacities` sets
+`delayed_capacity = min(subtree_ncol − own_ncol, max(3·nrow, 4096 − nrow))`,
+replacing `min(worst, max(4·own_ncol, 16))` from issue #55. Cascade-break
+stays as the over-budget path, now acting as a memory backstop. Add
+`FactorStats::inertia_uncertain()` (= `n_tiny`) so callers can tell
+when the inertia was computed from floored pivots.
+
+**Why.** Under cascade-break, pivots are floored to `sign(d)·eps`, and
+when `|d|` is round-off that sign is noise. The old cap scaled with
+`own_ncol`, so thin IPM-KKT supernodes hit it at front sizes far below
+any memory concern. column25 `i011_s002` under 9 inertia-preserving
+congruences was wrong on 3 with the old cap and 0 without it. The
+pinene/nql180 blowups that motivated the old cap no longer reach any
+budget at HEAD (cb 0). Across the kkt-mittelmann corpus, the new cap
+admits every delay observed under unbounded delay.
+
+**Cost.** `qcqp1500-1nc_0000`: +52 % nnz(L), ~4.6× factor time. The
+other changed matrices are within ±3 % or faster.
+
+**Alternatives rejected.**
+- Auto re-analysis; see the withdrawal entry above.
+- Unbounded delay with no backstop: exact, but nothing stops a future
+  dense-front blowup.
+- Swap-to-boundary: deferred as follow-up, since it reduces the volume
+  of delays rather than fixing their sign handling.
+
+Research: `dev/research/issue-215-delay-budget-exact-inertia.md`.

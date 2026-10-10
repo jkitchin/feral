@@ -146,3 +146,25 @@ n_tiny 0, nnzL 7.81M (+52 %), 10.8 s (4.6x), correct. This is the
 cost case for lifting the budget. It is correct both ways, but
 default's 2263 floored pivots mean it was correct by luck, the same
 way column25 seeds 0/2/3 were.
+
+* 15:05 :issue-215:delay-budget:implementation:
+User approved the growth cap with reporting. PR #216 was stripped to the
+pattern_reused fix (7fcb100 removes re-analysis; 956 tests pass) and
+merged as b3a9b8f. New branch fix/215-delay-growth-cap.
+Calibration from unbounded traces. Rule d <= max(3*sym_nrow,
+4096 - sym_nrow): 0 violations over qcqp1500-1nc_0000 (10.5k node
+records), column25 seeds 0-8 (300k), and marine 9/11/12/13/16. Largest
+d/sym_nrow 2.87 (marine_0012, front < 200 rows). Per-node area growth
+alone does not separate cases (marine's tiny fronts reach 9.7x), so
+the 4096-row floor carries small fronts.
+qcqp1500-1nc oracle: MUMPS 5.8.2 fails on it (mumps.json
+factorization_status fail). numpy eigvalsh on the dense 12008^2 matrix
+gives 10508 neg / 1500 pos with a cluster at -5.62e-9; this matches the
+sidecar.
+Tests written first, and all fail on the old formula:
+- unit caps [0,0,64,0,400,0,16] vs hand oracle [0,0,316,0,6000,0,4046];
+- column25 seed 1 neg 75599 (+3);
+- qcqp "cascade-break engaged".
+With assign_delayed_capacities = min(worst, max(3*nrow, 4096-nrow)),
+all 4 pass. Also added FactorStats::inertia_uncertain() (= n_tiny) as
+the reporting half.
