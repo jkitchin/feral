@@ -1,0 +1,37 @@
+* 10:20 :issue213:cascade-break:diagnosis:
+Issue #213: CB supernodes accept threshold-failing pivots of 2.3e-16 and
+|L| reaches 9.6e15. Traced the cause in try_reject_1x1_frontal
+(src/dense/factor.rs). CB fronts run with PerturbToEps{abs_floor =
+1e-10·‖DAD‖} (NumericParams default cascade_break_eps = Some(1e-10),
+factorize.rs:677). The perturb arm sits inside `if |d| <= zero_tol`, and
+zero_tol = EPS = 2.22e-16. The issue's pivot of 2.35e-16 is just above EPS,
+so it skipped the floor and reached case (b) ("small but nonzero, accept"),
+and n_tiny stayed 0. The same structure is in do_1x1_pivot. The 2×2 reject
+path falls back to the 1×1 path when may_delay=false, so it funnels into the
+same gate.
+
+* 10:24 :issue213:fix:test:
+Fix: below_perturb_floor(d, params) is true iff PerturbToEps and |d| <
+abs_floor, OR'd into the zero_tol gate at both sites. Oracle by hand: front
+[[±3e-16,·,·],[1,2,·],[0.5,0,3]], ncol=1, u=1e-8, floor 1e-10 →
+d'=±1e-10, L=±(1e10,5e9), S=[[2∓1e10, ∓5e9],[∓5e9, 3∓2.5e9]]. Passes on
+factor_frontal and factor_frontal_blocked. With the gate forced off,
+sub_floor_pivot_above_zero_tol_is_perturbed FAILS (L = 3.3e15, n_tiny 0),
+so the test exercises the fix.
+
+* 10:26 :issue213:diagnostics:fixture:
+Added NodeFactors::cascade_break and FactorStats::n_cascade_break_nodes. My
+first two fixtures could not trigger CB. The issue-55 4×4 is a single root
+supernode, and n <= 16 takes the dense fast path
+(should_use_dense_fast_path N_TINY=16), which is always root-only. The
+working fixture is 3 disjoint copies of a 7-node binary tree (n=21), nemin=1,
+delayed_capacity zeroed: per-node (n_delayed_in, nelim, cb) shows 3 middle
+nodes with cb=true, and 0 when in budget.
+
+* 10:27 :issue213:validation:corpus:
+cargo test: 952 passed, 0 failed. robot_1600 and NARX_CFy CB regressions
+SKIP (corpus gitignored, absent in this container), so the change is
+unverified on real CB matrices. The issue's matrix needs pounce + .nl files
+from pounce#999 and was not reproduced. Open risk: on the issue's matrix a
+1e-10 floor still allows |L| up to col_max·1e10. That is far below 1e16 but
+above 1/u = 1e8, so the inertia is not guaranteed to be right.

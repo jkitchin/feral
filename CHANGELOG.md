@@ -2,6 +2,74 @@
 
 All notable changes to FERAL will be documented in this file.
 
+## [Unreleased]
+
+**Breaking (next release is 0.19.0).** `FactorStats`, `NodeFactors` and
+`FrontalFactors` are exhaustive public structs, and each gains public
+fields below. Code that builds them with a struct literal or destructures
+them without `..` stops compiling.
+
+### Fixed — cascade-break no longer accepts sub-floor pivots unperturbed (issue #213)
+
+- **What.** In a cascade-break supernode (delay budget exceeded, so
+  `may_delay = false`), the bounded-Δ floor `cascade_break_eps · ‖D·A·D‖∞`
+  was applied only to pivots with `|d| <= zero_tol` (≈ 2.2e-16). A
+  threshold-failing pivot in `(zero_tol, floor)` — e.g. 2.3e-16 against a
+  1e-10 floor — skipped the perturbation and was accepted as is. The L
+  column was then divided by it. Every threshold-failing pivot below the
+  floor is now perturbed to `sign(d) · floor` and counted in `n_tiny`, as
+  the `cascade_break_eps` contract always stated. Root supernodes and
+  `ForceAccept` are unchanged.
+- **Reporter's matrix (rebuilt, integral form, 151 392 rows, default
+  settings).** Before: max|L| 2.98e16, min|d| 5.9e-16, 3982 entries with
+  |L| > 1e8, unrefined backward error 4.69, `n_tiny` 0. After: max|L|
+  6.63e12, min|d| 1.03e-9, 2275 entries with |L| > 1e8, unrefined
+  backward error 0.234, `n_tiny` 24 (2 CB nodes). Refined backward error
+  is 3.5e-13 in both. Inertia is (75796, 75596, 0) before and after, which
+  is the expected count; the two wrong pivot signs in the issue did not
+  reproduce on the rebuilt matrix. The derivative form has no CB nodes
+  and is unchanged.
+- **The fix bounds |L| less than the issue hoped.** max|L| 6.6e12 is still
+  far above `1/u = 1e8`: flooring `d` to 1e-10 caps one division, not the
+  growth that the uncapped earlier ones fed into the Schur complement. A
+  `nemin` sweep on the same matrix (unrefined backward error, before →
+  after): 4: 179 → 16.1; 8: 3.38 → 3.77; 16: 4.69 → 0.234; 32 and 64: no
+  CB nodes, unchanged at 3.6e-5 and 8.6e-4. The robust fix for this
+  matrix is a factor without CB nodes.
+- **Corpus.** kkt-mittelmann (613 readable matrices): inertia identical
+  before and after and in agreement with the oracles; no unrefined
+  residual got worse by more than 3×. The new floor fired on four
+  matrices (marine_1600_0011/0013/0016, qcqp1500-1nc_0000).
+
+### Added — `FactorStats::n_cascade_break_nodes` (issue #213)
+
+- Counts the non-root supernodes factored under the cascade-break trigger
+  (`SparseFactors::n_cascade_break_nodes()`, `NodeFactors::cascade_break`,
+  and `FactorStats.n_cascade_break_nodes` in Python). The flag comes from
+  the delay budget alone, so a nonzero count means the `|L| <= 1/u`
+  threshold-pivoting bound *may* not cover the whole factor, not that it
+  fails: marine_1600_0009 has one CB node, `n_tiny` 0, and a backward
+  error of 4e-16. Read it together with `n_tiny` and
+  `n_threshold_fail_accepts`.
+
+### Added — `FactorStats::n_threshold_fail_accepts` (issue #213)
+
+- Counts 1×1 pivots with `|d| <= max(u · col_max, null_pivot_tol)`, that
+  is, pivots that failed the threshold test, but were kept live and
+  unchanged because the front could not delay them
+  (`SparseFactors::n_threshold_fail_accepts()`,
+  `FrontalFactors::n_threshold_fail_accepts`, and the Python
+  `FactorStats` field). Each such pivot's L column escapes the
+  `|L| <= 1/u` bound. Pivots zeroed or floored are not included; those
+  are `n_tiny`. Root fronts accept these pivots by design, so the count
+  is nonzero on many healthy factors. A large count that comes from CB
+  nodes is the issue #213 signature.
+- On the issue #213 matrix (integral form, default settings) it reads 16
+  after the fix, next to `n_tiny` 24 and 2 CB nodes. These are the pivots
+  above the 1e-10 floor that still fail the threshold; each can give an
+  L column up to `col_max / 1e-10`, which is consistent with the 6.6e12
+  max|L| (not traced entry by entry). The derivative form reads 0.
+
 ## [0.18.0] - 2026-09-18
 
 ### Ordering-crate versions

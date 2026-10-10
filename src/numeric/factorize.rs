@@ -1306,6 +1306,38 @@ impl SparseFactors {
             .sum()
     }
 
+    /// Number of non-root supernodes factored under the cascade-break
+    /// trigger (`may_delay = false` because the node's delay budget was
+    /// exceeded). The flag is set from the budget alone, before any pivot
+    /// is tried, so a nonzero count means the `|L| <= 1/u` growth bound
+    /// *may* not hold, not that it failed: a CB node whose pivots all
+    /// pass the threshold test is as sound as any other (marine_1600_0009
+    /// has one CB node, `n_tiny == 0`, and an unrefined residual of 4e-16).
+    /// Whether a pivot actually escaped the bound is reported by
+    /// [`n_tiny`](Self::n_tiny) (floored) and
+    /// [`n_threshold_fail_accepts`](Self::n_threshold_fail_accepts)
+    /// (accepted unchanged). Issue #213.
+    pub fn n_cascade_break_nodes(&self) -> usize {
+        self.node_factors
+            .iter()
+            .filter(|nf| nf.cascade_break)
+            .count()
+    }
+
+    /// Total number of 1×1 pivots that failed the threshold test but were
+    /// accepted with their value unchanged because their front could not
+    /// delay them (root or cascade-break fronts). Their L columns are not
+    /// covered by `|L| <= 1/u`. Root fronts have always accepted such
+    /// pivots (the MUMPS/SSIDS convention), so a nonzero count alone is not
+    /// an error; a large count from cascade-break fronts is the issue #213
+    /// signature. See [`FrontalFactors::n_threshold_fail_accepts`].
+    pub fn n_threshold_fail_accepts(&self) -> usize {
+        self.node_factors
+            .iter()
+            .map(|nf| nf.frontal_factors.n_threshold_fail_accepts)
+            .sum()
+    }
+
     /// Single pass over the D blocks returning `(min|λ|, max|λ|)`.
     /// Shared by [`min_pivot_magnitude`](Self::min_pivot_magnitude) and
     /// [`max_pivot_magnitude`](Self::max_pivot_magnitude). 2×2 detection
@@ -1390,6 +1422,12 @@ pub struct NodeFactors {
     pub frontal_factors: FrontalFactors,
     /// Inertia of this node's eliminated pivots.
     pub inertia: Inertia,
+    /// `true` iff the cascade-break trigger fired at this node: it was
+    /// factored with `may_delay = false` despite not being a root, so any
+    /// threshold-failing pivot was perturbed or accepted in place instead
+    /// of being delayed to the parent. Set from the delay budget alone;
+    /// it does not mean such a pivot occurred (issue #213).
+    pub cascade_break: bool,
 }
 
 /// Caller-owned scratch pool for sparse numeric factorization.
@@ -1704,6 +1742,7 @@ pub fn dense_fast_factor_with_workspace(
         row_indices,
         frontal_factors: ff,
         inertia: inertia.clone(),
+        cascade_break: false,
     };
 
     Ok((
@@ -2423,6 +2462,7 @@ fn factor_one_supernode(
                 needs_refinement: false,
                 n_rook_rescues: 0,
                 n_tiny: 0,
+                n_threshold_fail_accepts: 0,
                 zero_tol: params.bk.zero_tol,
                 zero_tol_2x2: params.bk.zero_tol_2x2,
             },
@@ -2431,6 +2471,7 @@ fn factor_one_supernode(
                 negative: 0,
                 zero: 0,
             },
+            cascade_break: false,
         });
     }
 
@@ -2739,6 +2780,7 @@ fn factor_one_supernode(
         row_indices,
         frontal_factors: ff,
         inertia: node_inertia,
+        cascade_break,
     })
 }
 
@@ -2809,6 +2851,7 @@ fn factor_one_small_leaf(
                 needs_refinement: false,
                 n_rook_rescues: 0,
                 n_tiny: 0,
+                n_threshold_fail_accepts: 0,
                 zero_tol: params.bk.zero_tol,
                 zero_tol_2x2: params.bk.zero_tol_2x2,
             },
@@ -2817,6 +2860,7 @@ fn factor_one_small_leaf(
                 negative: 0,
                 zero: 0,
             },
+            cascade_break: false,
         });
     }
 
@@ -2897,6 +2941,7 @@ fn factor_one_small_leaf(
         row_indices,
         frontal_factors: ff,
         inertia: node_inertia,
+        cascade_break: false,
     })
 }
 

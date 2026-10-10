@@ -779,6 +779,18 @@ pub enum ZeroPivotAction {
     /// sign (positive or negative — never zero). Sign of `0.0` is
     /// treated as `+1.0`.
     ///
+    /// Which pivots are "tiny": at the threshold-reject sites of the
+    /// non-delaying 1×1 path (`try_reject_1x1_frontal`, `do_1x1_pivot`)
+    /// any pivot that failed the `u · col_max` test with `|d| < abs_floor`
+    /// is perturbed, not only `|d| <= zero_tol` (issue #213). A pivot
+    /// in `(zero_tol, abs_floor)` used to be accepted unperturbed, so
+    /// the L column was divided by a value smaller than the floor this
+    /// action exists to enforce. The zero-off-diagonal-column path
+    /// (`count_1x1_inertia`) and the trailing pivot of the dense
+    /// `factor` keep the `|d| <= zero_tol` gate on purpose: their column
+    /// has no off-diagonal entries, so `col_max = 0`, the pivot cannot
+    /// fail the `u · col_max` test, and no L column is divided by `d`.
+    ///
     /// The factor satisfies `L · D · L^T = A + Δ` exactly (within
     /// roundoff) for the L and D produced, but `Δ` is *not* localised
     /// to the perturbed diagonal entry. `L[i,k] = A[i,k] / d_new`
@@ -816,6 +828,20 @@ fn perturb_to_floor(d: f64, abs_floor: f64) -> f64 {
         -mag
     } else {
         mag
+    }
+}
+
+/// `true` when `on_zero_pivot` is `PerturbToEps { abs_floor }` and
+/// `|d| < abs_floor`. Used at the threshold-reject sites so a pivot that
+/// failed the threshold test in a non-delaying front is floored whenever
+/// it is below the bounded-Δ floor, not only when it is below `zero_tol`
+/// (issue #213: a 2.3e-16 pivot against a 1e-10 floor was accepted
+/// unperturbed, and the L column divided by it grew to 1e16).
+#[inline]
+fn below_perturb_floor(d: f64, params: &BunchKaufmanParams) -> bool {
+    match params.on_zero_pivot {
+        ZeroPivotAction::PerturbToEps { abs_floor } => d.abs() < abs_floor,
+        _ => false,
     }
 }
 
@@ -977,6 +1003,7 @@ pub fn factor(
     // which has no n_tiny field. Frontal entry points expose it via
     // `FrontalFactors::n_tiny`.
     let mut n_tiny = 0usize;
+    let mut n_threshold_fail_accepts = 0usize;
 
     let alpha = params.alpha;
     let mut k = 0;
@@ -1115,6 +1142,7 @@ pub fn factor(
                 &mut zero,
                 &mut needs_refinement,
                 &mut n_tiny,
+                &mut n_threshold_fail_accepts,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -1142,6 +1170,7 @@ pub fn factor(
                 &mut zero,
                 &mut needs_refinement,
                 &mut n_tiny,
+                &mut n_threshold_fail_accepts,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -1164,6 +1193,7 @@ pub fn factor(
                 &mut zero,
                 &mut needs_refinement,
                 &mut n_tiny,
+                &mut n_threshold_fail_accepts,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -1216,6 +1246,7 @@ pub fn factor(
                 &mut zero,
                 &mut needs_refinement,
                 &mut n_tiny,
+                &mut n_threshold_fail_accepts,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -1259,6 +1290,7 @@ pub fn factor(
                         &mut zero,
                         &mut needs_refinement,
                         &mut n_tiny,
+                        &mut n_threshold_fail_accepts,
                     )?;
                     fused_gamma0 = ng;
                     fused_r = nr;
@@ -1477,6 +1509,17 @@ pub struct FrontalFactors {
     /// See `dev/research/mumps-perturbation-alignment-2026-05-27.md`
     /// and the issue #55 Phase A plan.
     pub n_tiny: usize,
+    /// Number of 1×1 pivots that failed the threshold test
+    /// `|d| <= max(u · col_max, null_pivot_tol)` but were accepted live,
+    /// with their value unchanged, because the front could not delay them
+    /// (`may_delay == false`: a root front or a cascade-break front). These
+    /// are the F-01 band (case a') and small-but-nonzero (case b) accepts
+    /// in `try_reject_1x1_frontal` / `do_1x1_pivot`. The L column of such
+    /// a pivot is divided by `d`, so `|L| <= 1/u` does not hold for it.
+    /// Pivots zeroed under `ForceAccept` or floored under `PerturbToEps`
+    /// are not counted here (the latter are in [`n_tiny`](Self::n_tiny)).
+    /// Issue #213.
+    pub n_threshold_fail_accepts: usize,
     /// 1×1 pivot threshold from BunchKaufmanParams (see Factors::zero_tol).
     pub zero_tol: f64,
     /// 2×2 pivot threshold from BunchKaufmanParams.
@@ -1661,6 +1704,7 @@ pub fn factor_frontal_with_profile(
             needs_refinement: false,
             n_rook_rescues: 0,
             n_tiny: 0,
+            n_threshold_fail_accepts: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -1758,6 +1802,7 @@ fn factor_frontal_in_place_with_scratch_impl(
             needs_refinement: false,
             n_rook_rescues: 0,
             n_tiny: 0,
+            n_threshold_fail_accepts: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -1797,6 +1842,7 @@ fn factor_frontal_in_place_with_scratch_impl(
     let mut needs_refinement = false;
     let mut n_rook_rescues = 0usize;
     let mut n_tiny = 0usize;
+    let mut n_threshold_fail_accepts = 0usize;
     if let (Some(p), Some(t)) = (profile.as_deref_mut(), t0) {
         p.setup_ns += t.elapsed().as_nanos();
     }
@@ -1833,6 +1879,7 @@ fn factor_frontal_in_place_with_scratch_impl(
             &mut needs_refinement,
             &mut n_rook_rescues,
             &mut n_tiny,
+            &mut n_threshold_fail_accepts,
             &mut cached_maxfromm,
         )? {
             PivotStepResult::Advanced(n) => k += n,
@@ -1955,6 +2002,7 @@ fn factor_frontal_in_place_with_scratch_impl(
         needs_refinement,
         n_rook_rescues,
         n_tiny,
+        n_threshold_fail_accepts,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     };
@@ -2112,6 +2160,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             needs_refinement: false,
             n_rook_rescues: 0,
             n_tiny: 0,
+            n_threshold_fail_accepts: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -2208,6 +2257,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     let mut needs_refinement = false;
     let mut n_rook_rescues = 0usize;
     let mut n_tiny = 0usize;
+    let mut n_threshold_fail_accepts = 0usize;
     // MAXFROMM cache: live across both scalar-tail steps and the
     // post-panel fallback step within this front. Panel paths do not
     // populate it (the panel processes its own AMAX); the cache is
@@ -2250,6 +2300,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                 &mut needs_refinement,
                 &mut n_rook_rescues,
                 &mut n_tiny,
+                &mut n_threshold_fail_accepts,
                 &mut cached_maxfromm,
             )?;
             phase_timing::stop(&phase_timing::SCALARTAIL_NS, _pt);
@@ -2290,6 +2341,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             &mut zero,
             &mut needs_refinement,
             &mut n_tiny,
+            &mut n_threshold_fail_accepts,
             &mut *d_panel,
             &mut *subdiag,
             &mut perm,
@@ -2360,6 +2412,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                     &mut needs_refinement,
                     &mut n_rook_rescues,
                     &mut n_tiny,
+                    &mut n_threshold_fail_accepts,
                     &mut cached_maxfromm,
                 )? {
                     PivotStepResult::Advanced(n) => {
@@ -2480,6 +2533,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         needs_refinement,
         n_rook_rescues,
         n_tiny,
+        n_threshold_fail_accepts,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
@@ -2612,6 +2666,7 @@ pub fn factor_frontal_diagonal_in_place(
             needs_refinement: false,
             n_rook_rescues: 0,
             n_tiny: 0,
+            n_threshold_fail_accepts: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -2714,6 +2769,7 @@ pub fn factor_frontal_diagonal_in_place(
         needs_refinement,
         n_rook_rescues: 0,
         n_tiny: 0,
+        n_threshold_fail_accepts: 0,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
@@ -2747,6 +2803,7 @@ fn lblt_panel_frontal(
     zero: &mut usize,
     needs_refinement: &mut bool,
     n_tiny: &mut usize,
+    n_threshold_fail_accepts: &mut usize,
     d_panel: &mut [f64],
     subdiag: &mut [f64],
     // Phase A2 (`dev/plans/dense-kernel-w2-2x2-swap.md`): the panel
@@ -3044,6 +3101,7 @@ fn lblt_panel_frontal(
             zero,
             needs_refinement,
             n_tiny,
+            n_threshold_fail_accepts,
         )?;
         match outcome {
             PivotOutcome::Accepted => {
@@ -4099,6 +4157,7 @@ fn scalar_pivot_step(
     needs_refinement: &mut bool,
     n_rook_rescues: &mut usize,
     n_tiny: &mut usize,
+    n_threshold_fail_accepts: &mut usize,
     cached_maxfromm: &mut Option<f64>,
 ) -> Result<PivotStepResult, FeralError> {
     let alpha = params.alpha;
@@ -4144,6 +4203,7 @@ fn scalar_pivot_step(
             needs_refinement,
             n_rook_rescues,
             n_tiny,
+            n_threshold_fail_accepts,
         )?;
         return finish_1x1_outcome(
             outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma, None,
@@ -4186,6 +4246,7 @@ fn scalar_pivot_step(
                     needs_refinement,
                     n_rook_rescues,
                     n_tiny,
+                    n_threshold_fail_accepts,
                 )?;
                 return finish_1x1_outcome(
                     outcome,
@@ -4255,6 +4316,7 @@ fn scalar_pivot_step(
             needs_refinement,
             n_rook_rescues,
             n_tiny,
+            n_threshold_fail_accepts,
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4299,6 +4361,7 @@ fn scalar_pivot_step(
             needs_refinement,
             n_rook_rescues,
             n_tiny,
+            n_threshold_fail_accepts,
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4335,6 +4398,7 @@ fn scalar_pivot_step(
             needs_refinement,
             n_rook_rescues,
             n_tiny,
+            n_threshold_fail_accepts,
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4499,6 +4563,7 @@ fn scalar_pivot_step(
                 needs_refinement,
                 n_rook_rescues,
                 n_tiny,
+                n_threshold_fail_accepts,
             )?;
             return finish_1x1_outcome(
                 outcome,
@@ -4549,6 +4614,7 @@ fn scalar_pivot_step(
             needs_refinement,
             n_rook_rescues,
             n_tiny,
+            n_threshold_fail_accepts,
         )?;
         finish_1x1_outcome(
             outcome,
@@ -4598,6 +4664,7 @@ fn try_reject_1x1_frontal(
     zero: &mut usize,
     needs_refinement: &mut bool,
     n_tiny: &mut usize,
+    n_threshold_fail_accepts: &mut usize,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
 
@@ -4659,7 +4726,15 @@ fn try_reject_1x1_frontal(
         //       correct sign, request iterative refinement. Matches
         //       SSIDS/MUMPS convention for degenerate LPs (e.g.
         //       DEGENLPA where MUMPS reports (20, 15, 0)).
-        if d.abs() <= params.zero_tol {
+        //
+        // Issue #213: under `PerturbToEps { abs_floor }` (cascade-break
+        // fronts) every threshold-failing pivot with `|d| < abs_floor`
+        // is floored, not only the strict zeros. Before this, a pivot in
+        // `(zero_tol, abs_floor)` — e.g. 2.3e-16 against a 1e-10 floor —
+        // skipped the perturbation and reached case (b), so the L column
+        // was divided by it and |L| grew to 1e16 (wrong inertia, backward
+        // error 8e3, `n_tiny == 0`).
+        if d.abs() <= params.zero_tol || below_perturb_floor(d, params) {
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
                     // Issue #54: SSIDS-aligned. The strict-zero pivot is
@@ -4712,6 +4787,7 @@ fn try_reject_1x1_frontal(
             && d.abs() <= params.null_pivot_tol
         {
             *needs_refinement = true;
+            *n_threshold_fail_accepts += 1;
             if d > 0.0 {
                 *pos += 1;
             } else {
@@ -4720,7 +4796,10 @@ fn try_reject_1x1_frontal(
             return Ok(PivotOutcome::Accepted);
         }
         // Case (b): small but nonzero — accept with correct sign.
+        // Counted so callers can see a pivot whose L column escapes the
+        // `|L| <= 1/u` bound (issue #213).
         *needs_refinement = true;
+        *n_threshold_fail_accepts += 1;
         if d > 0.0 {
             *pos += 1;
         } else {
@@ -4771,6 +4850,7 @@ fn try_reject_1x1_with_rook_rescue(
     needs_refinement: &mut bool,
     n_rook_rescues: &mut usize,
     n_tiny: &mut usize,
+    n_threshold_fail_accepts: &mut usize,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
     let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
@@ -4790,6 +4870,7 @@ fn try_reject_1x1_with_rook_rescue(
             zero,
             needs_refinement,
             n_tiny,
+            n_threshold_fail_accepts,
         );
     }
 
@@ -4843,6 +4924,7 @@ fn try_reject_1x1_with_rook_rescue(
         zero,
         needs_refinement,
         n_tiny,
+        n_threshold_fail_accepts,
     )
 }
 
@@ -5252,6 +5334,7 @@ fn do_1x1_pivot(
     zero: &mut usize,
     needs_refinement: &mut bool,
     n_tiny: &mut usize,
+    n_threshold_fail_accepts: &mut usize,
 ) -> Result<(f64, usize), FeralError> {
     let mut d = a[k * n + k];
 
@@ -5282,8 +5365,9 @@ fn do_1x1_pivot(
         // Duff-Reid/MUMPS threshold). Three-way split mirrors
         // try_reject_1x1_frontal: strict-zero (zero L), rank-deficiency
         // band (count zero but keep factor live), or small-but-real
-        // (count by sign).
-        if d.abs() <= params.zero_tol {
+        // (count by sign). Issue #213: under `PerturbToEps` a sub-floor
+        // pivot is perturbed, not accepted as case (b).
+        if d.abs() <= params.zero_tol || below_perturb_floor(d, params) {
             // Truly-zero path: zero L, route by on_zero_pivot.
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
@@ -5348,14 +5432,17 @@ fn do_1x1_pivot(
             // trade-off analysis; see also
             // `dev/research/f01-rankdef-underreporting.md`.
             *needs_refinement = true;
+            *n_threshold_fail_accepts += 1;
             if d > 0.0 {
                 *pos += 1;
             } else {
                 *neg += 1;
             }
         } else {
-            // Small but real (case b): accept with sign.
+            // Small but real (case b): accept with sign. Counted so
+            // callers can see the `|L| <= 1/u` bound fail (issue #213).
             *needs_refinement = true;
+            *n_threshold_fail_accepts += 1;
             if d > 0.0 {
                 *pos += 1;
             } else {
@@ -6299,6 +6386,7 @@ mod zero_pivot_n_tiny_tests {
             ..Default::default()
         };
         let (mut pos, mut neg, mut zero, mut n_tiny) = (0usize, 0usize, 0usize, 0usize);
+        let mut n_threshold_fail_accepts = 0usize;
         let mut needs_refinement = false;
         let col_max = 0.0; // max |A[i,0]| for i>0 — the (1,0) entry is 0.
         let res = do_1x1_pivot(
@@ -6312,6 +6400,7 @@ mod zero_pivot_n_tiny_tests {
             &mut zero,
             &mut needs_refinement,
             &mut n_tiny,
+            &mut n_threshold_fail_accepts,
         );
         assert!(res.is_ok(), "PerturbToEps path must accept, not error");
         assert_eq!(
@@ -6527,5 +6616,167 @@ mod packed_schur_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod issue_213_perturb_band_tests {
+    use super::*;
+    use crate::dense::matrix::SymmetricMatrix;
+
+    /// 3×3 front, one fully-summed column, lower triangle column-major:
+    ///
+    /// ```text
+    ///   [ d    .    .  ]
+    ///   [ 1.0  2.0  .  ]
+    ///   [ 0.5  0.0  3.0]
+    /// ```
+    fn front(d: f64) -> SymmetricMatrix {
+        let n = 3;
+        let mut data = vec![0.0f64; n * n];
+        data[0] = d;
+        data[1] = 1.0;
+        data[2] = 0.5;
+        data[n + 1] = 2.0;
+        data[2 * n + 2] = 3.0;
+        SymmetricMatrix { n, data }
+    }
+
+    fn cb_params(on_zero_pivot: ZeroPivotAction) -> BunchKaufmanParams {
+        BunchKaufmanParams {
+            on_zero_pivot,
+            pivot_threshold: 1e-8,
+            ..Default::default()
+        }
+    }
+
+    /// Issue #213: in a non-delaying front (`may_delay = false`, the
+    /// cascade-break configuration) under `PerturbToEps { 1e-10 }`, a
+    /// pivot `d = ±3e-16` fails the threshold test (`3e-16 <= 1e-8 · 1`)
+    /// but sits above `zero_tol = EPS ≈ 2.2e-16`. It used to bypass the
+    /// perturbation and be accepted as case (b): `L = (1/d, 0.5/d) ≈
+    /// 3.3e15`, `n_tiny = 0`. It must now be floored to `±1e-10`.
+    ///
+    /// Oracle (hand calculation): `d' = ±1e-10`, `L21 = (1, 0.5) / d' =
+    /// ±(1e10, 5e9)`, Schur complement `A22 − a21 a21ᵀ / d'` =
+    /// `[[2 ∓ 1e10, ∓5e9], [∓5e9, 3 ∓ 2.5e9]]`.
+    #[test]
+    fn sub_floor_pivot_above_zero_tol_is_perturbed() {
+        for &(d, sign) in &[(3e-16f64, 1.0f64), (-3e-16f64, -1.0f64)] {
+            let params = cb_params(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
+            assert!(
+                d.abs() > params.zero_tol,
+                "test pivot must sit above zero_tol"
+            );
+            for (name, ff) in [
+                ("scalar", factor_frontal(&front(d), 1, false, &params)),
+                (
+                    "blocked",
+                    factor_frontal_blocked(&front(d), 1, false, &params),
+                ),
+            ] {
+                let ff = ff.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert_eq!(ff.nelim, 1, "{name}");
+                assert_eq!(ff.n_tiny, 1, "{name}: perturbed pivot must count as tiny");
+                assert!(ff.needs_refinement, "{name}");
+                assert_eq!(ff.d_diag[0], sign * 1e-10, "{name}: pivot floored");
+                if sign > 0.0 {
+                    assert_eq!((ff.inertia.positive, ff.inertia.negative), (1, 0), "{name}");
+                } else {
+                    assert_eq!((ff.inertia.positive, ff.inertia.negative), (0, 1), "{name}");
+                }
+                assert_eq!(ff.inertia.zero, 0, "{name}");
+                let l = &ff.l;
+                let rel = |x: f64, y: f64| ((x - y) / y).abs();
+                assert!(rel(l[1], sign * 1e10) < 1e-14, "{name}: L10 = {}", l[1]);
+                assert!(rel(l[2], sign * 5e9) < 1e-14, "{name}: L20 = {}", l[2]);
+                let c = &ff.contrib;
+                let cd = ff.contrib_dim;
+                assert_eq!(cd, 2, "{name}");
+                assert!(
+                    rel(c[0], 2.0 - sign * 1e10) < 1e-14,
+                    "{name}: S00 = {}",
+                    c[0]
+                );
+                assert!(rel(c[1], -sign * 5e9) < 1e-14, "{name}: S10 = {}", c[1]);
+                assert!(
+                    rel(c[cd + 1], 3.0 - sign * 2.5e9) < 1e-14,
+                    "{name}: S11 = {}",
+                    c[cd + 1]
+                );
+            }
+        }
+    }
+
+    /// Pivots at or above the floor keep the old case-(b) treatment: a
+    /// threshold-failing `d = 1e-9 > 1e-10` is accepted unperturbed with
+    /// `n_tiny = 0`. Guards against widening the perturbation band past
+    /// the documented `|d| < abs_floor`.
+    #[test]
+    fn pivot_above_floor_is_not_perturbed() {
+        let params = cb_params(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
+        for (name, ff) in [
+            ("scalar", factor_frontal(&front(1e-9), 1, false, &params)),
+            (
+                "blocked",
+                factor_frontal_blocked(&front(1e-9), 1, false, &params),
+            ),
+        ] {
+            let ff = ff.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(ff.n_tiny, 0, "{name}");
+            assert_eq!(ff.d_diag[0], 1e-9, "{name}");
+            assert_eq!(ff.inertia.positive, 1, "{name}");
+            // 1e-9 <= u · col_max = 1e-8 fails the threshold and is kept
+            // as is: the L column (1e9, 5e8) escapes 1/u = 1e8.
+            assert_eq!(ff.n_threshold_fail_accepts, 1, "{name}");
+        }
+    }
+
+    /// `n_threshold_fail_accepts` counts only live, unchanged accepts of
+    /// threshold-failing pivots. A floored pivot goes to `n_tiny`
+    /// instead, a passing pivot is in neither, and a delayed pivot is in
+    /// neither (it was not accepted).
+    #[test]
+    fn threshold_fail_accepts_counts_only_unchanged_accepts() {
+        let perturb = cb_params(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
+        let force = cb_params(ZeroPivotAction::ForceAccept);
+        // (d, params, may_delay, expected n_threshold_fail_accepts, expected n_tiny)
+        let cases = [
+            (3e-16, &perturb, false, 0, 1), // floored
+            (1e-9, &perturb, false, 1, 0),  // above floor, kept
+            (3e-16, &force, false, 1, 0),   // case (b) under ForceAccept
+            (0.5, &force, false, 0, 0),     // passes 1e-8 · 1
+            (1e-9, &force, true, 0, 0),     // delayed, not accepted
+        ];
+        for (d, params, may_delay, want_tfa, want_tiny) in cases {
+            for (name, ff) in [
+                ("scalar", factor_frontal(&front(d), 1, may_delay, params)),
+                (
+                    "blocked",
+                    factor_frontal_blocked(&front(d), 1, may_delay, params),
+                ),
+            ] {
+                let ff = ff.unwrap_or_else(|e| panic!("{name} d={d}: {e:?}"));
+                assert_eq!(
+                    (ff.n_threshold_fail_accepts, ff.n_tiny),
+                    (want_tfa, want_tiny),
+                    "{name} d={d} may_delay={may_delay}"
+                );
+            }
+        }
+    }
+
+    /// `ForceAccept` (the root / non-cascade-break policy) is unchanged:
+    /// a threshold-failing `d = 3e-16 > zero_tol` is accepted by sign
+    /// with its value intact and no perturbation counted.
+    #[test]
+    fn force_accept_band_unchanged() {
+        let params = cb_params(ZeroPivotAction::ForceAccept);
+        let ff =
+            factor_frontal(&front(3e-16), 1, false, &params).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(ff.n_tiny, 0);
+        assert_eq!(ff.d_diag[0], 3e-16);
+        assert_eq!(ff.inertia.positive, 1);
+        assert_eq!(ff.n_threshold_fail_accepts, 1);
     }
 }

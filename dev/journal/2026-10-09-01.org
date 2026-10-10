@@ -1,0 +1,49 @@
+#+TITLE: Session 2026-10-09-01 — PR #214 review and fixes (issue #213)
+
+The review and fixes ran across a context compaction, so these entries
+were written at one time from the session record, not live.
+
+
+* 21:13 :review:issue-213:cascade-break:
+Reviewed PR #214 (cascade-break floor widened to every threshold-failing
+pivot below abs_floor). Full `cargo test --release` with the corpus: all
+pass, no skips. kkt-mittelmann (613/618 readable), main vs PR: inertia
+identical, 0 oracle mismatches, no unrefined residual worse by more than 3x. The floor
+fired on 4 matrices: marine_1600_0011 (n_tiny 0->1), _0013 (0->7), _0016
+(0->2), and qcqp1500-1nc_0000 (0->2263, ncb 16, residual 2.2e-8 -> 1.3e-8).
+marine_1600_0009 has ncb=1, n_tiny=0, residual 4e-16, so the
+`n_cascade_break_nodes` doc ("bound does not cover") overclaims.
+
+* 21:13 :issue-213:verification:gh999:
+Rebuilt the reporter's matrices (gh999 integral/derivative it0) and probed
+main vs PR at default settings. Integral form: max|L| 2.98e16 -> 6.63e12,
+min|d| 5.9e-16 -> 1.03e-9, |L|>1e8 entries 3982 -> 2275, unrefined resid
+4.69 -> 0.234, refined 3.5e-13 in both. Inertia (75796,75596,0) in both,
+which is the expected count; the issue's +2 did not reproduce. Derivative form
+is unchanged (no CB). nemin sweep, unrefined resid main -> PR: 4: 179 -> 16.1;
+8: 3.38 -> 3.77; 16: 4.69 -> 0.234; 32/64: no CB, unchanged. Conclusion: the
+floor helps, but max|L| stays at 6.6e12, far above 1/u. Pivots in
+[floor, u*col_max] are still accepted unchanged.
+
+* 21:13 :issue-213:counter:testing:
+Added n_threshold_fail_accepts (case a' and case b accepts). First
+integration fixture (3x7 binary tree from cascade_break_nodes_are_counted)
+gave 0: the CB fronts pair the delayed columns into 2x2 pivots
+[[1e-14,1],[1,1e-14]]. Second attempt (4-cycle l,p,g,h): AMD eliminated h
+first, because every node had degree 2 and the tie broke by index. Third
+attempt (l1,l2,p,h,q1,q2[,r]): p merged into h's root supernode. Fourth
+attempt (h attached to a 4-clique t1..t4) works: supernodes {l2}, {l1,p}
+(CB, row h), and root {h,t*}. Legacy gives (tfa, n_tiny) = (8, 0) and
+bounded gives (0, 8). Lesson: a CB fixture needs a parent whose column
+count differs from the CB node's by more than 1. Otherwise the supernode
+finder merges the CB node into the root.
+
+* 21:13 :issue-213:gh999:counter:
+gh999 integral with the new counter: tfa=16, n_tiny=24, ncb=2. Derivative:
+tfa=0. The 16 unchanged threshold-failing accepts are consistent with the
+remaining max|L| 6.6e12, but this was not traced entry by entry.
+
+* 21:13 :semver:release:
+0.18.0 is on crates.io. FactorStats/NodeFactors/FrontalFactors are
+exhaustive pub structs gaining fields, so the change is breaking. The
+CHANGELOG now says the next release is 0.19.0.

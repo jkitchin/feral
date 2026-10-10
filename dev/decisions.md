@@ -7775,3 +7775,71 @@ final polish is not what decides this, the hierarchy is.
 
 **Evidence.** `dev/research/scotch-kahip-node-separator-2026-09-18.md`;
 `cargo test --workspace` 1212 passed, 0 failed; fmt and clippy clean.
+
+## 2026-10-08 — `PerturbToEps` floors every threshold-failing pivot below `abs_floor`, not only `|d| <= zero_tol` (issue #213)
+
+**Decision.** At the non-delaying 1×1 threshold-reject sites
+(`try_reject_1x1_frontal`, `do_1x1_pivot`), `ZeroPivotAction::PerturbToEps {
+abs_floor }` now perturbs any pivot that failed `|d| <= u·col_max` and has
+`|d| < abs_floor`. Previously the floor applied only under `|d| <= zero_tol`,
+so a pivot in `(zero_tol, abs_floor)` fell through to case (b) and was
+accepted unperturbed. Only cascade-break fronts run with `PerturbToEps` by
+default, so root fronts and `ForceAccept` callers do not change.
+
+**Why.** The `cascade_break_eps` doc already promised `sign(d) · max(|d|,
+floor)` for tiny pivots. Under the default `cascade_break_eps = 1e-10` the
+band `(2.2e-16, 1e-10·‖A‖)` broke that promise silently. Issue #213 is a
+151,392² KKT where 2.3e-16 pivots in 7 CB nodes produced |L| ≈ 9.6e15,
+inertia off by +2, unrefined backward error 7.8e3, and `n_tiny = 0`.
+Flooring at 1e-10 bounds |L| by `col_max / 1e-10` instead of `col_max /
+2e-16`, and makes every such event visible in `n_tiny`.
+
+**What it does not do.** CB fronts still do not obey the threshold-pivoting
+bound `|L| <= 1/u` (1e8 at u = 1e-8). A pivot in `[abs_floor, u·col_max]`
+is still case-(b) accepted, with growth up to `col_max / abs_floor`. A
+structural fix (swap-to-boundary delayed pivoting,
+`dev/research/kkt-cascade-amplifier-2026-05-21.md`) would remove CB's
+inertia risk entirely and remains open. To make the remaining risk visible
+now, `FactorStats::n_cascade_break_nodes` reports how many fronts ran
+without delaying.
+
+**Evidence.** New `issue_213_perturb_band_tests` in `src/dense/factor.rs`
+check d → ±1e-10, L, and the Schur complement against a hand calculation on
+both the scalar and blocked kernels. The ±3e-16 test fails with the gate
+disabled. `tests/issue_55_delay_budget.rs::cascade_break_nodes_are_counted`
+shows 3 CB nodes on a budget-zeroed fixture and 0 in budget. `cargo test`:
+952 passed, 0 failed. Not run on the reporter's matrix, which was not
+available.
+
+## 2026-10-09 — Add `n_threshold_fail_accepts`; `n_cascade_break_nodes` means "bound *may* fail" (issue #213, PR #214 review)
+
+**Decision.** Count 1×1 pivots that fail `|d| <= max(u·col_max,
+null_pivot_tol)` but are kept live and unchanged because the front cannot
+delay (case a' under `ForceAccept`, case b), in
+`FrontalFactors::n_threshold_fail_accepts`, summed to
+`FactorStats::n_threshold_fail_accepts`. Zeroed or floored pivots stay in
+`n_tiny`; the two counters do not overlap. `n_cascade_break_nodes` is
+documented as "the `|L| <= 1/u` bound *may* not cover the factor", not
+"does not". The zero-off-diagonal path (`count_1x1_inertia`) and the
+trailing pivot of dense `factor` keep the `|d| <= zero_tol` gate, and the
+reason is now in the `PerturbToEps` doc: `col_max = 0`, so these pivots
+cannot fail the threshold and no L column is divided by them. The new
+public fields on exhaustive structs make the next release 0.19.0.
+
+**Why.** The 2026-10-08 entry left case-(b) pivots in `[abs_floor,
+u·col_max]` accepted but invisible. The CB flag comes from the delay
+budget, so it fires on clean fronts too: marine_1600_0009 has 1 CB node,
+`n_tiny` 0, and a backward error of 4e-16. A caller needs the per-pivot
+count to tell the two apart. On the rebuilt issue #213 matrix the counter
+reads 16 after the fix, so these pivots are present there.
+
+**Verification of the 2026-10-08 change** (that entry said it was not run
+on the reporter's matrix): see `dev/sessions/2026-10-09-01.md`. In short,
+max|L| went from 2.98e16 to 6.63e12 and the unrefined backward error from
+4.69 to 0.234. Inertia was correct before and after. kkt-mittelmann
+inertia is unchanged.
+
+**Evidence.** `cascade_break_pivots_show_in_counters`: legacy CB gives
+(tfa, n_tiny) = (8, 0) and bounded CB gives (0, 8).
+`threshold_fail_accepts_counts_only_unchanged_accepts` has 5 kernel cases.
+`cargo test --release` with the corpus: 956 passed, 0 failed.
