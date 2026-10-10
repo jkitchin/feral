@@ -7843,3 +7843,43 @@ inertia is unchanged.
 (tfa, n_tiny) = (8, 0) and bounded CB gives (0, 8).
 `threshold_fail_accepts_counts_only_unchanged_accepts` has 5 kernel cases.
 `cargo test --release` with the corpus: 956 passed, 0 failed.
+
+## 2026-10-10 — Re-analyse automatically when a reused value-dependent analysis engages cascade-break (issue #215)
+
+**Decision.** In `Solver::factor`, after a successful factor, if the
+analysis was reused (`pattern_reused`), its resolved preprocess is
+`LdltCompress`, and the factor engaged cascade-break, re-run the symbolic
+analysis on the current values with the same configuration and refactor.
+Keep the new factor only if `(n_cascade_break_nodes, n_threshold_fail_accepts
++ n_tiny)` is lexicographically smaller; the incumbent wins exact ties. An
+adopted analysis replaces the cached one. Stop re-analysing on a pattern
+after 2 consecutive non-adopted re-analyses (reset on adoption and on
+pattern change). On by default, opt out with
+`with_auto_reanalyse_on_cb(false)`. The user chose this option over
+exact-inertia swap-to-boundary (multi-session) and a caller-driven
+re-analysis.
+
+**Why.** The `LdltCompress` analysis is value-dependent (its MC64
+matching picks the 2×2 pairs), so on a drifting IPM sequence it goes
+stale. On pounce#999 `column25_integral`, iterate 4 on a reused `Solver`
+gave neg 75597 (true 75596) on the reporter's machine. Here the reused and
+fresh analyses differ (25024 vs 24684 supernodes), and resetting the
+symbolic cache alone reproduces the fresh factor exactly. Neither analysis
+is better on every machine: here warm has cb 1 and fresh cb 4, while the
+reporter saw warm cb 6 and fresh cb 2. So the rule compares the two factors
+instead of always preferring one. A miss is "not adopted", not "CB remains",
+because in the reporter's run the fresh analysis also has CB. Counting that
+as a miss would have latched before iterate 4.
+
+**Limits.** This is a mitigation. A factor that still engages
+cascade-break can have a wrong inertia. A pattern-only analysis
+(preprocess `None`) is never re-analysed because it would come back
+identical. Cost per re-analysis is one `LdltCompress` symbolic (including
+MC64) plus one factor, about 6 s on column25 (n=151392) against a 0.33 s
+warm factor.
+
+**Evidence.** Unit tests `issue_215_*` in `solver.rs` (Weyl-inertia
+fixture, with a stale analysis simulated by zeroing `delayed_capacity`).
+seq215 replay in `dev/journal/2026-10-10-01.org` §11:55. The
+`pattern_reused` re-entry fix is pinned in
+`tests/issue102_ordering_escalation.rs`, which fails with the fix reverted.
