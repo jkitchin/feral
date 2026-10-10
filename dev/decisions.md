@@ -7810,3 +7810,36 @@ disabled. `tests/issue_55_delay_budget.rs::cascade_break_nodes_are_counted`
 shows 3 CB nodes on a budget-zeroed fixture and 0 in budget. `cargo test`:
 952 passed, 0 failed. Not run on the reporter's matrix, which was not
 available.
+
+## 2026-10-09 — Add `n_threshold_fail_accepts`; `n_cascade_break_nodes` means "bound *may* fail" (issue #213, PR #214 review)
+
+**Decision.** Count 1×1 pivots that fail `|d| <= max(u·col_max,
+null_pivot_tol)` but are kept live and unchanged because the front cannot
+delay (case a' under `ForceAccept`, case b), in
+`FrontalFactors::n_threshold_fail_accepts`, summed to
+`FactorStats::n_threshold_fail_accepts`. Zeroed or floored pivots stay in
+`n_tiny`; the two counters do not overlap. `n_cascade_break_nodes` is
+documented as "the `|L| <= 1/u` bound *may* not cover the factor", not
+"does not". The zero-off-diagonal path (`count_1x1_inertia`) and the
+trailing pivot of dense `factor` keep the `|d| <= zero_tol` gate, and the
+reason is now in the `PerturbToEps` doc: `col_max = 0`, so these pivots
+cannot fail the threshold and no L column is divided by them. The new
+public fields on exhaustive structs make the next release 0.19.0.
+
+**Why.** The 2026-10-08 entry left case-(b) pivots in `[abs_floor,
+u·col_max]` accepted but invisible. The CB flag comes from the delay
+budget, so it fires on clean fronts too: marine_1600_0009 has 1 CB node,
+`n_tiny` 0, and a backward error of 4e-16. A caller needs the per-pivot
+count to tell the two apart. On the rebuilt issue #213 matrix the counter
+reads 16 after the fix, so these pivots are present there.
+
+**Verification of the 2026-10-08 change** (that entry said it was not run
+on the reporter's matrix): see `dev/sessions/2026-10-09-01.md`. In short,
+max|L| went from 2.98e16 to 6.63e12 and the unrefined backward error from
+4.69 to 0.234. Inertia was correct before and after. kkt-mittelmann
+inertia is unchanged.
+
+**Evidence.** `cascade_break_pivots_show_in_counters`: legacy CB gives
+(tfa, n_tiny) = (8, 0) and bounded CB gives (0, 8).
+`threshold_fail_accepts_counts_only_unchanged_accepts` has 5 kernel cases.
+`cargo test --release` with the corpus: 956 passed, 0 failed.
