@@ -537,60 +537,62 @@ pub fn find_supernodes(
     final_snodes
 }
 
-/// Issue #55 Phase B2: multiplier on `own_ncol` that bounds the
-/// per-supernode incoming-delay budget.
+/// Issue #215: per-supernode delay budget, as a bound on front growth.
 ///
-/// `delayed_capacity(s) = min(subtree_ncol - own_ncol, K * own_ncol)`.
-/// With `K = 4` the frontal matrix at supernode `s` can grow by at
-/// most `(1 + K) = 5x` its own width before the budget trips at
-/// numeric time. This is the loose-but-defensible starting value
-/// for the cascade-victim corpus; A2.5 instrumentation (not yet
-/// run on the full corpus) would inform a tighter value. See
-/// `dev/research/symbolic-delay-budget-2026-05-27.md`.
-pub const DELAY_CAPACITY_MULTIPLIER: usize = 4;
-
-/// Issue #55 Phase B2: minimum capacity floor for small supernodes.
+/// `delayed_capacity(s) = min(subtree_ncol - own_ncol,
+///                            max(DELAY_GROWTH_ROWS * nrow,
+///                                DELAY_FRONT_ROW_FLOOR - nrow))`.
 ///
-/// `DELAY_CAPACITY_MULTIPLIER * own_ncol` is too tight when `own_ncol`
-/// is very small (e.g. `nemin=1` stress runs that produce
-/// single-column supernodes), because a single-column supernode would
-/// otherwise have `capacity = 4`, which routinely under-shoots even
-/// modest non-pathological delay catchment. The floor ensures every
-/// supernode can absorb at least 16 incoming delays before the
-/// budget trips — generous for small supernodes, irrelevant for
-/// wide supernodes where `K * own_ncol >> 16`. The worst-case bound
-/// (`subtree_ncol - own_ncol`) still caps capacity for leaves and
-/// near-leaves, so the floor cannot create artificially-large
-/// budgets on shallow trees.
-pub const DELAY_CAPACITY_MIN_FLOOR: usize = 16;
+/// Each delayed column adds a row to the front, so with
+/// `DELAY_GROWTH_ROWS = 3` the front can reach `4 * nrow` rows (16x its
+/// symbolic area) before cascade-break engages. Fronts that stay under
+/// `DELAY_FRONT_ROW_FLOOR` rows (16M entries, ~134 MB dense) are never
+/// capped below the worst-case bound.
+///
+/// History: issue #55 introduced the budget as `max(4 * own_ncol, 16)`
+/// to stop unbounded delay from building near-dense root fronts
+/// (pinene_3200, nql180; `dev/research/symbolic-delay-budget-2026-05-27.md`).
+/// That bound scales with the supernode's *width*, which on thin
+/// supernodes of IPM KKTs is far tighter than any memory concern: a
+/// 16-column, 256-row front was capped at 64 delays. Over-budget fronts
+/// floor threshold-failing pivots to `sign(d) * eps`, and when `|d|` is
+/// round-off the inertia count goes wrong (issue #215: column25 under
+/// inertia-preserving congruences, 3 of 9 wrong). The growth bound
+/// clears every delayed front in the kkt-mittelmann corpus, column25
+/// and qcqp1500-1nc (largest observed growth 2.87 * nrow, on a front
+/// under 200 rows), so cascade-break is now a memory backstop rather
+/// than the normal overflow path. See
+/// `dev/research/issue-215-delay-budget-exact-inertia.md`.
+pub const DELAY_GROWTH_ROWS: usize = 3;
 
-/// Issue #55 Phase B2: assign per-supernode incoming-delay budget
-/// (`Supernode::delayed_capacity`) to a freshly-built supernode
-/// list.
+/// Issue #215: fronts up to this many rows may absorb delays up to the
+/// worst-case bound regardless of [`DELAY_GROWTH_ROWS`]. A dense front
+/// of 4096 rows is 16M entries (~134 MB), small enough that capping it
+/// buys nothing and risks an inertia-unsafe cascade-break.
+pub const DELAY_FRONT_ROW_FLOOR: usize = 4096;
+
+/// Assign the per-supernode incoming-delay budget
+/// (`Supernode::delayed_capacity`) to a freshly-built supernode list
+/// (issue #55 Phase B2; growth form from issue #215).
 ///
 /// For each supernode `s`, sets
 /// `delayed_capacity(s) = min(subtree_ncol(s) - own_ncol(s),
-///                            DELAY_CAPACITY_MULTIPLIER * own_ncol(s))`
+///                            max(DELAY_GROWTH_ROWS * nrow(s),
+///                                DELAY_FRONT_ROW_FLOOR - nrow(s)))`
 /// where `subtree_ncol(s)` is the total `ncol` summed across `s`
 /// and all its descendants.
 ///
 /// Rationale:
-/// - The first term is the loose worst-case upper bound: at most
-///   one delay per eliminable column anywhere below `s` can reach
-///   `s` (since delays are 1-for-1 fully-summed columns that
-///   children failed to eliminate).
-/// - The second term tightens that to a constant multiple of the
-///   supernode's own width, which is the quantity that drives
-///   frontal-matrix memory at numeric time (the frontal is sized
-///   as `(own_ncol + n_delayed_in) × nrow`).
+/// - The first term is the hard upper bound: at most one delay per
+///   eliminable column anywhere below `s` can reach `s` (delays are
+///   1-for-1 fully-summed columns that children failed to eliminate).
+/// - The second term bounds the front's growth: every delay adds a row
+///   and a column to the `nrow x nrow` front, so it caps the expanded
+///   front at `max(4 * nrow, DELAY_FRONT_ROW_FLOOR)` rows.
 ///
-/// The `min` of the two is the cap actually enforced. For leaves
-/// (no children, `subtree_ncol == own_ncol`) the first term is 0,
-/// so leaves always get `delayed_capacity == 0` — which is
-/// trivially correct (leaves have no children that could send
-/// delays). For interior nodes the K-bound is usually tighter
-/// than the worst-case bound; for tall thin chains the
-/// worst-case bound can be tighter.
+/// The `min` of the two is the cap actually enforced. Leaves (no
+/// children, `subtree_ncol == own_ncol`) get `delayed_capacity == 0`,
+/// which is trivially correct.
 ///
 /// Pre-condition: `snodes` is in postorder (children before parents),
 /// per [`find_supernodes`]'s contract.
@@ -613,10 +615,11 @@ pub fn assign_delayed_capacities(snodes: &mut [Supernode]) {
     for s in 0..n {
         let own = snodes[s].ncol;
         let worst = subtree_ncol[s].saturating_sub(own);
-        let tight = DELAY_CAPACITY_MULTIPLIER
-            .saturating_mul(own)
-            .max(DELAY_CAPACITY_MIN_FLOOR);
-        snodes[s].delayed_capacity = worst.min(tight);
+        let nrow = snodes[s].nrow;
+        let growth = DELAY_GROWTH_ROWS
+            .saturating_mul(nrow)
+            .max(DELAY_FRONT_ROW_FLOOR.saturating_sub(nrow));
+        snodes[s].delayed_capacity = worst.min(growth);
     }
 }
 
@@ -817,6 +820,45 @@ mod tests {
     use super::*;
     use crate::sparse::csc::CscMatrix;
     use crate::symbolic::column_counts::column_counts;
+
+    fn snode(ncol: usize, nrow: usize, children: Vec<usize>) -> Supernode {
+        Supernode {
+            first_col: 0,
+            ncol,
+            nrow,
+            row_indices: Vec::new(),
+            children,
+            delayed_capacity: usize::MAX,
+        }
+    }
+
+    /// Issue #215. Oracle: capacities computed by hand from
+    /// `min(subtree_ncol − own_ncol, max(3·nrow, 4096 − nrow))`.
+    /// The old K·own_ncol cap gives 64, 400 and 16 at nodes 2, 4 and 6.
+    #[test]
+    fn delayed_capacity_bounds_front_growth_not_own_width() {
+        let mut s = vec![
+            snode(16, 256, vec![]),      // 0: leaf
+            snode(300, 400, vec![]),     // 1: leaf
+            snode(16, 256, vec![0, 1]),  // 2: worst 316 binds
+            snode(20000, 20000, vec![]), // 3: leaf
+            snode(100, 2000, vec![3]),   // 4: 3·2000 = 6000 binds
+            snode(10000, 10000, vec![]), // 5: leaf
+            snode(4, 50, vec![5]),       // 6: 4096 − 50 = 4046 binds
+        ];
+        assign_delayed_capacities(&mut s);
+        let caps: Vec<usize> = s.iter().map(|n| n.delayed_capacity).collect();
+        assert_eq!(caps, vec![0, 0, 316, 0, 6000, 0, 4046]);
+    }
+
+    /// A front wider than the row floor gets the 3·nrow regime, and the
+    /// floor term must not underflow.
+    #[test]
+    fn delayed_capacity_floor_term_saturates_on_wide_fronts() {
+        let mut s = vec![snode(9000, 9000, vec![]), snode(10, 5000, vec![0])];
+        assign_delayed_capacities(&mut s);
+        assert_eq!(s[1].delayed_capacity, 9000); // min(9000, 15000)
+    }
 
     /// Oracle: hand-summed `Σ_{k=0}^{ncol-1} (nrow-k)²`. Written out
     /// term by term so the closed form is checked against arithmetic

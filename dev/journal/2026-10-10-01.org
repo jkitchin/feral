@@ -146,3 +146,46 @@ n_tiny 0, nnzL 7.81M (+52 %), 10.8 s (4.6x), correct. This is the
 cost case for lifting the budget. It is correct both ways, but
 default's 2263 floored pivots mean it was correct by luck, the same
 way column25 seeds 0/2/3 were.
+
+* 15:05 :issue-215:delay-budget:implementation:
+User approved the growth cap with reporting. PR #216 was stripped to the
+pattern_reused fix (7fcb100 removes re-analysis; 956 tests pass) and
+merged as b3a9b8f. New branch fix/215-delay-growth-cap.
+Calibration from unbounded traces. Rule d <= max(3*sym_nrow,
+4096 - sym_nrow): 0 violations over qcqp1500-1nc_0000 (10.5k node
+records), column25 seeds 0-8 (300k), and marine 9/11/12/13/16. Largest
+d/sym_nrow 2.87 (marine_0012, front < 200 rows). Per-node area growth
+alone does not separate cases (marine's tiny fronts reach 9.7x), so
+the 4096-row floor carries small fronts.
+qcqp1500-1nc oracle: MUMPS 5.8.2 fails on it (mumps.json
+factorization_status fail). numpy eigvalsh on the dense 12008^2 matrix
+gives 10508 neg / 1500 pos with a cluster at -5.62e-9; this matches the
+sidecar.
+Tests written first, and all fail on the old formula:
+- unit caps [0,0,64,0,400,0,16] vs hand oracle [0,0,316,0,6000,0,4046];
+- column25 seed 1 neg 75599 (+3);
+- qcqp "cascade-break engaged".
+With assign_delayed_capacities = min(worst, max(3*nrow, 4096-nrow)),
+all 4 pass. Also added FactorStats::inertia_uncertain() (= n_tiny) as
+the reporting half.
+
+* 16:10 :issue215:delay-budget:sweep:
+613-matrix kkt-mittelmann sweep (pounce params, threshold 1e-8, Auto)
+on the growth-cap build (e8b6153), compared with the old-budget sweep
+from earlier today. Inertia and status are identical on all 613, with
+0 FAIL. Only the 6 matrices where the old budget engaged changed, all
+to cb 0 and n_tiny 0:
+| matrix            | old cb/n_tiny/nnzL/t   | new cb/n_tiny/nnzL/t |
+| marine_1600_0009  | 1/0/2.49M/0.34s        | 0/0/2.52M/0.23s      |
+| marine_1600_0011  | 4/1/2.52M/0.37s        | 0/0/2.60M/0.23s      |
+| marine_1600_0012  | 1/0/2.47M/0.33s        | 0/0/2.50M/0.24s      |
+| marine_1600_0013  | 1/7/2.18M/0.40s        | 0/0/2.18M/0.22s      |
+| marine_1600_0016  | 1/2/2.37M/0.32s        | 0/0/2.37M/0.21s      |
+| qcqp1500-1nc_0000 | 16/2263/5.14M/2.36s    | 0/0/7.81M/10.63s     |
+The cost of exactness on qcqp1500-1nc is 4.5x time and +52% nnzL; the
+CB result was correct only by luck (2263 sign-noise pivots).
+pinene_3200_0005/0009 still show n_tiny 30/220 with cb 0, the same as
+before. That is not the CB path, inertia is exact, and it is unchanged
+by this fix. Wall-clock totals (503 s old vs 251 s new) are not
+comparable: unchanged matrices such as arki0003 (no symbolic change)
+also ran 3.5x faster, so the old sweep ran on a loaded machine.

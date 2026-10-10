@@ -157,6 +157,22 @@ pub struct FactorStats {
     pub n_threshold_fail_accepts: usize,
 }
 
+impl FactorStats {
+    /// Number of pivots whose sign the factor could not resolve: pivots
+    /// at or below the perturbation floor that were set to `sign(d)·floor`
+    /// (`n_tiny`). Their `sign(d)` may be round-off, so when this is
+    /// nonzero the reported inertia is not guaranteed and can be off by
+    /// as much as this count. An IPM that drives inertia correction from
+    /// the count should treat a nonzero value as "inertia unknown". Zero
+    /// means no pivot was floored; the inertia then follows from the
+    /// computed pivots, as in any threshold-pivoting LDLᵀ. Under the
+    /// default parameters only cascade-break fronts floor pivots (the
+    /// issue #38 static-pivot floor is opt-in). Issue #215.
+    pub fn inertia_uncertain(&self) -> usize {
+        self.n_tiny
+    }
+}
+
 /// Result of a single `Solver::factor` attempt.
 #[derive(Debug)]
 pub enum FactorStatus {
