@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-10-10T14:54:29Z
+Generated: 2026-10-10T19:59:52Z
 
 ## Latest Session
 File: dev/sessions/2026-10-10-01.md
@@ -59,34 +59,34 @@ fix "auto re-analyse on cascade-break".
 
 ## Git Status
 ```
-c8048bf feat(solver): re-analyse when a reused LdltCompress analysis hits cascade-break
-e7f4675 fix(solver): report pattern_reused=false on an escalated first factor
-fdef8b1 Merge pull request #214 from jkitchin/claude/modest-dirac-fzfm5b
-9632f30 docs: session checkpoint 2026-10-09-01 (PR #214 review fixes)
-a90e63d docs(changelog): mark #213 struct fields breaking, record verified numbers
+f825984 docs(journal): #215 growth-cap Mittelmann sweep result
+e8b6153 fix: delay budget bounds front growth, not supernode width (#215)
+b3a9b8f Merge pull request #216 from jkitchin/fix/215-cb-reused-analysis
+7b7522f docs: session 2026-10-10-01 addendum (re-analysis withdrawn)
+7fcb100 revert(solver): remove auto re-analysis on cascade-break (#215)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
-test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 461 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 12.10s
+test result: ok. 458 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.88s
 
 ```
 
@@ -114,58 +114,58 @@ medium (<500)            153560     1.91     <= 3.0     PASS
 ```
 
 ## Recent Decisions
-after 2 consecutive non-adopted re-analyses (reset on adoption and on
-pattern change). On by default, opt out with
-`with_auto_reanalyse_on_cb(false)`. The user chose this option over
-exact-inertia swap-to-boundary (multi-session) and a caller-driven
-re-analysis.
 
-**Why.** The `LdltCompress` analysis is value-dependent (its MC64
-matching picks the 2×2 pairs), so on a drifting IPM sequence it goes
-stale. On pounce#999 `column25_integral`, iterate 4 on a reused `Solver`
-gave neg 75597 (true 75596) on the reporter's machine. Here the reused and
-fresh analyses differ (25024 vs 24684 supernodes), and resetting the
-symbolic cache alone reproduces the fresh factor exactly. Neither analysis
-is better on every machine: here warm has cb 1 and fresh cb 4, while the
-reporter saw warm cb 6 and fresh cb 2. So the rule compares the two factors
-instead of always preferring one. A miss is "not adopted", not "CB remains",
-because in the reporter's run the fresh analysis also has CB. Counting that
-as a miss would have latched before iterate 4.
+## 2026-10-10 — The delay budget bounds front growth, not supernode width (issue #215)
 
-**Limits.** This is a mitigation. A factor that still engages
-cascade-break can have a wrong inertia. A pattern-only analysis
-(preprocess `None`) is never re-analysed because it would come back
-identical. Cost per re-analysis is one `LdltCompress` symbolic (including
-MC64) plus one factor, about 6 s on column25 (n=151392) against a 0.33 s
-warm factor.
+**Decision.** `assign_delayed_capacities` sets
+`delayed_capacity = min(subtree_ncol − own_ncol, max(3·nrow, 4096 − nrow))`,
+replacing `min(worst, max(4·own_ncol, 16))` from issue #55. Cascade-break
+stays as the over-budget path, now acting as a memory backstop. Add
+`FactorStats::inertia_uncertain()` (= `n_tiny`) so callers can tell
+when the inertia was computed from floored pivots.
 
-**Evidence.** Unit tests `issue_215_*` in `solver.rs` (Weyl-inertia
-fixture, with a stale analysis simulated by zeroing `delayed_capacity`).
-seq215 replay in `dev/journal/2026-10-10-01.org` §11:55. The
-`pattern_reused` re-entry fix is pinned in
-`tests/issue102_ordering_escalation.rs`, which fails with the fix reverted.
+**Why.** Under cascade-break, pivots are floored to `sign(d)·eps`, and
+when `|d|` is round-off that sign is noise. The old cap scaled with
+`own_ncol`, so thin IPM-KKT supernodes hit it at front sizes far below
+any memory concern. column25 `i011_s002` under 9 inertia-preserving
+congruences was wrong on 3 with the old cap and 0 without it. The
+pinene/nql180 blowups that motivated the old cap no longer reach any
+budget at HEAD (cb 0). Across the kkt-mittelmann corpus, the new cap
+admits every delay observed under unbounded delay.
+
+**Cost.** `qcqp1500-1nc_0000`: +52 % nnz(L), ~4.6× factor time. The
+other changed matrices are within ±3 % or faster.
+
+**Alternatives rejected.**
+- Auto re-analysis; see the withdrawal entry above.
+- Unbounded delay with no backstop: exact, but nothing stops a future
+  dense-front blowup.
+- Swap-to-boundary: deferred as follow-up, since it reduces the volume
+  of delays rather than fixing their sign handling.
+
+Research: `dev/research/issue-215-delay-budget-exact-inertia.md`.
 
 ## Recent Tried-and-Rejected
+  derivative matrix (same δx = 3.33e-3 on all 75,796 primal diagonals).
+  The nearest eigenvalue is +3.47e-8, which feral counts as negative. The
+  reused analysis gives cb 2, n_tiny 19, tfa 32 and a +1 count. A
+  **fresh** `Solver` is also +1, with cb 5, n_tiny 63 and tfa 116. Both
+  candidates are wrong, so choosing between them cannot help.
+- Regression: on the five-matrix sequence in the issue body, iterate 1
+  became +1 (correct on fdef8b1). Re-analysis ran 4 times and was adopted
+  2 times. The comparator's criterion does not track inertia correctness.
+- Earlier, on the developer's machine, the replay was correct throughout,
+  and both re-analyses were declined. That run had no wrong count to fix
+  and so could not test the rule.
 
-**Why they fail, as far as it was chased.** `dtoc_wide`'s `max_front` is 31.
-At that width the numeric phase is all per-front overhead and no arithmetic,
-so the comparison measures supernode count rather than flops, and MetisND's
-fewer-but-wider fronts win for reasons that have nothing to do with dtoc2.
-Widening the chain from `(nx,nu) = (4,2)` to `(8,4)` moved `max_front` only
-24 -> 31; the real dtoc2's avg_deg of 17.5 is not reachable by this
-construction at the right `n`.
+**Why it fails.** The wrong counts come from factors with cascade-break
+nodes, whether the analysis is stale or fresh. Fewer CB nodes or fewer
+floored pivots is a proxy for "less perturbation". It does not show
+whether any floored pivot's sign was right.
 
-**This was already on the record.**
-`external_benchmarks/chain_proxy/README.md` documents geometry-matched
-proxies producing the wrong answer and says to prefer the real corpus. That
-warning was read during this session and the proxies were built anyway.
-
-**What survives.** Nothing about routing. The non-proxy measurements in the
-same session stand on their own and are recorded in
-`dev/research/issue-203-auto-routing-2026-09-17.md`: on the issue #203
-patterns MetisND is 1.62x faster sequentially and 3.5x in parallel, and
-`nnz_L`, `flop_proxy` and `max_front` were each checked as routing guards
-and each mispredicts.
+**Do not re-propose** factor-comparison or re-analysis heuristics for
+CB inertia. The direction left open is inertia-exact handling of
+delay-budget overflow (delay instead of floor).
 
 ## Source Files
 ```
@@ -259,6 +259,7 @@ tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs
 tests/issue_2_kkt_ls_init.rs
+tests/issue_215_delay_growth_cap.rs
 tests/issue_38_static_pivot.rs
 tests/issue_46_saddle_kkt_cascade.rs
 tests/issue_55_delay_budget.rs
