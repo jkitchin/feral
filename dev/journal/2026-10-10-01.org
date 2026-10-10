@@ -168,3 +168,24 @@ Tests written first, and all fail on the old formula:
 With assign_delayed_capacities = min(worst, max(3*nrow, 4096-nrow)),
 all 4 pass. Also added FactorStats::inertia_uncertain() (= n_tiny) as
 the reporting half.
+
+* 16:10 :issue215:delay-budget:sweep:
+613-matrix kkt-mittelmann sweep (pounce params, threshold 1e-8, Auto)
+on the growth-cap build (e8b6153), compared with the old-budget sweep
+from earlier today. Inertia and status are identical on all 613, with
+0 FAIL. Only the 6 matrices where the old budget engaged changed, all
+to cb 0 and n_tiny 0:
+| matrix            | old cb/n_tiny/nnzL/t   | new cb/n_tiny/nnzL/t |
+| marine_1600_0009  | 1/0/2.49M/0.34s        | 0/0/2.52M/0.23s      |
+| marine_1600_0011  | 4/1/2.52M/0.37s        | 0/0/2.60M/0.23s      |
+| marine_1600_0012  | 1/0/2.47M/0.33s        | 0/0/2.50M/0.24s      |
+| marine_1600_0013  | 1/7/2.18M/0.40s        | 0/0/2.18M/0.22s      |
+| marine_1600_0016  | 1/2/2.37M/0.32s        | 0/0/2.37M/0.21s      |
+| qcqp1500-1nc_0000 | 16/2263/5.14M/2.36s    | 0/0/7.81M/10.63s     |
+The cost of exactness on qcqp1500-1nc is 4.5x time and +52% nnzL; the
+CB result was correct only by luck (2263 sign-noise pivots).
+pinene_3200_0005/0009 still show n_tiny 30/220 with cb 0, the same as
+before. That is not the CB path, inertia is exact, and it is unchanged
+by this fix. Wall-clock totals (503 s old vs 251 s new) are not
+comparable: unchanged matrices such as arki0003 (no symbolic change)
+also ran 3.5x faster, so the old sweep ran on a loaded machine.
