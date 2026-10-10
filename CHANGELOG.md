@@ -9,6 +9,13 @@ All notable changes to FERAL will be documented in this file.
 fields below. Code that builds them with a struct literal or destructures
 them without `..` stops compiling.
 
+### Fixed — `pattern_reused` no longer reads `true` on an escalated first factor (issue #215)
+
+- Ordering escalation re-enters `factor()` with the pattern fingerprint
+  kept, so the first factor on a fresh `Solver` reported
+  `FactorStats::pattern_reused = true` (and the same value in
+  `ordering_info`). The re-entry now reports its outer call's value.
+
 ### Fixed — cascade-break no longer accepts sub-floor pivots unperturbed (issue #213)
 
 - **What.** In a cascade-break supernode (delay budget exceeded, so

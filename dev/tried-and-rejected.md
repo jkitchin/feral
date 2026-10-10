@@ -6104,3 +6104,37 @@ same session stand on their own and are recorded in
 patterns MetisND is 1.62x faster sequentially and 3.5x in parallel, and
 `nnz_L`, `flop_proxy` and `max_front` were each checked as routing guards
 and each mispredicts.
+
+## 2026-10-10 — Auto re-analysis on cascade-break as the issue #215 fix
+
+**What was tried.** `Solver::with_auto_reanalyse_on_cb` (c8048bf, PR #216):
+when a factor on a reused `LdltCompress` analysis engaged cascade-break,
+re-run the analysis on the current values, refactor, and keep the factor
+with lexicographically fewer `(n_cascade_break_nodes,
+n_threshold_fail_accepts + n_tiny)`. On by default.
+
+**Symptoms (reporter's pounce test, issue #215 comment 6099359505).**
+- column25_integral still stalls: it matches the derivative form through
+  iteration 11 (4 on fdef8b1), then stalls at mu = 0.1 with 175
+  restoration iterations by iteration 292.
+- First wrong count: `i011_s002`, 75597 against 75596 for the congruent
+  derivative matrix (same δx = 3.33e-3 on all 75,796 primal diagonals).
+  The nearest eigenvalue is +3.47e-8, which feral counts as negative. The
+  reused analysis gives cb 2, n_tiny 19, tfa 32 and a +1 count. A
+  **fresh** `Solver` is also +1, with cb 5, n_tiny 63 and tfa 116. Both
+  candidates are wrong, so choosing between them cannot help.
+- Regression: on the five-matrix sequence in the issue body, iterate 1
+  became +1 (correct on fdef8b1). Re-analysis ran 4 times and was adopted
+  2 times. The comparator's criterion does not track inertia correctness.
+- Earlier, on the developer's machine, the replay was correct throughout,
+  and both re-analyses were declined. That run had no wrong count to fix
+  and so could not test the rule.
+
+**Why it fails.** The wrong counts come from factors with cascade-break
+nodes, whether the analysis is stale or fresh. Fewer CB nodes or fewer
+floored pivots is a proxy for "less perturbation". It does not show
+whether any floored pivot's sign was right.
+
+**Do not re-propose** factor-comparison or re-analysis heuristics for
+CB inertia. The direction left open is inertia-exact handling of
+delay-budget overflow (delay instead of floor).
