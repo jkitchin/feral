@@ -75,3 +75,23 @@ Changed the miss rule after this run: first version counted "winner still has
 CB" as a miss. In the reporter's run fresh also has CB (cb 2 vs warm 6), so
 adopted improvements would have counted as misses and latched before it004.
 Now a miss = not adopted; adoption resets the streak.
+
+* 12:50 :issue-215:cascade-break:rejected:pounce:
+Reporter's test of 6dbe944 in pounce (issue #215 comment 6099359505).
+column25_integral now matches the derivative form through iteration 11
+(was 4 on fdef8b1), but still stalls (mu=0.1, 175 restoration iterations
+by iteration 292). First wrong count: i011_s002 (first delta_x rung,
+3.33e-3 on all 75,796 primal diagonals), integral 75597 vs congruent
+derivative matrix 75596. Nearest eigenvalues (eigsh): +3.47e-8,
+-1.30e-7, so feral counts a small positive eigenvalue as negative.
+Replay through one Solver: n_tiny 19, cb 2, tfa 32, +1; auto_reanalyse 6
+run / 3 adopted over 16 factors. A FRESH Solver on i011_s002 is also +1
+(cb 5, n_tiny 63, tfa 116). So this is not a stale-analysis case: both
+candidate analyses are wrong, and the comparator only picks between them.
+On the older five-matrix sequence this branch fixes it004 but breaks
+it001 (+1, correct before; re-analyse 4 run / 2 adopted): the
+(cb, tfa+tiny) criterion does not track inertia correctness.
+Conclusion: auto re-analysis is rejected as the #215 fix (recorded in
+tried-and-rejected). Every wrong count in the report comes from a factor
+with CB nodes; the fix has to make budget overflow inertia-exact (delay
+instead of floor) rather than choose between CB factors.
