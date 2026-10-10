@@ -95,3 +95,54 @@ Conclusion: auto re-analysis is rejected as the #215 fix (recorded in
 tried-and-rejected). Every wrong count in the report comes from a factor
 with CB nodes; the fix has to make budget overflow inertia-exact (delay
 instead of floor) rather than choose between CB factors.
+
+* 13:30 :issue-215:cascade-break:reproducer:delay-budget:
+Reporter's decisive pair (gh999-decisive-pair.zip; SHA256SUMS verified)
+on this M4 Pro, fresh Solver, pivot_threshold 1e-8, Auto ordering:
+integral neg 75596 (+0) cb 2 tfa 15 n_tiny 32 (reporter's x86/AVX-512
+box: +1, cb 5 tfa 116). derivative +0, cb 0. So the CB pattern is
+machine-dependent and the wrong count did not reproduce directly.
+Local reproducer: diagonal congruence D*A*D, d_i in [0.7,1.4] (xorshift
+seeds 1-8), same inertia by Sylvester; oracle = reporter's eigsh count
+75596 neg. Default params: seed1 +3 (cb 12 tfa 290), seed4 +1 (cb 6),
+seed8 +1 (cb 3); 5 others +0 but all with cb 2-6. 3/9 wrong, every one
+from a CB factor.
+Option-1 probe (scratch: DELAY_CAPACITY_MULTIPLIER = 2^40, i.e. the
+budget is only the exact subtree bound; cascade_break_ratio None):
+9/9 seeds +0, cb 0, tfa 0, n_tiny 0, nnzL 9.04-9.08M vs 9.49-9.70M
+default, ~11 s vs ~25 s per factor (load avg ~64, timings noisy but
+same conditions). With K=4 and CB off, the factor errors
+DelayBudgetExceeded{sn 1456, required 79, capacity 68}: the budget is
+a policy check, not an allocation bound.
+Implication: on this matrix the K=4 budget + CB floor is both the
+inertia bug and a slowdown. Next: check the #55 cascade-victim problems
+(why the budget exists) under unbounded delay.
+
+* 13:55 :issue-215:delay-budget:corpus:
+#55 historical corpus (40 of 41; nuffield2_trap_iter1 not on disk),
+sidecar-JSON inertia, fresh Solver, thr 1e-8, Auto ordering. K=4+CB
+(default) vs K=2^40 + CB off (scratch build):
+- Both: 40/40 correct inertia.
+- Default engages CB on marine_1600 iters 9, 11, 12, 13, 16 (cb 1-4,
+  n_tiny <= 7), still correct. Unbounded: cb 0 n_tiny 0 there, nnzL
+  +0.04 % to +2.8 % (marine_1600_0011 2.524M -> 2.595M), time equal
+  or lower (0.57 -> 0.41 s).
+- pinene_3200 0-9, nql180_0006, robot, NARX, rocket: default already
+  cb 0, so K is never binding and the two builds are bit-identical
+  (same nnzL). The pinene/nql180 >100 GB blowups that motivated K=4
+  (symbolic-delay-budget-2026-05-27) no longer reach the budget.
+Running a default sweep of all 618 kkt-mittelmann matrices to find
+every matrix where K binds; only those can differ under unbounded.
+
+* 14:20 :issue-215:delay-budget:corpus:
+Default sweep of kkt-mittelmann: 613 of 618 factored. The 5 that did
+not are corrupt files (arki0003_0005 and cont5_1_l_0003 truncated,
+cont5_2_4_l_0003 nnz mismatch, dtoc2_0001/0002 contain 'inf'), so they
+are irrelevant here. 0 wrong inertia (598 with a sidecar oracle, 15
+without). K binds (cb > 0) on only 6: marine_1600 9/11/12/13/16 and
+qcqp1500-1nc_0000. qcqp1500-1nc_0000 default: cb 16, n_tiny 2263,
+tfa 249, nnzL 5.14M, 2.36 s, correct. Unbounded + CB off: cb 0,
+n_tiny 0, nnzL 7.81M (+52 %), 10.8 s (4.6x), correct. This is the
+cost case for lifting the budget. It is correct both ways, but
+default's 2263 floored pivots mean it was correct by luck, the same
+way column25 seeds 0/2/3 were.
