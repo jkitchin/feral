@@ -135,16 +135,26 @@ pub struct FactorStats {
     /// [`SparseFactors::n_tiny`](crate::numeric::factorize::SparseFactors::n_tiny).
     pub n_tiny: usize,
     /// Number of non-root supernodes factored under the cascade-break
-    /// trigger: their delay budget was exceeded, so threshold-failing
-    /// pivots were perturbed or accepted in place rather than delayed.
-    /// Zero on a factor that obeyed threshold pivoting throughout.
-    /// Nonzero means the `|L| <= 1/u` growth bound does not cover the
-    /// whole factor; a caller that reads inertia (e.g. an IPM inertia
-    /// correction) may want to refactor with a different ordering or
-    /// larger `nemin` rather than trust it. Mirrors
+    /// trigger: their delay budget was exceeded, so any threshold-failing
+    /// pivot in them was perturbed or accepted in place rather than
+    /// delayed. Set from the budget alone, so nonzero means the
+    /// `|L| <= 1/u` growth bound *may* not cover the whole factor. Read it
+    /// together with `n_tiny` and `n_threshold_fail_accepts`, which count
+    /// the pivots that actually escaped the bound. Mirrors
     /// [`SparseFactors::n_cascade_break_nodes`](crate::numeric::factorize::SparseFactors::n_cascade_break_nodes).
     /// Issue #213.
     pub n_cascade_break_nodes: usize,
+    /// Number of 1×1 pivots that failed the threshold test and were
+    /// accepted with their value unchanged because their front could not
+    /// delay (root or cascade-break fronts), so their L column is not
+    /// bounded by `1/u`. Root fronts accept such pivots by design, so a
+    /// small count is normal; a factor where this is nonzero *and*
+    /// `n_cascade_break_nodes > 0` is the issue #213 pattern, and a caller
+    /// that reads inertia (e.g. an IPM inertia correction) may want to
+    /// refactor with a different ordering or larger `nemin` rather than
+    /// trust it. Mirrors
+    /// [`SparseFactors::n_threshold_fail_accepts`](crate::numeric::factorize::SparseFactors::n_threshold_fail_accepts).
+    pub n_threshold_fail_accepts: usize,
 }
 
 /// Result of a single `Solver::factor` attempt.
@@ -2530,6 +2540,7 @@ impl Solver {
         let scaling_info = factors.scaling_info.clone();
         let n_tiny = factors.n_tiny();
         let n_cascade_break_nodes = factors.n_cascade_break_nodes();
+        let n_threshold_fail_accepts = factors.n_threshold_fail_accepts();
         let sym = self.last_symbolic.as_ref()?;
         let mut n_supernodes = 0usize;
         let mut max_front_rows = 0usize;
@@ -2558,6 +2569,7 @@ impl Solver {
             ordering_info,
             n_tiny,
             n_cascade_break_nodes,
+            n_threshold_fail_accepts,
         })
     }
 

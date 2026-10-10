@@ -2961,6 +2961,7 @@ mod tests {
                 needs_refinement: false,
                 n_rook_rescues: 0,
                 n_tiny: 0,
+                n_threshold_fail_accepts: 0,
                 zero_tol: 0.0,
                 zero_tol_2x2: 0.0,
             },
@@ -3589,6 +3590,7 @@ mod tests {
             needs_refinement: false,
             n_rook_rescues: 0,
             n_tiny: 0,
+            n_threshold_fail_accepts: 0,
             zero_tol: f64::EPSILON,
             zero_tol_2x2: f64::EPSILON * f64::EPSILON,
         };

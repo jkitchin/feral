@@ -147,11 +147,11 @@ fn cascade_break_nodes_are_counted() {
     // {3,4} -> 5, {2,5} -> 6 — so n = 21 clears the n <= 16 dense
     // fast path and the factor runs multifrontal.
     let copies = 3usize;
-    let n = 7 * copies;
+    let n = 8 * copies;
     let edges = [(2, 0), (2, 1), (5, 3), (5, 4), (6, 2), (6, 5)];
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
     for c in 0..copies {
-        let o = 7 * c;
+        let o = 8 * c;
         for j in 0..7 {
             rows.push(o + j);
             cols.push(o + j);
@@ -198,5 +198,113 @@ fn cascade_break_nodes_are_counted() {
     assert!(
         f.n_cascade_break_nodes() > 0,
         "budget overflow under CB must be reported by n_cascade_break_nodes"
+    );
+}
+
+/// Issue #213: the pivots a cascade-break front could not delay are
+/// visible in the counters.
+///
+/// Fixture: four copies of an 8-variable block `l1, l2, p, h, t1..t4`:
+///
+/// ```text
+///   a_l1l1 = a_l2l2 = 1e-14, a_p,l1 = a_p,l2 = 1e-14, a_h,l1 = a_h,l2 = 1,
+///   a_pp = a_hh = 1, a_hp = 1, a_h,ti = 1, t1..t4 a clique (diag 4, off 1).
+/// ```
+///
+/// The ordering is `l2, l1, p, h, t*`, giving the supernodes `{l2}`
+/// (rows `p, h`), `{l1, p}` (row `h`) and the root `{h, t*}`; the clique
+/// keeps `h` out of `p`'s supernode, so `{l1, p}` is not the root. The
+/// leaf delays `l2` (`1e-14` fails `u · |a_h,l2|`). In `{l1, p}` both
+/// `l1` and the delayed `l2` have their large entry in the
+/// non-fully-summed row `h`, so both fail the threshold, and with the
+/// budget zeroed the node is a CB node that cannot delay them.
+///
+/// With the legacy unbounded CB policy (`cascade_break_eps = None`, so
+/// `ForceAccept`) a `1e-14` pivot sits above `zero_tol` and is kept as
+/// is (case b): `n_threshold_fail_accepts` counts it. With the bounded-Δ
+/// policy (`Some(1e-10)`) it is floored instead and counted in `n_tiny`.
+#[test]
+fn cascade_break_pivots_show_in_counters() {
+    let copies = 4usize;
+    let n = 8 * copies;
+    // (row, col, value), lower triangle; local l1=0, l2=1, p=2, h=3, q1=4, q2=5.
+    let mut block = vec![
+        (0, 0, 1e-14),
+        (2, 0, 1e-14),
+        (3, 0, 1.0),
+        (1, 1, 1e-14),
+        (2, 1, 1e-14),
+        (3, 1, 1.0),
+        (2, 2, 1.0),
+        (3, 2, 1.0),
+        (3, 3, 1.0),
+    ];
+    for t in 4..8 {
+        block.push((t, 3, 1.0));
+        block.push((t, t, 4.0));
+        for u in 4..t {
+            block.push((t, u, 1.0));
+        }
+    }
+    let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+    for c in 0..copies {
+        let o = 8 * c;
+        for &(i, j, v) in &block {
+            // CscMatrix::from_triplets takes the lower triangle (row >= col).
+            let (r, cl) = if i >= j { (i, j) } else { (j, i) };
+            rows.push(o + r);
+            cols.push(o + cl);
+            vals.push(v);
+        }
+    }
+    let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("matrix must build");
+    let sn = SupernodeParams {
+        nemin: 1,
+        ..SupernodeParams::default()
+    };
+    let mut sym = symbolic_factorize(&m, &sn).expect("symbolic ok");
+    for s in sym.supernodes.iter_mut() {
+        s.delayed_capacity = 0;
+    }
+    let base = NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: 1e-8,
+            ..BunchKaufmanParams::default()
+        },
+        cascade_break_ratio: Some(0.5),
+        ..NumericParams::default()
+    };
+
+    let legacy = NumericParams {
+        cascade_break_eps: None,
+        ..base.clone()
+    };
+    let (fl, _) = factorize_multifrontal(&m, &sym, &legacy).expect("legacy CB factor ok");
+    let bounded = NumericParams {
+        cascade_break_eps: Some(1e-10),
+        ..base
+    };
+    let (fb, _) = factorize_multifrontal(&m, &sym, &bounded).expect("bounded CB factor ok");
+
+    assert_eq!(
+        fl.n_cascade_break_nodes(),
+        copies,
+        "one CB node (p) per copy"
+    );
+    assert_eq!(
+        fb.n_cascade_break_nodes(),
+        copies,
+        "one CB node (p) per copy"
+    );
+    assert_eq!(
+        (fl.n_threshold_fail_accepts(), fl.n_tiny()),
+        (2 * copies, 0),
+        "legacy CB keeps both l pivots as is and must count them"
+    );
+    assert_eq!(
+        (fb.n_threshold_fail_accepts(), fb.n_tiny()),
+        (0, 2 * copies),
+        "bounded CB floors both l pivots instead"
     );
 }
