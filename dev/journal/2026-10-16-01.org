@@ -128,3 +128,17 @@ Limits: an in-repo corpus that is mostly small CUTEst KKTs; the large
 Mittelmann IPM KKTs (optmass, robot, steering, ...) are not represented
 except through the chain proxies.
 Raw data: scratch sweep.csv (not committed); summary above.
+
+* 21:05 :issue-153:recycling:plan:
+Started the per-front output recycling. Code inspection notes:
+- node_factors is indexed by supernode (postorder);
+- every error path in Solver::factor_impl already sets
+  last_factors = None, and success replaces it, so taking last_factors
+  just before the numeric driver changes no observable state;
+- FactorScratch is pub (feral::dense::factor) but nothing in the repo
+  constructs it with a struct literal, so adding a Default field is safe
+  in-tree (CHANGELOG note needed).
+Lever D.1 (2026-04-19) planned output and row-index reuse as its items
+3-4, but only the scratch half was built. Research note and plan:
+dev/research/factor-output-recycling-2026-10-16.md and
+dev/plans/factor-output-recycling.md.
