@@ -1784,6 +1784,12 @@ pub fn dense_fast_factor_with_workspace(
     // use the diagonal-only kernel. Vanderbei 1995 Theorem 2.1
     // guarantees a diagonal D exists for any SQD matrix in the order
     // we receive it.
+    //
+    // Issue #153: the previous fast-path factor is a single node; reuse
+    // its buffers (slot 0) and drop anything else that was staged.
+    let recycled = ws.take_recycled(0);
+    let recycled_rows = install_recycled(&mut ws.factor_scratch, recycled);
+    ws.recycled.clear();
     let ff = if params.sqd_mode {
         factor_frontal_diagonal_in_place(&mut sym, n, &params.bk)?
     } else {
@@ -1806,7 +1812,9 @@ pub fn dense_fast_factor_with_workspace(
     // perm/perm_inv identity, this reduces exactly to the dense solve.
     let perm: Vec<usize> = (0..n).collect();
     let perm_inv: Vec<usize> = (0..n).collect();
-    let row_indices: Vec<usize> = (0..n).collect();
+    let mut row_indices = recycled_rows;
+    row_indices.clear();
+    row_indices.extend(0..n);
 
     let node = NodeFactors {
         first_col: 0,

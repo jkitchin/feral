@@ -142,6 +142,9 @@ const FIXTURES: &[&str] = &[
     "tests/data/parity/hydcar20/HYDCAR20_0000.mtx",
     "tests/data/large/sawpath_kkt.mtx",
     "tests/data/large/twirism1_kkt.mtx",
+    // n <= 16: the D.4 dense fast path (single synthesized node).
+    "tests/data/parity/hs103/HS103_0000.mtx",
+    "tests/data/parity/argauss/ARGAUSS_0000.mtx",
 ];
 
 #[test]
