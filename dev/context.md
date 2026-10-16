@@ -1,115 +1,133 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-10-10T19:59:52Z
+Generated: 2026-10-16T19:47:23Z
 
 ## Latest Session
-File: dev/sessions/2026-10-10-01.md
+File: dev/sessions/2026-10-16-01.md
 ```
-# Session 2026-10-10-01
+# Session 2026-10-16-01
 
-## Benchmark note (read first): factor-ratio p90 is worse, and the cause is machine load
+## Benchmark note (read first): not comparable to 2026-10-10-01
 
-`cargo run --bin bench --release` on the full local KKT corpus gave the same
-correctness lines as 2026-10-09-01: dense inertia 154429/154482, residual
-154149/154482; sparse inertia vs MUMPS 154531/154590, residual 154258/154590;
-48 both-path inertia mismatches; 78 sparse-only and 33 dense-only failures.
-The factor-ratio p90 vs MUMPS is **worse**:
-
-| bucket | 2026-10-09-01 | this session |
-|---|---|---|
-| dense small (<200) | 1.61 | 1.75 |
-| dense medium (<500) | 2.00 | 2.18 |
-| sparse small (<200) | 1.59 | 1.91 |
-| sparse medium (<500) | 1.59 | 1.91 |
-
-The bench calls `symbolic_factorize` + `factorize_multifrontal` directly
-(src/bin/bench.rs:1924-1942) and never constructs a `Solver`, so this
-session's change (all inside `Solver::factor`) cannot reach it. During the
-run the load average was 80 on 14 cores: two unrelated python jobs at ~83%
-CPU each, plus mds_stores and WindowServer. I attribute the shift to load
-but did not confirm it with a quiet-machine rerun. The next session should
-rerun the bench on an idle machine before comparing.
+This ran in a cloud container (x86_64 KVM guest) without the local KKT
+corpus. `cargo run --bin bench --release` found only the 2 generated
+synthetic-regression fixtures. Both pass inertia and residual, and no
+oracle timings are available. No factor-ratio p90 could be computed, so
+nothing here can be compared with the previous session. No solver source
+changed this session.
 
 ## Goal
 
-Issue #215: pounce#999 `column25_integral` still stalls after #214. A
-`Solver` reused across IPM iterates 0-4 reported neg 75597 at iterate 4 on
-the reporter's machine; a fresh `Solver` reports 75596. The user chose the
-fix "auto re-analyse on cascade-break".
+Review the #153 comment 6223093143 (pounce#1020: same instruction stream,
+about 2.6x lower IPC on x86 cloud hosts). Run the measurements it asks
+for on x86 Linux, then post the review.
 
 ## Accomplished
 
-- **Reproduction (journal §10:14).** Rebuilt the iterates with pounce
-  43cbb488 patched to this feral. The matrices match the issue (same min|d|
-  per iterate). The +1 does **not** reproduce on this machine: warm and
-  fresh both give 75596. The cached symbolic is the state that matters.
-  `invalidate_symbolic_cache()` before it004 reproduces the fresh factor
-  exactly; the MC64 cache never hits. The analysis is value-dependent under
-  escalation-forced `LdltCompress` (25024 vs 24684 supernodes on the same
-  pattern). CB counts here (warm 1, fresh 4) differ from the reporter's
-  (6, 2).
-- **Auto re-analysis (c8048bf).** Gate: reused analysis, `resolved_preprocess
-  == LdltCompress`, `n_cascade_break_nodes > 0`, miss latch < 2. Re-run the
-  symbolic, refactor, and keep the new factor if `(cb, tfa + tiny)` is
-  lexicographically smaller. Opt-out:
-  `with_auto_reanalyse_on_cb(false)`. Counters: `auto_reanalyse_count`,
-  `auto_reanalyse_adopted_count`.
-- **Stats fix (e7f4675).** The escalation re-entry reported
+- `crates/feral-diagnostics/src/bin/diag_153_chain_x86.rs`: a synthetic
+  hanging-chain KKT close to the reporter's (11875 vs 11874 supernodes,
+  max front 19 vs 20). It has modes wall / profile / alloc / bump / once,
+  plus a mimalloc arm behind a local cfg.
+- Callgrind: 192.0M Ir per warm refactor, compared with the reporter's
+  215.7M (x86) and 191.2M (aarch64). Same profile shape: infnorm 24.6%,
+  glibc malloc 18-19%, memset/memcpy 8.4%.
+- The scaling route on warm refactors is plain InfNorm. The pre-MC64 trial
+  (`scaling/mod.rs:458`) does not fire.
+- Allocation is the dominant x86 lever on this matrix:
+  - mimalloc runs 1.7-1.8x faster than glibc (10/10 alternating rounds,
+    identical inertia and nnz_l);
+  - glibc `tcache_count=65535` gives about 1.3x;
+  - a bump arena is 1.04-1.085x *slower* (no reuse, so cache-cold).
+- 93,138 allocations (16.2 MB) per warm refactor, 7.84 per supernode,
+  almost all of them per-front outputs re-allocated every refactor.
+  Sites are listed in the journal.
+- Details and every number: `dev/journal/2026-10-16-01.org`.
+
+## Benchmark Results
+```
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 ```
 
 ## Git Status
 ```
+6fbea33 Merge pull request #218 from jkitchin/release/0.19.0
+d78ddc3 release: feral 0.19.0
+a0f724e Merge pull request #217 from jkitchin/fix/215-delay-growth-cap
+8836d1e docs: session 2026-10-10-01 addendum (growth-cap fix for #215)
 f825984 docs(journal): #215 growth-cap Mittelmann sweep result
-e8b6153 fix: delay budget bounds front growth, not supernode width (#215)
-b3a9b8f Merge pull request #216 from jkitchin/fix/215-cb-reused-analysis
-7b7522f docs: session 2026-10-10-01 addendum (re-analysis withdrawn)
-7fcb100 revert(solver): remove auto re-analysis on cascade-break (#215)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 458 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.88s
+test result: ok. 456 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.38s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-10-10-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-10-16-01.md)
 
-KKT summary: 156929 matrices (154482 dense-eligible n <= 1000, 108 skipped n > 1000, 2339 parse-skipped)
-  Inertia match: 154429/154482 (100.0%)
-  Residual pass: 154149/154482 (99.8%)
-  Parse-skipped: 2339
-  Worst residual: 2.46e-1 (POLAK6_0021)
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
 
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+Dense failure analysis: no failures
+
+Sparse failure analysis: no failures
+
+--- Dense ∩ Sparse failure overlap ---
+Failed in BOTH dense and sparse:  0
+Failed in dense only:             0
+Failed in sparse only:            0
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+
+--- Sparse perf vs oracles: no matrices have oracle timings ---
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.75     <= 2.0     PASS
-medium (<500)            152145     2.18     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.91     <= 2.0     PASS
-medium (<500)            153560     1.91     <= 3.0     PASS
+small-frontal (<200)          0        -     <= 2.0      N/A
+medium (<500)                 0        -     <= 3.0      N/A
+EXIT 0
 
 ```
 
@@ -146,26 +164,26 @@ other changed matrices are within ±3 % or faster.
 Research: `dev/research/issue-215-delay-budget-exact-inertia.md`.
 
 ## Recent Tried-and-Rejected
-  derivative matrix (same δx = 3.33e-3 on all 75,796 primal diagonals).
-  The nearest eigenvalue is +3.47e-8, which feral counts as negative. The
-  reused analysis gives cb 2, n_tiny 19, tfa 32 and a +1 count. A
-  **fresh** `Solver` is also +1, with cb 5, n_tiny 63 and tfa 116. Both
-  candidates are wrong, so choosing between them cannot help.
-- Regression: on the five-matrix sequence in the issue body, iterate 1
-  became +1 (correct on fdef8b1). Re-analysis ran 4 times and was adopted
-  2 times. The comparator's criterion does not track inertia correctness.
-- Earlier, on the developer's machine, the replay was correct throughout,
-  and both re-analyses were declined. That run had no wrong count to fix
-  and so could not test the rule.
+(`diag_153_chain_x86`, n = 40006, Amf + LdltCompress). Callgrind shows
+`mc64::compute_matching` once (the cold factor only). The warm
+`ScalingInfo` is `Applied` with `mc64_cache_hit_count() == 0`, so the warm
+route is `pick_scaling_strategy -> InfNorm` (line 437), not the line-458
+trial. `compute_infnorm`'s 24.6% of Ir is the ordinary 10-sweep InfNorm
+cost, which is already covered by the 2026-08-09 / 2026-08-15 entries.
 
-**Why it fails.** The wrong counts come from factors with cascade-break
-nodes, whether the analysis is stale or fresh. Fewer CB nodes or fewer
-floored pivots is a proxy for "less perturbation". It does not show
-whether any floored pivot's sign was right.
+**2. "glibc trims or mmaps per refactor and page faults explain the x86
+slowness."** Falsified. The glibc default gives 139 minor faults and 0.3 ms
+sys per 19 ms refactor. Setting `GLIBC_TUNABLES` trim_threshold and
+mmap_threshold to 4G cuts faults to 5 and is no faster (min 19.15 / 17.72
+ms vs 18.26 / 17.75).
 
-**Do not re-propose** factor-comparison or re-analysis heuristics for
-CB inertia. The direction left open is inertia-exact handling of
-delay-budget overflow (delay instead of floor).
+**Instrument defect, recorded so it is not reused:** a pointer-bump arena
+with no-op free is NOT a lower bound on allocator cost. On this matrix it
+was 1.04-1.085x *slower* than glibc (paired, 3 x 60), because it never
+reuses memory: 16.2 MB of cache-cold lines per refactor. mimalloc (which
+reuses memory) was 1.7-1.8x *faster* than glibc. The #200 bump-allocator
+result ("0.6-7.7%, allocation ruled out") used the bump instrument and
+does not rule allocation out. See dev/journal/2026-10-16-01.org.
 
 ## Source Files
 ```
@@ -238,8 +256,8 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -255,15 +273,6 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_215_delay_growth_cap.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -282,22 +291,31 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_215_delay_growth_cap.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
+tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
-tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_scaling.rs
-tests/lu_sparse_rhs.rs
 tests/lu_sparse.rs
+tests/lu_sparse_rhs.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -310,13 +328,13 @@ tests/n4_mc64_retry_latch.rs
 tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
-tests/pounce_interface.rs
 tests/pounce710_refine_cap_nrhs2.rs
+tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
 tests/refined_solve_core_stability.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
