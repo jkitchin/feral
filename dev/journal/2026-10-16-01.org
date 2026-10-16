@@ -89,3 +89,42 @@ refactor is untested.
 Implication: on x86 Linux/glibc, allocation is the largest single
 measured lever on this matrix (1.7-1.8x via a drop-in allocator). The
 rejected-on-Apple allocation verdicts do not transfer.
+
+* 20:50 :issue-153:allocator:corpus:result:
+Corpus sweep, run to check whether the chain result generalises.
+Corpus: 77 matrices, made up of every in-repo symmetric .mtx (CUTEst
+parity KKTs, tests/data/large, the stress synth set, nuffield2), the 5
+chain_proxy KKTs and the hanging chain. Three LU-basis files were skipped
+as unsymmetric. The Mittelmann corpus is not in this container, and
+SuiteSparse is blocked by the egress proxy.
+Arms (separate processes, 3 rounds with rotated arm order, about 1 s of
+warm refactors each):
+- glibc;
+- glibc with GLIBC_TUNABLES=glibc.malloc.tcache_count=65535;
+- mimalloc.
+Statistic: best-of-3 min, and the median of the 3 medians, as ratios to
+glibc, with the geomean per glibc-time bucket.
+| bucket   |  n | mi/g min | mi/g med | tc/g min | tc/g med | mi faster (med) |
+| <100us   | 51 |    0.930 |    0.897 |    0.923 |    0.911 | 48/51 |
+| 0.1-1ms  | 15 |    0.778 |    0.782 |    0.786 |    0.766 | 12/15 |
+| 1-10ms   |  7 |    0.722 |    0.697 |    0.751 |    0.763 | 7/7   |
+| >10ms    |  4 |    0.853 |    0.814 |    1.043 |    0.929 | 4/4   |
+| ALL      | 77 |    0.874 |    0.849 |    0.883 |    0.867 | 71/77 |
+Inertia and nnz_l are identical across arms on 77/77.
+Largest wins (mi/g median) are on matrices with many supernodes per unit
+of work:
+- chain 0.552, CRESC132 0.549, densecol_kkt_1000 0.540,
+  densecol_kkt_300 0.562;
+- MUONSINE 0.64-0.66, VESUVI* 0.64-0.67.
+No effect on large-front matrices: nuffield2 0.949, double_column_like
+0.971, twirism1 1.086, saddle_rankdef_100 1.003. Tiny n < 20 problems
+(1 supernode) are within noise.
+The tcache tunable recovers most of the gain below 10 ms but is neutral or
+worse above (min 1.04).
+Conclusion: not a ghost. Allocator cost on glibc is a broad 15% geomean
+and 30-45% on small-front-heavy matrices. It scales with the supernode
+count, which is consistent with the per-front output re-allocation sites.
+Limits: an in-repo corpus that is mostly small CUTEst KKTs; the large
+Mittelmann IPM KKTs (optmass, robot, steering, ...) are not represented
+except through the chain proxies.
+Raw data: scratch sweep.csv (not committed); summary above.

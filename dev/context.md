@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-10-16T19:47:23Z
+Generated: 2026-10-16T20:14:05Z
 
 ## Latest Session
 File: dev/sessions/2026-10-16-01.md
@@ -59,11 +59,11 @@ Sparse solver: 2/2 total
 
 ## Git Status
 ```
+b9c6e45 diag: add per-file corpus mode to diag_153_chain_x86
+7c8a6dd dev: session 2026-10-16-01 checkpoint (#153 x86 allocator review)
+6d55fab diag: add diag_153_chain_x86 hanging-chain warm-refactor probe
 6fbea33 Merge pull request #218 from jkitchin/release/0.19.0
 d78ddc3 release: feral 0.19.0
-a0f724e Merge pull request #217 from jkitchin/fix/215-delay-growth-cap
-8836d1e docs: session 2026-10-10-01 addendum (growth-cap fix for #215)
-f825984 docs(journal): #215 growth-cap Mittelmann sweep result
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 456 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.38s
+test result: ok. 456 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.64s
 
 ```
 
