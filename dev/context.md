@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-10-16T20:14:05Z
+Generated: 2026-10-16T22:13:11Z
 
 ## Latest Session
 File: dev/sessions/2026-10-16-01.md
@@ -59,11 +59,11 @@ Sparse solver: 2/2 total
 
 ## Git Status
 ```
-b9c6e45 diag: add per-file corpus mode to diag_153_chain_x86
-7c8a6dd dev: session 2026-10-16-01 checkpoint (#153 x86 allocator review)
-6d55fab diag: add diag_153_chain_x86 hanging-chain warm-refactor probe
-6fbea33 Merge pull request #218 from jkitchin/release/0.19.0
-d78ddc3 release: feral 0.19.0
+9833139 dev: journal the recycling corpus sweep (#153)
+2d4e707 perf(numeric): recycle the dense fast path's node buffers too (#153)
+257c6dc perf(numeric): recycle per-front output buffers on warm refactors (#153)
+5f4175d dev: research note and plan for per-front output recycling (#153)
+34e9fed dev: journal the corpus-wide glibc vs mimalloc warm-refactor sweep (#153)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 456 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.64s
+test result: ok. 457 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.55s
 
 ```
 
@@ -266,6 +266,7 @@ tests/dense_fast_path.rs
 tests/dense_ldlt.rs
 tests/env_knob_parsing.rs
 tests/env_knob_scan.rs
+tests/factor_output_recycling.rs
 tests/factor_scratch_parity.rs
 tests/factor_workspace_parity.rs
 tests/factors_ld_export.rs
