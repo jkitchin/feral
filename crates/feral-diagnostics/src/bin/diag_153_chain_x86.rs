@@ -233,9 +233,71 @@ fn median(v: &mut [f64]) -> f64 {
     v[v.len() / 2]
 }
 
+/// Corpus mode: warm refactors of one .mtx file (or `chain` for the
+/// generated hanging chain) for ~1 s, then one CSV line:
+/// `name,n,nnz,supernodes,nnz_l,pos,neg,zero,reps,min_us,median_us`.
+/// Inertia is not checked against an oracle; it is printed so arms can be
+/// compared for bit-level agreement.
+fn run_mtx(path: &str) {
+    let m = if path == "chain" {
+        chain_kkt(10_000).0
+    } else {
+        let parsed = feral::read_mtx(std::path::Path::new(path)).and_then(|x| x.to_csc());
+        match parsed {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{path}: {e:?}");
+                std::process::exit(3);
+            }
+        }
+    };
+    let mut s = solver();
+    for _ in 0..2 {
+        if let FactorStatus::FatalError(e) = s.factor(&m, None) {
+            eprintln!("{path}: {e:?}");
+            std::process::exit(4);
+        }
+    }
+    let mut t = Vec::new();
+    let start = Instant::now();
+    while (start.elapsed().as_secs_f64() < 1.0 || t.len() < 15) && t.len() < 5000 {
+        let t0 = Instant::now();
+        let _ = s.factor(&m, None);
+        t.push(t0.elapsed().as_secs_f64() * 1e6);
+    }
+    let min = t.iter().cloned().fold(f64::INFINITY, f64::min);
+    let reps = t.len();
+    let med = median(&mut t);
+    let (nnz_l, inertia) = s
+        .last_factor_stats()
+        .map(|st| (st.nnz_l, st.inertia))
+        .unwrap_or((
+            0,
+            Inertia {
+                positive: 0,
+                negative: 0,
+                zero: 0,
+            },
+        ));
+    let nsn = s.symbolic().map(|x| x.supernodes.len()).unwrap_or(0);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    println!(
+        "{name},{},{},{nsn},{nnz_l},{},{},{},{reps},{min:.2},{med:.2}",
+        m.n,
+        m.nnz(),
+        inertia.positive,
+        inertia.negative,
+        inertia.zero
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("wall");
+    if mode == "mtx" {
+        run_mtx(args.get(2).map(String::as_str).unwrap_or(""));
+        return;
+    }
     let count: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let (m, inertia) = chain_kkt(10_000);
     eprintln!(
