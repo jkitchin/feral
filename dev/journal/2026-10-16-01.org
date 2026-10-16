@@ -142,3 +142,39 @@ Lever D.1 (2026-04-19) planned output and row-index reuse as its items
 3-4, but only the scratch half was built. Research note and plan:
 dev/research/factor-output-recycling-2026-10-16.md and
 dev/plans/factor-output-recycling.md.
+
+* 22:30 :issue-153:recycling:result:
+Per-front output recycling, implemented in 257c6dc plus a fast-path
+follow-up.
+Allocations per warm refactor on the chain: 93,138 -> 21,888
+(7.84 -> 1.84 per supernode); bytes 16.2 MB -> 9.6 MB.
+Corpus sweep, same 77 matrices and protocol as 20:50 (3 rotated rounds,
+separate processes). Arms:
+- base: 34e9fed, glibc;
+- new: 257c6dc, glibc;
+- new+mi: 257c6dc, mimalloc.
+Ratios are to base, geomean of median-of-3-medians:
+| bucket  |  n | new/base | new+mi/base | new faster |
+| <100us  | 51 |    0.937 |       0.902 | 33/51 |
+| 0.1-1ms | 15 |    0.811 |       0.738 | 12/15 |
+| 1-10ms  |  7 |    0.775 |       0.686 | 6/7   |
+| >10ms   |  4 |    0.858 |       0.810 | 4/4   |
+| ALL     | 77 |    0.891 |       0.841 | 55/77 |
+Inertia and nnz_l are identical across arms on 77/77.
+Selected rows (new/base med):
+- chain 0.680 (mi ceiling 0.570), CRESC132 0.577 (0.487),
+  densecol_kkt_1000 0.560 (0.462);
+- VESUVIA 0.669, HAHN1 0.73-0.80, sawpath 0.716;
+- nuffield2 0.970, twirism1 1.101 (min 1.231; twirism1 was also 1.086
+  under mimalloc vs glibc at 20:50, so that row looks like matrix-specific
+  noise, not this change).
+The <100us bucket includes 1-supernode matrices where the fast path did
+not consume the staged buffers. That was fixed in the follow-up commit:
+ARGAUSS 0.74 -> 0.70 us after the fix, others within noise.
+Recycling captures about 2/3 of the allocator headroom
+(1 - 0.891 = 10.9% of the 15.9% available). What remains is about 1.84
+allocs per supernode: contribution-block data on leaf fronts (the
+single-slot contrib_pool only refills when a parent consumes a child)
+and ContribBlock::row_indices. Recovering the leaves needs a
+multi-buffer pool, which is the shape rejected on 2026-05-13 (measured
+on macOS). Not attempted here.
