@@ -1678,6 +1678,16 @@ impl Solver {
         // (`RLIMIT_NPROC`, cgroup `pids.max`). The two drivers are
         // bit-exact, so this is a scheduling fallback, not a
         // numerical one.
+        //
+        // Issue #153: hand the previous factor (same pattern — a pattern
+        // change already dropped it at Step 2) to the workspace so the
+        // drivers reuse its per-front output buffers instead of
+        // allocating ~6 Vecs per supernode. Taking it here changes no
+        // observable state: every path below either stores the new
+        // factor or sets `last_factors = None`, and `factor_impl` never
+        // reads `last_factors`. Memory only — the reused buffers are
+        // fully re-initialized (tests/factor_output_recycling.rs).
+        self.workspace.begin_recycle(self.last_factors.take());
         let result = if let (true, Some(p)) = (self.use_parallel, pool.as_ref()) {
             p.install(|| {
                 factorize_multifrontal_parallel_with_workspace(
@@ -5173,5 +5183,43 @@ mod tests {
             "a probe that inherited race_arms would recurse"
         );
         assert!(!p.profiling_enabled, "a probe must not collect profiles");
+    }
+
+    /// Issue #153: a warm, pattern-reused `factor()` recycles the previous
+    /// factor's per-front output buffers; a cold one has nothing to
+    /// recycle. Byte-exactness of the recycled path is covered by
+    /// `tests/factor_output_recycling.rs`.
+    #[test]
+    fn warm_refactor_recycles_output_buffers_issue_153() {
+        let m = match crate::io::mtx::read_mtx(std::path::Path::new(
+            "tests/data/parity/hahn1/HAHN1_0004.mtx",
+        ))
+        .and_then(|x| x.to_csc())
+        {
+            Ok(m) => m,
+            Err(e) => panic!("fixture: {e:?}"),
+        };
+        for parallel in [false, true] {
+            let mut s = Solver::new().with_parallel(parallel);
+            assert!(matches!(s.factor(&m, None), FactorStatus::Success));
+            assert_eq!(
+                s.workspace.recycle_hits, 0,
+                "cold factor has nothing to recycle"
+            );
+            assert!(matches!(s.factor(&m, None), FactorStatus::Success));
+            let n_snodes = s.factors().map(|f| f.node_factors.len()).unwrap_or(0);
+            assert!(n_snodes > 1);
+            assert_eq!(
+                s.workspace.recycle_hits, n_snodes,
+                "parallel={parallel}: every supernode should get recycled buffers"
+            );
+            // A pattern change must not recycle across analyses.
+            s.invalidate_factors();
+            assert!(matches!(s.factor(&m, None), FactorStatus::Success));
+            assert_eq!(
+                s.workspace.recycle_hits, 0,
+                "nothing stored, nothing recycled"
+            );
+        }
     }
 }

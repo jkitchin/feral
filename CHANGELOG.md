@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+**Breaking.** `FactorScratch` (`feral::dense::factor`) is an exhaustive
+public struct and gains the public field `out: FactorOutputBufs`. Code
+that builds it with a struct literal stops compiling; use
+`FactorScratch::new()` or `default()`.
+
+### Changed — warm refactors reuse the previous factor's per-front buffers (issue #153)
+
+On a pattern-reused `Solver::factor`, the previous factor's per-supernode
+output buffers are recycled instead of reallocated: `l`, `d_diag`,
+`d_subdiag`, `perm`, `perm_inv` and the frontal `row_indices`. Results
+are byte-identical (`tests/factor_output_recycling.rs`, golden digests).
+Peak memory during a warm refactor drops, because the old factor is
+consumed as the new one is built rather than coexisting with it. The
+direct `factorize_multifrontal*` entry points are unchanged and allocate
+as before.
+
 ## [0.19.0] - 2026-10-10
 
 **Breaking.** `FactorStats`, `NodeFactors` and `FrontalFactors` are

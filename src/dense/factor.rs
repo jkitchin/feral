@@ -318,6 +318,10 @@ pub struct FactorScratch {
     /// `clear()`+`resize(len, 0.0)`, so kernel inputs are identical to
     /// fresh allocations.
     pub pack_pool: PackPool,
+    /// Recycled per-front output buffers (issue #153). See
+    /// [`FactorOutputBufs`]; empty unless the multifrontal driver
+    /// installed a previous factorization's buffers for this front.
+    pub out: FactorOutputBufs,
 }
 
 /// Reusable buffers for the packed trailing update's A/B micro-panels.
@@ -333,6 +337,64 @@ impl FactorScratch {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// Recyclable storage for the per-front *output* buffers of the BK
+/// kernels (issue #153). The multifrontal driver installs the buffers of
+/// the previous factorization's matching supernode here before calling
+/// the kernel; the kernel takes each one and re-initializes it exactly as
+/// the fresh allocation it replaces (`vec![0.0; n]`, `(0..n).collect()`,
+/// `slice.to_vec()`), so results are byte-identical whether or not a
+/// buffer was installed. Empty buffers (the default, and every direct
+/// caller) mean the kernel allocates as before.
+#[derive(Default, Debug, Clone)]
+pub struct FactorOutputBufs {
+    /// Becomes `FrontalFactors::l`.
+    pub l: Vec<f64>,
+    /// Becomes `FrontalFactors::d_diag`.
+    pub d_diag: Vec<f64>,
+    /// Becomes `FrontalFactors::d_subdiag`.
+    pub d_subdiag: Vec<f64>,
+    /// Becomes `FrontalFactors::perm`.
+    pub perm: Vec<usize>,
+    /// Becomes `FrontalFactors::perm_inv`.
+    pub perm_inv: Vec<usize>,
+}
+
+/// Take `buf` and return it as `vec![0.0; len]` (capacity reused).
+#[inline]
+fn take_zeroed_f64(buf: &mut Vec<f64>, len: usize) -> Vec<f64> {
+    let mut v = std::mem::take(buf);
+    v.clear();
+    v.resize(len, 0.0);
+    v
+}
+
+/// Take `buf` and return it as `vec![0usize; len]` (capacity reused).
+#[inline]
+fn take_zeroed_usize(buf: &mut Vec<usize>, len: usize) -> Vec<usize> {
+    let mut v = std::mem::take(buf);
+    v.clear();
+    v.resize(len, 0);
+    v
+}
+
+/// Take `buf` and return it as `(0..len).collect()` (capacity reused).
+#[inline]
+fn take_iota(buf: &mut Vec<usize>, len: usize) -> Vec<usize> {
+    let mut v = std::mem::take(buf);
+    v.clear();
+    v.extend(0..len);
+    v
+}
+
+/// Take `buf` and return it as `src.to_vec()` (capacity reused).
+#[inline]
+fn take_copy_f64(buf: &mut Vec<f64>, src: &[f64]) -> Vec<f64> {
+    let mut v = std::mem::take(buf);
+    v.clear();
+    v.extend_from_slice(src);
+    v
 }
 
 #[inline(always)]
@@ -1832,7 +1894,7 @@ fn factor_frontal_in_place_with_scratch_impl(
 
     // Phase: setup (perm, pooled subdiag, counters)
     let t0 = profile.as_ref().map(|_| std::time::Instant::now());
-    let mut perm: Vec<usize> = (0..nrow).collect();
+    let mut perm: Vec<usize> = take_iota(&mut scratch.out.perm, nrow);
     scratch.subdiag.clear();
     scratch.subdiag.resize(nrow, 0.0);
     let subdiag: &mut [f64] = scratch.subdiag.as_mut_slice();
@@ -1902,8 +1964,8 @@ fn factor_frontal_in_place_with_scratch_impl(
 
     // Extract L (nrow × nelim), D diagonal, and contribution block
     let _pt_lx = phase_timing::start();
-    let mut l = vec![0.0; nrow * nelim];
-    let mut d_diag = vec![0.0; nelim];
+    let mut l = take_zeroed_f64(&mut scratch.out.l, nrow * nelim);
+    let mut d_diag = take_zeroed_f64(&mut scratch.out.d_diag, nelim);
 
     let mut j = 0;
     while j < nelim {
@@ -1979,7 +2041,7 @@ fn factor_frontal_in_place_with_scratch_impl(
     phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
-    let mut perm_inv = vec![0usize; nrow];
+    let mut perm_inv = take_zeroed_usize(&mut scratch.out.perm_inv, nrow);
     for (i, &p) in perm.iter().enumerate() {
         perm_inv[p] = i;
     }
@@ -1992,7 +2054,7 @@ fn factor_frontal_in_place_with_scratch_impl(
         nelim,
         l,
         d_diag,
-        d_subdiag: subdiag[..nelim].to_vec(),
+        d_subdiag: take_copy_f64(&mut scratch.out.d_subdiag, &subdiag[..nelim]),
         perm,
         perm_inv,
         contrib,
@@ -2234,7 +2296,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     // L/D/contrib extract phases we discard `matrix.data` content.
     let a: &mut [f64] = matrix.data.as_mut_slice();
 
-    let mut perm: Vec<usize> = (0..nrow).collect();
+    let mut perm: Vec<usize> = take_iota(&mut scratch.out.perm, nrow);
     // Issue #13 Phase A: pooled `subdiag` and `d_panel` from caller-supplied
     // scratch. `clear()` + `resize()` preserves capacity across calls so a
     // warm scratch (even with a larger prior `nrow`/`bs`) reuses the heap
@@ -2444,8 +2506,8 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
 
     // Extract L, D, contrib — identical logic to `factor_frontal`.
     let _pt_lx = phase_timing::start();
-    let mut l = vec![0.0; nrow * nelim];
-    let mut d_diag = vec![0.0; nelim];
+    let mut l = take_zeroed_f64(&mut scratch.out.l, nrow * nelim);
+    let mut d_diag = take_zeroed_f64(&mut scratch.out.d_diag, nelim);
 
     let mut j = 0;
     while j < nelim {
@@ -2507,7 +2569,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
-    let mut perm_inv = vec![0usize; nrow];
+    let mut perm_inv = take_zeroed_usize(&mut scratch.out.perm_inv, nrow);
     for (i, &p) in perm.iter().enumerate() {
         perm_inv[p] = i;
     }
@@ -2523,7 +2585,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         nelim,
         l,
         d_diag,
-        d_subdiag: subdiag[..nelim].to_vec(),
+        d_subdiag: take_copy_f64(&mut scratch.out.d_subdiag, &subdiag[..nelim]),
         perm,
         perm_inv,
         contrib,

@@ -1,6 +1,7 @@
 use crate::dense::factor::{
     factor, factor_frontal_blocked_in_place_with_scratch, factor_frontal_diagonal_in_place,
-    phase_timing, BunchKaufmanParams, FactorScratch, FrontalFactors, ZeroPivotAction,
+    phase_timing, BunchKaufmanParams, FactorOutputBufs, FactorScratch, FrontalFactors,
+    ZeroPivotAction,
 };
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
@@ -1511,6 +1512,26 @@ pub struct FactorWorkspace {
     /// precomputed `value_map` instead of rebuilding triplets and
     /// re-sorting through `CscMatrix::from_triplets`.
     pub(crate) permute_cache: Option<PermuteCache>,
+    /// Issue #153: per-supernode output buffers recycled from the
+    /// previous factorization of the same pattern, indexed by supernode
+    /// (postorder). Filled by [`FactorWorkspace::begin_recycle`] (called
+    /// by `Solver` just before the numeric driver), consumed one slot per
+    /// supernode by the drivers, and cleared at the end of each call.
+    /// Empty on every direct-API call, which therefore allocates as
+    /// before.
+    recycled: Vec<Option<RecycledNode>>,
+    /// Supernodes that received recycled buffers during the most recent
+    /// factorization. Diagnostic only.
+    pub(crate) recycle_hits: usize,
+}
+
+/// One supernode's recyclable buffers (issue #153). Memory only: every
+/// buffer is fully re-initialized by its consumer, so whether a node gets
+/// a recycled set never changes a computed bit.
+#[derive(Debug, Default)]
+pub(crate) struct RecycledNode {
+    out: FactorOutputBufs,
+    row_indices: Vec<usize>,
 }
 
 /// Cached permute structure. See `FactorWorkspace::permute_cache`.
@@ -1561,6 +1582,60 @@ impl FactorWorkspace {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Issue #153: stage `prev` (the factor this workspace's owner is
+    /// about to replace) for buffer recycling by the next driver call,
+    /// and reset the hit counter. `None` just clears any stale slots.
+    /// The caller must only pass a factor of the same symbolic analysis
+    /// for recycling to pay off; correctness does not depend on it.
+    pub(crate) fn begin_recycle(&mut self, prev: Option<SparseFactors>) {
+        self.recycled.clear();
+        self.recycle_hits = 0;
+        if let Some(f) = prev {
+            self.recycled.reserve(f.node_factors.len());
+            for nf in f.node_factors {
+                let ff = nf.frontal_factors;
+                self.recycled.push(Some(RecycledNode {
+                    out: FactorOutputBufs {
+                        l: ff.l,
+                        d_diag: ff.d_diag,
+                        d_subdiag: ff.d_subdiag,
+                        perm: ff.perm,
+                        perm_inv: ff.perm_inv,
+                    },
+                    row_indices: nf.row_indices,
+                }));
+            }
+        }
+    }
+
+    /// Take supernode `idx`'s recycled buffers, if any.
+    fn take_recycled(&mut self, idx: usize) -> Option<RecycledNode> {
+        let r = self.recycled.get_mut(idx).and_then(Option::take);
+        if r.is_some() {
+            self.recycle_hits += 1;
+        }
+        r
+    }
+}
+
+/// Install `recycled`'s kernel outputs into `scratch` and return its
+/// row-index buffer (empty when there was nothing to recycle).
+fn install_recycled(scratch: &mut FactorScratch, recycled: Option<RecycledNode>) -> Vec<usize> {
+    match recycled {
+        Some(r) => {
+            scratch.out = r.out;
+            r.row_indices
+        }
+        None => Vec::new(),
+    }
+}
+
+/// `src.to_vec()` into `buf`'s allocation.
+fn refill_rows(mut buf: Vec<usize>, src: &[usize]) -> Vec<usize> {
+    buf.clear();
+    buf.extend_from_slice(src);
+    buf
 }
 
 /// Gate predicate for the D.3 dense fast-path.
@@ -1987,6 +2062,7 @@ fn factorize_multifrontal_with_schur_inner(
             ws,
             &mut contrib_blocks,
             nvschur,
+            None, // Schur API: no recycling
         )?;
         total_inertia.positive += node.inertia.positive;
         total_inertia.negative += node.inertia.negative;
@@ -2268,6 +2344,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                 );
                 for (i, &m) in group.members.iter().enumerate() {
                     let t_snode = params.profiler.as_ref().map(|_| Instant::now());
+                    let recycled = ws.take_recycled(m);
                     let node = factor_one_small_leaf(
                         m,
                         &group.member_rows[i],
@@ -2278,6 +2355,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                         params,
                         ws,
                         &mut contrib_blocks,
+                        recycled,
                     )?;
                     if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
                         let snode = &symbolic.supernodes[m];
@@ -2317,6 +2395,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         // The counters are process-global `AtomicU64`s; this driver loop
         // is single-threaded so before/after differencing is exact.
         let phase_before = phase_timing::snapshot();
+        let recycled = ws.take_recycled(snode_idx);
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -2328,6 +2407,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             ws,
             &mut contrib_blocks,
             0, // nvschur: standard path has no Schur tail
+            recycled,
         )?;
         if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
             let snode = &symbolic.supernodes[snode_idx];
@@ -2359,6 +2439,8 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     }
 
     let t_epilogue = params.profiler.as_ref().map(|_| Instant::now());
+    // Issue #153: drop any recycled slot no supernode consumed.
+    ws.recycled.clear();
 
     let result = Ok((
         SparseFactors {
@@ -2429,8 +2511,10 @@ fn factor_one_supernode(
     ws: &mut FactorWorkspace,
     contrib_blocks: &mut [Option<ContribBlock>],
     nvschur: usize,
+    recycled: Option<RecycledNode>,
 ) -> Result<NodeFactors, FeralError> {
     let snode = &symbolic.supernodes[snode_idx];
+    let recycled_rows = install_recycled(&mut ws.factor_scratch, recycled);
     let own_ncol = snode.ncol();
     let nrow = snode.nrow;
 
@@ -2532,7 +2616,7 @@ fn factor_one_supernode(
     let static_rows = symbolic.static_rows(snode_idx);
     let mut row_indices =
         if params.use_static_row_indices && n_delayed_in == 0 && !static_rows.is_empty() {
-            static_rows.to_vec()
+            refill_rows(recycled_rows, static_rows)
         } else {
             build_row_indices(
                 snode,
@@ -2812,8 +2896,10 @@ fn factor_one_small_leaf(
     params: &NumericParams,
     ws: &mut FactorWorkspace,
     contrib_blocks: &mut [Option<ContribBlock>],
+    recycled: Option<RecycledNode>,
 ) -> Result<NodeFactors, FeralError> {
     let snode = &symbolic.supernodes[snode_idx];
+    let recycled_rows = install_recycled(&mut ws.factor_scratch, recycled);
     debug_assert!(
         snode.children.is_empty(),
         "factor_one_small_leaf called on non-leaf supernode {}",
@@ -2864,7 +2950,7 @@ fn factor_one_small_leaf(
         });
     }
 
-    let row_indices = precomputed_rows.to_vec();
+    let row_indices = refill_rows(recycled_rows, precomputed_rows);
     let actual_nrow = row_indices.len();
     let expanded_ncol = own_ncol;
     debug_assert!(actual_nrow >= expanded_ncol);
@@ -3331,6 +3417,15 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
+    // Issue #153: share the recycled per-supernode buffers across tasks.
+    // Each slot is taken by exactly one task (the one that factors that
+    // supernode), so the per-slot mutex is never contended.
+    let recycled_slots: Vec<Mutex<Option<RecycledNode>>> = std::mem::take(&mut ws.recycled)
+        .into_iter()
+        .map(Mutex::new)
+        .collect();
+    let recycle_hits = AtomicUsize::new(0);
+
     let t_phase = telemetry.map(|_| std::time::Instant::now());
     rayon::scope(|scope| {
         for &seed_idx in &plan.seeds {
@@ -3349,9 +3444,13 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
                 &node_factors_out,
                 &first_error,
                 &thread_ws,
+                &recycled_slots,
+                &recycle_hits,
             );
         }
     });
+    ws.recycle_hits += recycle_hits.load(Ordering::Relaxed);
+    drop(recycled_slots);
     if let (Some(t), Some(start)) = (telemetry, t_phase) {
         t.phase_scope_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -3704,6 +3803,8 @@ fn run_parallel_task<'a>(
     node_factors_out: &'a std::sync::Mutex<Vec<Option<NodeFactors>>>,
     first_error: &'a std::sync::Mutex<Option<FeralError>>,
     thread_ws: &'a [std::sync::Mutex<FactorWorkspace>],
+    recycled_slots: &'a [std::sync::Mutex<Option<RecycledNode>>],
+    recycle_hits: &'a std::sync::atomic::AtomicUsize,
 ) {
     use std::sync::atomic::Ordering;
     scope.spawn(move |s| {
@@ -3832,6 +3933,12 @@ fn run_parallel_task<'a>(
 
                 let factor_start = telemetry.map(|_| std::time::Instant::now());
                 let prof_start = params.profiler.as_ref().map(|_| std::time::Instant::now());
+                let recycled = recycled_slots
+                    .get(snode_idx)
+                    .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()));
+                if recycled.is_some() {
+                    recycle_hits.fetch_add(1, Ordering::Relaxed);
+                }
                 let res = factor_one_supernode(
                     snode_idx,
                     symbolic,
@@ -3843,6 +3950,7 @@ fn run_parallel_task<'a>(
                     ws,
                     &mut local_contribs,
                     0, // nvschur: parallel path is not used by Schur API
+                    recycled,
                 );
                 if let (Some(t), Some(start)) = (telemetry, factor_start) {
                     t.factor_body_ns
@@ -3957,6 +4065,8 @@ fn run_parallel_task<'a>(
                             node_factors_out,
                             first_error,
                             thread_ws,
+                            recycled_slots,
+                            recycle_hits,
                         );
                     }
                 }
