@@ -1,0 +1,180 @@
+#+TITLE: Session 2026-10-16-01 — review of #153 comment 6223093143 (x86 IPC gap)
+
+* 19:30 :issue-153:review:platform:
+The comment (pounce#1020 data) reports a hanging-chain KKT with about the
+same instruction count on x86 and aarch64 (215.7M vs 191.2M) but 41-45 ms
+on a Cascade Lake KVM guest vs 8.8 ms on an M4 Pro. It asks whether the
+rejected levers (infnorm cap/warm start, CB pooling, the #200 0.2 us
+per-front constant) still hold on x86. The premise "every rejected lever
+was measured on Apple M-series" is false: tried-and-rejected.md:4991 and
+:5082 were x86_64 AVX2.
+
+* 19:35 :issue-153:harness:x86:
+New crates/feral-diagnostics/src/bin/diag_153_chain_x86.rs builds a 2-D
+hanging-chain KKT (10k links, n = 40006, nnz 110010, inertia
+(30002,10004,0)). Auto picks Amf + LdltCompress, giving 11875 supernodes
+(reporter: 11874), max front 19 (reporter: 20) and nnz_l 355002 (reporter:
+366880). So it is a close analogue.
+Host: Intel Xeon (family 6 model 207) KVM guest, 4 vCPU, glibc 2.39,
+clocksource tsc. An imul-chain calibration gives about 3.2-3.7 GHz effective.
+
+* 19:40 :issue-153:callgrind:scaling:
+Callgrind, diff of 4 vs 1 warm refactors: 192.0M Ir per warm refactor
+(reporter: 215.7M x86, 191.2M aarch64). Self shares:
+compute_infnorm 24.6%, glibc malloc/free 18.4% (+ unlink_chunk 1.1%),
+memset/memcpy 8.4%, factor_frontal_blocked 10.0%,
+apply_schur_panel_range 6.1%. This matches the reporter's shape.
+mc64::compute_matching runs once (cold factor only), and the warm-route
+ScalingInfo is Applied with mc64_cache_hit_count 0. So the warm route is
+pick_scaling_strategy -> InfNorm. The scaling/mod.rs:458 pre-MC64 InfNorm
+trial does NOT fire on this matrix. The lead I raised in the first review
+draft was wrong here.
+Note: callgrind counts each iteration of rep stosb/movsb as one Ir.
+A 320 KB row_max memset costs about 320k Ir. So the x86 Ir total is
+inflated relative to aarch64, and the reporter's "implied IPC" overstates
+x86 retired instructions.
+
+* 19:50 :issue-153:allocator:bump:
+Bump arena (pre-faulted, no-op free), paired alternating, 3 x 60 pairs:
+bump/glibc min 1.040 / 1.085 / 1.082, bump wins 15/60, 7/60, 18/60. Bump
+is SLOWER. It never reuses memory: 16.2 MB of fresh, cache-cold lines per
+refactor. So a bump arena cannot isolate allocator cost. The #200
+"bump allocator moved it 0.6-7.7%" result used this instrument too, and
+does not rule allocation out.
+
+* 20:00 :issue-153:allocator:mimalloc:result:
+Same binary built against mimalloc (RUSTFLAGS --cfg feral_mi), separate
+processes, alternated, 300 warm refactors each, profiling off:
+| round | glibc min/med ms | mimalloc min/med ms |
+| 1 | 19.02/24.53 | 10.68/14.57 |
+| 2 | 19.59/25.62 | 10.39/12.67 |
+| 3 | 20.60/25.35 | 10.17/12.83 |
+| 4 | 18.00/24.68 | 10.40/14.27 |
+| 5 | 19.80/25.93 | 11.36/14.47 |
+| 6 | 19.04/25.79 | 12.60/14.50 |
+| 7 | 15.83/23.80 | 11.68/13.66 |
+| 8 | 21.25/29.34 | 11.99/14.14 |
+| 9 | 18.26/26.96 | 10.39/13.72 |
+| 10 | 17.75/23.34 | 10.52/14.12 |
+mimalloc wins every round, by about 1.7-1.8x on both min and median.
+Inertia is checked on every factor and is identical; nnz_l is identical.
+Callgrind with cache-sim, per refactor: Ir 192.0M -> 161.3M,
+D1mr 1.51M -> 1.19M. The wall-time cut is far larger than the Ir cut, so
+the glibc instructions are expensive (pointer-chasing in
+malloc_consolidate / _int_free), not merely numerous.
+
+* 20:05 :issue-153:allocator:glibc-tunables:
+GLIBC_TUNABLES, wall 300, two rounds:
+| config | min ms | med ms |
+| default | 18.26 / 17.75 | 26.96 / 23.34 |
+| tcache_count=65535 | 14.45 / 13.26 | 18.79 / 18.40 |
+| + tcache_max=1048576 | 13.45 / 13.92 | 16.83 / 18.30 |
+| mimalloc | 10.39 / 10.52 | 13.72 / 14.12 |
+trim_threshold + mmap_threshold = 4G (no trim, no mmap): 19.15 / 17.72 min,
+which is no better than default.
+Page faults per refactor: glibc 139 (sys 0.3 ms), no-trim 5, mimalloc
+7-11. So page faults / madvise are NOT the mechanism. The cost is user
+time.
+
+* 20:10 :issue-153:allocator:sites:
+dhat, diff of 4 vs 1 refactors: 93,138 allocs, 16.2 MB per warm refactor
+(7.84 / supernode). Every per-front output is re-allocated each refactor:
+factor.rs:1835/2237 perm, 1905/2447 l, 1906/2448 d_diag, 1945 contrib
+reserve, 1982/2510 perm_inv, 1995/2526 d_subdiag;
+factorize.rs:2535 static_rows.to_vec, 2756 contrib_row_indices.
+That is 10000 eager-path fronts x 6 + 1875 blocked fronts x 6 + 2 x 11875.
+The 2026-05-13 rejection pooled only contribution blocks, on macOS.
+Reusing the previous factor's NodeFactors buffers on a pattern-reused warm
+refactor is untested.
+Implication: on x86 Linux/glibc, allocation is the largest single
+measured lever on this matrix (1.7-1.8x via a drop-in allocator). The
+rejected-on-Apple allocation verdicts do not transfer.
+
+* 20:50 :issue-153:allocator:corpus:result:
+Corpus sweep, run to check whether the chain result generalises.
+Corpus: 77 matrices, made up of every in-repo symmetric .mtx (CUTEst
+parity KKTs, tests/data/large, the stress synth set, nuffield2), the 5
+chain_proxy KKTs and the hanging chain. Three LU-basis files were skipped
+as unsymmetric. The Mittelmann corpus is not in this container, and
+SuiteSparse is blocked by the egress proxy.
+Arms (separate processes, 3 rounds with rotated arm order, about 1 s of
+warm refactors each):
+- glibc;
+- glibc with GLIBC_TUNABLES=glibc.malloc.tcache_count=65535;
+- mimalloc.
+Statistic: best-of-3 min, and the median of the 3 medians, as ratios to
+glibc, with the geomean per glibc-time bucket.
+| bucket   |  n | mi/g min | mi/g med | tc/g min | tc/g med | mi faster (med) |
+| <100us   | 51 |    0.930 |    0.897 |    0.923 |    0.911 | 48/51 |
+| 0.1-1ms  | 15 |    0.778 |    0.782 |    0.786 |    0.766 | 12/15 |
+| 1-10ms   |  7 |    0.722 |    0.697 |    0.751 |    0.763 | 7/7   |
+| >10ms    |  4 |    0.853 |    0.814 |    1.043 |    0.929 | 4/4   |
+| ALL      | 77 |    0.874 |    0.849 |    0.883 |    0.867 | 71/77 |
+Inertia and nnz_l are identical across arms on 77/77.
+Largest wins (mi/g median) are on matrices with many supernodes per unit
+of work:
+- chain 0.552, CRESC132 0.549, densecol_kkt_1000 0.540,
+  densecol_kkt_300 0.562;
+- MUONSINE 0.64-0.66, VESUVI* 0.64-0.67.
+No effect on large-front matrices: nuffield2 0.949, double_column_like
+0.971, twirism1 1.086, saddle_rankdef_100 1.003. Tiny n < 20 problems
+(1 supernode) are within noise.
+The tcache tunable recovers most of the gain below 10 ms but is neutral or
+worse above (min 1.04).
+Conclusion: not a ghost. Allocator cost on glibc is a broad 15% geomean
+and 30-45% on small-front-heavy matrices. It scales with the supernode
+count, which is consistent with the per-front output re-allocation sites.
+Limits: an in-repo corpus that is mostly small CUTEst KKTs; the large
+Mittelmann IPM KKTs (optmass, robot, steering, ...) are not represented
+except through the chain proxies.
+Raw data: scratch sweep.csv (not committed); summary above.
+
+* 21:05 :issue-153:recycling:plan:
+Started the per-front output recycling. Code inspection notes:
+- node_factors is indexed by supernode (postorder);
+- every error path in Solver::factor_impl already sets
+  last_factors = None, and success replaces it, so taking last_factors
+  just before the numeric driver changes no observable state;
+- FactorScratch is pub (feral::dense::factor) but nothing in the repo
+  constructs it with a struct literal, so adding a Default field is safe
+  in-tree (CHANGELOG note needed).
+Lever D.1 (2026-04-19) planned output and row-index reuse as its items
+3-4, but only the scratch half was built. Research note and plan:
+dev/research/factor-output-recycling-2026-10-16.md and
+dev/plans/factor-output-recycling.md.
+
+* 22:30 :issue-153:recycling:result:
+Per-front output recycling, implemented in 257c6dc plus a fast-path
+follow-up.
+Allocations per warm refactor on the chain: 93,138 -> 21,888
+(7.84 -> 1.84 per supernode); bytes 16.2 MB -> 9.6 MB.
+Corpus sweep, same 77 matrices and protocol as 20:50 (3 rotated rounds,
+separate processes). Arms:
+- base: 34e9fed, glibc;
+- new: 257c6dc, glibc;
+- new+mi: 257c6dc, mimalloc.
+Ratios are to base, geomean of median-of-3-medians:
+| bucket  |  n | new/base | new+mi/base | new faster |
+| <100us  | 51 |    0.937 |       0.902 | 33/51 |
+| 0.1-1ms | 15 |    0.811 |       0.738 | 12/15 |
+| 1-10ms  |  7 |    0.775 |       0.686 | 6/7   |
+| >10ms   |  4 |    0.858 |       0.810 | 4/4   |
+| ALL     | 77 |    0.891 |       0.841 | 55/77 |
+Inertia and nnz_l are identical across arms on 77/77.
+Selected rows (new/base med):
+- chain 0.680 (mi ceiling 0.570), CRESC132 0.577 (0.487),
+  densecol_kkt_1000 0.560 (0.462);
+- VESUVIA 0.669, HAHN1 0.73-0.80, sawpath 0.716;
+- nuffield2 0.970, twirism1 1.101 (min 1.231; twirism1 was also 1.086
+  under mimalloc vs glibc at 20:50, so that row looks like matrix-specific
+  noise, not this change).
+The <100us bucket includes 1-supernode matrices where the fast path did
+not consume the staged buffers. That was fixed in the follow-up commit:
+ARGAUSS 0.74 -> 0.70 us after the fix, others within noise.
+Recycling captures about 2/3 of the allocator headroom
+(1 - 0.891 = 10.9% of the 15.9% available). What remains is about 1.84
+allocs per supernode: contribution-block data on leaf fronts (the
+single-slot contrib_pool only refills when a parent consumes a child)
+and ContribBlock::row_indices. Recovering the leaves needs a
+multi-buffer pool, which is the shape rejected on 2026-05-13 (measured
+on macOS). Not attempted here.

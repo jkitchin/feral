@@ -6138,3 +6138,28 @@ whether any floored pivot's sign was right.
 **Do not re-propose** factor-comparison or re-analysis heuristics for
 CB inertia. The direction left open is inertia-exact handling of
 delay-budget overflow (delay instead of floor).
+
+## 2026-10-16 — #153 x86 review: two hypotheses falsified on the hanging-chain KKT
+
+**1. "The Auto pre-MC64 InfNorm trial (`src/scaling/mod.rs:458`) runs on
+every warm refactor."** Falsified on the pounce#1020-analogue chain KKT
+(`diag_153_chain_x86`, n = 40006, Amf + LdltCompress). Callgrind shows
+`mc64::compute_matching` once (the cold factor only). The warm
+`ScalingInfo` is `Applied` with `mc64_cache_hit_count() == 0`, so the warm
+route is `pick_scaling_strategy -> InfNorm` (line 437), not the line-458
+trial. `compute_infnorm`'s 24.6% of Ir is the ordinary 10-sweep InfNorm
+cost, which is already covered by the 2026-08-09 / 2026-08-15 entries.
+
+**2. "glibc trims or mmaps per refactor and page faults explain the x86
+slowness."** Falsified. The glibc default gives 139 minor faults and 0.3 ms
+sys per 19 ms refactor. Setting `GLIBC_TUNABLES` trim_threshold and
+mmap_threshold to 4G cuts faults to 5 and is no faster (min 19.15 / 17.72
+ms vs 18.26 / 17.75).
+
+**Instrument defect, recorded so it is not reused:** a pointer-bump arena
+with no-op free is NOT a lower bound on allocator cost. On this matrix it
+was 1.04-1.085x *slower* than glibc (paired, 3 x 60), because it never
+reuses memory: 16.2 MB of cache-cold lines per refactor. mimalloc (which
+reuses memory) was 1.7-1.8x *faster* than glibc. The #200 bump-allocator
+result ("0.6-7.7%, allocation ruled out") used the bump instrument and
+does not rule allocation out. See dev/journal/2026-10-16-01.org.
