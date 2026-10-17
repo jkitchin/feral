@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-17
+
 **Breaking.** `FactorScratch` (`feral::dense::factor`) is an exhaustive
 public struct and gains the public field `out: FactorOutputBufs`. Code
 that builds it with a struct literal stops compiling; use
