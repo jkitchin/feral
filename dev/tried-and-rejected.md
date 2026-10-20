@@ -6276,3 +6276,30 @@ inertia-unsafe; at K = 10 it does not fire on column25. Faster-but-wrong
 is not acceptable, so K stays at 10. The remaining lever is cheaper
 delayed-pivot handling (an a-posteriori blocked kernel). Journal:
 2026-10-19-01.org.
+
+## 2026-10-21 — #221: rung-judgement variants rejected on pounce evidence
+
+Four variants of the `increase_quality` rung check were tried and
+rejected before the shipped rule (decisions.md 2026-10-21: undo to the
+ladder start, record judged once, count n_tiny + n_zero + n_forced).
+
+- **Undo one rung, not to the ladder start.** nql180 stopped at
+  u = 3.2e-5 (rungs 1e-8 → 1e-6 → 3.2e-5 → 4.2e-4, the last worse with
+  5548 violations). It kept ~70k delays per factor: 224 s, 33 iterations.
+  The earlier rungs had never cured the one-short count.
+- **A persistent rung record.** pooling_rt2stp compared a later iterate
+  (2 floored pivots) with the factor that prompted a rung three calls
+  earlier. A clean factor in between had declined the next rung, so the
+  stale comparison undid the whole ladder.
+- **Lexicographic (violations, then max|L|).** It judged brainpc1's first
+  rung worse on max|L| alone and undid a rung that was not the problem.
+- **Floored pivots only (n_tiny), forced accepts ignored.** After the
+  parity fix 1f16980, brainpc1's first rung forced 2 pivots where it had
+  floored 1. The rule kept the ladder, which climbed three more rungs to
+  2.9e-3 with the inertia count unchanged: 165 s against 74 s with the
+  shipped rule. pounce confirmed it is deterministic and bisected it.
+
+An a-posteriori-pivoting (APP) blocked kernel for cheaper delays was also
+considered and set aside, not tried: it would break the blocked/scalar
+bit-parity contract (`tests/blocked_ldlt.rs`, `tests/golden_bits.rs`),
+which the maintainer chose to keep.

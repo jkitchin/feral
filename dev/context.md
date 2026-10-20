@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-10-20T00:33:12Z
+Generated: 2026-10-20T21:44:12Z
 
 ## Latest Session
 File: dev/sessions/2026-10-19-01.md
@@ -29,6 +29,25 @@ be compared. The comparable evidence is the HEAD-vs-fix sweep over
   is numerically singular and falls under the singular-matrix exemption.
   It is still a data point against.
 
+## Addendum: brainpc1/2 follow-up (same session)
+
+- pounce 9a97f997 (the reporter's 0.18 commit), `--no-options-file`:
+  - feral 0.18: brainpc1 34.7 s, brainpc3 51.9 s, brainpc0 7.4 s
+  - the fix: brainpc1 and brainpc3 time out at 300 s; brainpc0 62.6 s
+- The trajectories split at iter 42. On that shared KKT:
+  - eigvalsh: 6902 negative
+  - the fix: 6902, n_tiny 0, refined berr 1.5e-27
+  - 0.18: 6901, n_tiny 665
+  So 0.18 converged on a wrong count.
+- On the fix's trajectory, MC64 costs ~630 ms per call (0.18's: ~100 ms).
+  This is inherent hub-column Hungarian cost on those iterates; the
+  scaling code is unchanged since v0.18.0.
+- POUNCE_FERAL_SCALING=infnorm: brainpc1 18.8 s but brainpc0 228 s.
+  Scaling only reshuffles the trajectory.
+- Decision (user): open the PR and test whether the remaining stall can
+  be fixed on the pounce side with this feral.
+- New probe: `diag_221_mc64_cost`.
+
 ## Goal
 
 Fix issue #221: brainpc3 KKT factor 0.038 s (0.18) → 9.4 s (0.19/0.20).
@@ -36,57 +55,38 @@ Fix issue #221: brainpc3 KKT factor 0.038 s (0.18) → 9.4 s (0.19/0.20).
 ## Accomplished
 
 - Root cause, from the reporter's own matrices dumped with pounce:
-  - A zero-diagonal constraint column's BK argmax is a hub row (weight
-    ~600, not fully summed), and `k+1` is uncoupled. So its matched state
-    variable (diag ~1e-13), delayed into the same front from a split pair,
-    was never tried as a 2×2 partner.
-  - Rook walked the hub rows and failed.
-  - About 2000 delays were carried through 428 fronts once #215's budget
-    allowed it.
-- Fix in `scalar_pivot_step`: fall back to the fully-summed argmax `r_fs`
-  as the 2×2 partner, gated pre-swap by `rook::passes_2x2_gates`. This
-  matches SSIDS `ldlt_tpp.cxx:207` (spral-expert confirmed).
-- brainpc3, before → after:
-  - i37: 9.08 s → 0.022 s, nnz(L) 12.88M → 402K
-  - i35: 43.8 s with 277 floored pivots and cb 1 → 0.022 s, none
-  - i38/i39: 2.9 / 2.4 s → 0.023 s
-  - backward error improves on every one
-- kkt-pounce corpus, 370 matrices:
-  - inertia and n_tiny identical
-  - nnz(L) −0.9 %/+0.03 % on 141
-  - total time 69.0 s → 68.6 s
 ```
 
 ## Git Status
 ```
-4c4fe67 fix(bk): try the fully-summed argmax as 2x2 partner (#221)
-23624f1 Merge pull request #220 from jkitchin/release/0.20.0
-7fc9da0 release: feral 0.20.0
-352f7ab Merge pull request #219 from jkitchin/claude/admiring-lamport-bkdaki
-410c71a dev: session checkpoint addendum for output recycling (#153)
+80a8094 fix(solver): a rung that forces more pivots is undone (#221)
+f849a14 dev: journal verification of the #221 review fixes
+1e5795f docs(changelog): two-phase factorization of fronts that cannot delay (#221)
+b0845ba test: delay-chain backstop, max_abs_l on a 2x2, floored forced fronts (#221)
+140e395 fix(solver): zero pivots make a factor inadmissible for a rung (#221)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_low_nnz_share_border ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test numeric::solver::tests::warm_refactor_recycles_output_buffers_issue_153 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 459 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.09s
+test result: ok. 460 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.32s
 
 ```
 
@@ -108,58 +108,58 @@ Sparse solver: 2/2 total
 ```
 
 ## Recent Decisions
+it is not judged worse. Admissibility is stricter: such a factor never
+declines a rung, which is the pre-#221 behaviour for it.
 
-## 2026-10-19 — 2×2 partner falls back to the fully-summed argmax (issue #221)
+**Evidence.** tests/issue_221_quality_rung.rs: `[[1,1],[1,1]]` (inertia
+(1,0,1), max |L| = 1, by hand) and `diag(1,0,1)` now proceed; more zero
+pivots at the raised rung undo the ladder; same count climbs; a rung
+survives an `invalidate_factors` call and is judged by the next factor.
+All four fail on ed292fc.
 
-**Decision.** In `scalar_pivot_step`, the 2×2 partner candidates are now
-tried in this order:
-1. BK's argmax `r`, if fully summed;
-2. `k+1`, if coupled (#46);
-3. the largest entry among the fully-summed rows (`r_fs`), only if
-   `{k, r_fs}` passes the Duff-Reid growth bound and the SSIDS det floor,
-   checked before any swap.
+## 2026-10-21 — a rung that forces more pivots is a failed rung (issue #221)
 
-A rejected candidate leaves the old path unchanged.
+**Decision.** `FactorStability::worse_than` counts every pivot the factor
+gave up on: floored (`n_tiny`), zeroed (`n_zero`) and force-accepted below
+the threshold (`n_forced`). If the factor at the raised threshold gave up
+on more of them than the factor that prompted the raise, the rung is
+undone. This replaces the 2026-10-20 choice of floored pivots only.
 
-**Why.** A ghost-row argmax (a hub coupling) plus an uncoupled `k+1`
-made a zero-diagonal constraint delay even when its matched partner was
-fully summed in the same front. On brainpc3 this carried about 2000
-delays through 428 fronts once #215's budget allowed it: 9.4 s against
-0.02 s. SSIDS's TPP kernel restricts the partner search to fully-summed
-columns (`ldlt_tpp.cxx:207`), so this aligns feral with SSIDS.
+**Why.** That choice dropped forced accepts as "relative to the
+threshold". Relative to the *raised* threshold, a forced accept is a
+pivot the rung could not place within its own bound, which is what the
+rung exists to do. After the parity fix (1f16980), brainpc1's first rung
+forced 2 pivots where it had floored 1. The floored-only test kept the
+ladder, which climbed three more rungs to 2.9e-3 with the count unchanged
+(165 s against 74 s; pounce verified this is deterministic and bisected
+it). Summing the three counts also means a pivot that moves between them
+is not a change.
 
-**Cost.** None measured. The kkt-pounce corpus has identical inertia on
-370/370 and nnz(L) within −0.9 %/+0.03 % on the 141 that changed.
-
-**Alternatives rejected.**
-- Cheaper rook scans: rook is about half the time, and the Schur work on
-  the delay-swollen fronts remains.
-- Tightening the #215 delay budget back toward 0.18: reintroduces
-  cascade-break floored pivots (brainpc3 i35 HEAD: 277 floored, cb 1).
-
-Research: `dev/research/issue-221-fully-summed-2x2-partner.md`.
+**Evidence.** pounce sweep-fixtures.sh, 220 runs: identical to the
+previous rule on every line. brainpc1 74.5 s, 1 escalation; nql180
+54.9 s; brainpc2 67.2 s. Unit test Q1 in `src/numeric/solver.rs`.
 
 ## Recent Tried-and-Rejected
-(`diag_153_chain_x86`, n = 40006, Amf + LdltCompress). Callgrind shows
-`mc64::compute_matching` once (the cold factor only). The warm
-`ScalingInfo` is `Applied` with `mc64_cache_hit_count() == 0`, so the warm
-route is `pick_scaling_strategy -> InfNorm` (line 437), not the line-458
-trial. `compute_infnorm`'s 24.6% of Ir is the ordinary 10-sweep InfNorm
-cost, which is already covered by the 2026-08-09 / 2026-08-15 entries.
+- **Undo one rung, not to the ladder start.** nql180 stopped at
+  u = 3.2e-5 (rungs 1e-8 → 1e-6 → 3.2e-5 → 4.2e-4, the last worse with
+  5548 violations). It kept ~70k delays per factor: 224 s, 33 iterations.
+  The earlier rungs had never cured the one-short count.
+- **A persistent rung record.** pooling_rt2stp compared a later iterate
+  (2 floored pivots) with the factor that prompted a rung three calls
+  earlier. A clean factor in between had declined the next rung, so the
+  stale comparison undid the whole ladder.
+- **Lexicographic (violations, then max|L|).** It judged brainpc1's first
+  rung worse on max|L| alone and undid a rung that was not the problem.
+- **Floored pivots only (n_tiny), forced accepts ignored.** After the
+  parity fix 1f16980, brainpc1's first rung forced 2 pivots where it had
+  floored 1. The rule kept the ladder, which climbed three more rungs to
+  2.9e-3 with the inertia count unchanged: 165 s against 74 s with the
+  shipped rule. pounce confirmed it is deterministic and bisected it.
 
-**2. "glibc trims or mmaps per refactor and page faults explain the x86
-slowness."** Falsified. The glibc default gives 139 minor faults and 0.3 ms
-sys per 19 ms refactor. Setting `GLIBC_TUNABLES` trim_threshold and
-mmap_threshold to 4G cuts faults to 5 and is no faster (min 19.15 / 17.72
-ms vs 18.26 / 17.75).
-
-**Instrument defect, recorded so it is not reused:** a pointer-bump arena
-with no-op free is NOT a lower bound on allocator cost. On this matrix it
-was 1.04-1.085x *slower* than glibc (paired, 3 x 60), because it never
-reuses memory: 16.2 MB of cache-cold lines per refactor. mimalloc (which
-reuses memory) was 1.7-1.8x *faster* than glibc. The #200 bump-allocator
-result ("0.6-7.7%, allocation ruled out") used the bump instrument and
-does not rule allocation out. See dev/journal/2026-10-16-01.org.
+An a-posteriori-pivoting (APP) blocked kernel for cheaper delays was also
+considered and set aside, not tried: it would break the blocked/scalar
+bit-parity contract (`tests/blocked_ldlt.rs`, `tests/golden_bits.rs`),
+which the maintainer chose to keep.
 
 ## Source Files
 ```
@@ -255,7 +255,11 @@ tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs
 tests/issue_2_kkt_ls_init.rs
 tests/issue_215_delay_growth_cap.rs
+tests/issue_221_delay_chain_backstop.rs
+tests/issue_221_forced_front_parity.rs
 tests/issue_221_fully_summed_2x2_partner.rs
+tests/issue_221_quality_rung.rs
+tests/issue_221_tpp_tail.rs
 tests/issue_38_static_pivot.rs
 tests/issue_46_saddle_kkt_cascade.rs
 tests/issue_55_delay_budget.rs
