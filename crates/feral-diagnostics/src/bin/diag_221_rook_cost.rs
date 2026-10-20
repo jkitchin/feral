@@ -70,6 +70,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if diag {
         feral::dense::factor::PANEL_DIAG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    let phases = std::env::var_os("FERAL_221_PHASES").is_some();
+    if phases {
+        feral::dense::factor::PHASE_TIMING_ENABLED
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     for path in &args {
         let (mut a, b) = load(path)?;
         if let Some(seed) = feral::env::u64_var("FERAL_221_SEED") {
@@ -78,6 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut np = NumericParams::default();
         np.bk.pivot_threshold = feral::env::f64_var("FERAL_221_U").unwrap_or(1e-8);
         let mut s = Solver::with_params(np, SupernodeParams::default());
+        if std::env::var_os("FERAL_221_NOESC").is_some() {
+            s = s.with_ordering_escalation(None);
+        }
         if let Some(e) = feral::env::f64_var("FERAL_221_CB_EPS") {
             s = s.with_cascade_break_eps(e);
         }
@@ -133,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("    chain: worst excess/subtree = {worst_ratio:.2} at excess {worst_excess}");
             println!(
-                "{path} {dt:.4} {:?} nnz_l={:?} tiny={:?} res={r:.2e} grow={:.2} carry/area={:.2}",
+                "{path} {dt:.4} {:?} nnz_l={:?} tiny={:?} res={r:.2e} grow={:.2} carry/area={:.2} tfa={:?} cb={:?}",
                 s.inertia().map(|i| (i.positive, i.negative, i.zero)),
                 st.as_ref().map(|x| x.nnz_l),
                 st.as_ref().map(|x| x.n_tiny),
@@ -141,6 +149,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|x| x.nnz_l as f64 / sym.max(1) as f64)
                     .unwrap_or(0.0),
                 carry as f64 / sym_area.max(1) as f64,
+                st.as_ref().map(|x| x.n_threshold_fail_accepts),
+                st.as_ref().map(|x| x.n_cascade_break_nodes),
             );
             continue;
         }
@@ -189,6 +199,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 g(&pd::FALLBACK_2X2_SWAP_1X1_WINS),
                 g(&pd::FALLBACK_2X2_LAPACK_1X1_WINS),
                 g(&pd::FALLBACK_2X2_GROWTH_OR_DET),
+            );
+        }
+        if phases {
+            use feral::dense::factor::phase_timing as pt;
+            let g = |c: &std::sync::atomic::AtomicU64| {
+                c.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 * 1e-9
+            };
+            let dense = g(&pt::DENSEFACTOR_NS);
+            let panel = g(&pt::PANELFACTOR_NS);
+            let schur = g(&pt::SCHUR_NS);
+            let tail = g(&pt::SCALARTAIL_NS);
+            println!(
+                "  phases (s, summed over threads): dense={dense:.2} panel={panel:.2} schur={schur:.2} scalar_tail={tail:.2} other_dense={:.2} assembly={:.2} extend_add={:.2}",
+                dense - panel - schur - tail,
+                g(&pt::ASSEMBLY_NS),
+                g(&pt::EXTENDADD_NS),
             );
         }
         // Normwise backward error of the plain and refined solves.

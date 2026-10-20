@@ -281,3 +281,22 @@ Mittelmann sweep, 47 models, pounce 68e438d0 solve_quality_audit=no,
 - total wall: 2022 s -> 1927 s.
 User decision: hand the remaining trajectory work to pounce via a PR
 comment.
+
+* 2026-10-20 20:30 :issue-221:remaining-lever:
+User: "fast but wrong is not good"; investigate the remaining lever.
+Phase timers on nql180 i6 at u = 0.01 (two factorizations, summed over
+threads): dense 40.2 s = panel 1.5 + Schur 10.4 + scalar tail 0.15 +
+other 28.0. The other is the panel-bail -> flush -> scalar-step cycle
+(about 790k delays and 196k scalar accepts per two factors; avg 0.27
+inline pivots per partial panel).
+- Lazy inline BK, retried with flushes of 1-2 pivots routed to the
+  per-pivot strided loop (bit-identical, parity tests green): still
+  slower under load (qc85 ~2.9 s vs 2.6, q15c76 ~8.5 vs 7.0, nql equal).
+  Inline accepts are flushed at the next bail, so nothing batches.
+  Reverted.
+- Lower backstop K: fast and seemingly exact with escalation on, but
+  inertia-wrong on the #215 guard once escalation is disabled (K = 3:
+  27/28 wrong; K = 1: 28/28 wrong). Rejected (tried-and-rejected).
+Conclusion: the only exact and fast route left is an a-posteriori (APP)
+blocked kernel in which a failing column does not end the panel. That
+relaxes the blocked/scalar bit-parity contract.

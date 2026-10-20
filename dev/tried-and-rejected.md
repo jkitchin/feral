@@ -6244,3 +6244,35 @@ eager update. Speeding up a bail-heavy panel would need a-posteriori
 blocking, with failed-column backtracking as in SSIDS APP, so failures
 do not force a flush. That is a larger redesign. Code kept out of tree
 (scratch `factor.rs.lazy2`). Journal: 2026-10-19-01.org.
+
+## 2026-10-20 — #221: lowering the delay-chain backstop K for speed after quality escalation
+
+**Approach.** nql180 after pounce's quality escalation (u = 0.01) spends
+most of its factor time carrying delays (phase timers over two
+factorizations: dense 40.2 s, of which 28.0 s is scalar steps after
+panel bails). A lower backstop K engages cascade-break sooner. With
+default solver settings, iter 6 at u = 0.01:
+| K  | nql180 i6 | inertia | refined berr | qc85   |
+|----+-----------+---------+--------------+--------|
+| 10 | 10-14.8 s | 130079  | 1.3e-16      | 1.97 s |
+| 3  | 6.5 s     | 130079  | 4.3e-17      | -      |
+| 1  | 4.7 s     | 130079  | 2.4e-17      | 1.63 s |
+qc85 stays at 5107 throughout.
+
+**Symptoms / why rejected.** With default settings column25 also looked
+exact at K = 1, but only because pivot growth triggered the #102
+ordering escalation, which re-analysed with LdltCompress (twice the
+time; the final factor has cb = 0). With escalation disabled
+(`with_ordering_escalation(None)`) the CB fronts stand, and the #215
+guard (column25 δx-rung KKTs, iters 10-25, congruence seeds 0/1/4/8,
+expected 75597 on every seed) fails:
+- K = 3: 2 CB nodes, 115-148 floored pivots, counts 75597-75602 (wrong
+  on 27 of 28);
+- K = 1: 7-8 CB nodes, 446-554 floored, counts 75603-75612 (wrong on
+  28 of 28).
+Even after the TPP tail and the 1e-14 floor, cascade-break floors pivots
+whose sign is round-off. Wherever it fires on such a matrix it is
+inertia-unsafe; at K = 10 it does not fire on column25. Faster-but-wrong
+is not acceptable, so K stays at 10. The remaining lever is cheaper
+delayed-pivot handling (an a-posteriori blocked kernel). Journal:
+2026-10-19-01.org.
