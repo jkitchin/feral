@@ -515,7 +515,7 @@ pub struct Solver {
     /// Warm cascade-break auto-arm threshold. `Some(β)` means: at the
     /// start of `factor()`, if the previous factor on this pattern
     /// generated a supernode with `n_delayed_in >= β·n`, locally set
-    /// `cascade_break_ratio = 0.5` and `cascade_break_eps = 1e-10`
+    /// `cascade_break_ratio = 0.5` and `cascade_break_eps = DEFAULT_CASCADE_BREAK_EPS` (1e-14)
     /// for this call. `None` (default) disables the auto-arm.
     ///
     /// Symbolic-time auto-arm was disproved on 2026-05-17 (see
@@ -862,7 +862,7 @@ impl Solver {
     /// Warm auto-arm for cascade-break. With `Some(β)`, the next
     /// `factor()` call on the same pattern after a factor that
     /// produced a supernode with `n_delayed_in ≥ β·n` locally arms
-    /// `cascade_break_ratio = 0.5` and `cascade_break_eps = 1e-10`
+    /// `cascade_break_ratio = 0.5` and `cascade_break_eps = DEFAULT_CASCADE_BREAK_EPS` (1e-14)
     /// for the duration of that call only. `numeric_params` is not
     /// mutated; the user-set `cascade_break_*` knobs (if any) take
     /// precedence and disable the auto-arm.
@@ -1536,7 +1536,7 @@ impl Solver {
             let mut p = self.numeric_params.clone();
             p.cascade_break_ratio = Some(0.5);
             if p.cascade_break_eps.is_none() {
-                p.cascade_break_eps = Some(1e-10);
+                p.cascade_break_eps = Some(crate::numeric::factorize::DEFAULT_CASCADE_BREAK_EPS);
             }
             p
         } else {

@@ -48,10 +48,12 @@ fn default_numeric_params_have_phase_b_cb_armed() {
     );
     assert_eq!(
         p.cascade_break_eps,
-        Some(1e-10),
-        "Phase B (issue #55): cascade_break_eps must default to Some(1e-10) — \
-         per-pivot static perturbation floor"
+        Some(feral::numeric::factorize::DEFAULT_CASCADE_BREAK_EPS),
+        "cascade_break_eps must default to DEFAULT_CASCADE_BREAK_EPS (1e-14 since \
+         issue #221; 1e-10 under issue #55 Phase B), the per-pivot static \
+         perturbation floor"
     );
+    assert_eq!(feral::numeric::factorize::DEFAULT_CASCADE_BREAK_EPS, 1e-14);
 }
 
 #[test]

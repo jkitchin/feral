@@ -7961,3 +7961,52 @@ columns (`ldlt_tpp.cxx:207`), so this aligns feral with SSIDS.
   cascade-break floored pivots (brainpc3 i35 HEAD: 277 floored, cb 1).
 
 Research: `dev/research/issue-221-fully-summed-2x2-partner.md`.
+
+## 2026-10-20 — Delay-chain backstop and a round-off CB floor (issue #221)
+
+**Decision.**
+1. Delay-chain backstop. A front engages cascade-break when the extra
+   frontal area its in-flight delay chain has cost exceeds
+   `max(DELAY_CHAIN_FLOOR = 2^20, DELAY_CHAIN_GROWTH = 10 × subtree
+   symbolic area)`. The excess is summed over still-delaying children
+   and resets at a front that delays nothing. It is carried on
+   `ContribBlock`; no public struct changes.
+2. `cascade_break_eps` defaults to `DEFAULT_CASCADE_BREAK_EPS = 1e-14`
+   (relative to ‖D·A·D‖∞), down from 1e-10. This changes the convention
+   frozen in the 2026-05-27 Phase B entry.
+3. Fronts that cannot delay factor their stuck columns blocked (the
+   two-phase kernel in `factor_frontal_blocked_in_place_with_scratch`).
+
+**Why.**
+- The #215 budget bounds one front's size, not the cost of carrying the
+  same delays through a chain. Chain ratios:
+  - qcqp1000-2c iter 85: 224 (4.2 s, 3259 floored, wrong inertia);
+  - nql180 after pounce's quality escalation (u = 0.01): 36 (49 s);
+  - the column25 congruence set #215 protects: 3.7; brainpc3: ≤ 2.8.
+- With the backstop, a 1e-10 floor rewrote thousands of forced pivots
+  whose signs matter:
+  - qc85: 5104 vs the expected 5107;
+  - qcqp1500-1c iter 76: 10500 vs 10508.
+  A 1e-14 floor gives 5107 and 10508 on congruence seeds 1/4/8. It
+  still floors #213's 2.3e-16 pivots.
+- Without (3), forced fronts ran at level-2 speed, so exactness cost the
+  speed back.
+
+**Evidence (pounce params).**
+| case        | before (#221 partner fix only) | after                  | 0.18                 |
+|-------------+--------------------------------+------------------------+----------------------|
+| qc85        | 4.2 s, wrong                   | 1.93 s, exact          | 2.25 s               |
+| q15c76      | 12.7 s, wrong                  | 5.6 s, exact           | 8.4 s                |
+| nql180 i6, u = 0.01 | 49 s                   | 10.6 s, neg 130079     | 5.7 s, neg 131049 (wrong) |
+Unchanged: kkt-pounce 370 (inertia, n_tiny, nnz(L)); column25 guard
+28/28 = 75597, tiny 0.
+
+**Phase B acceptance.** The kkt-mittelmann corpus that froze the 1e-10
+convention is not on this machine. The rerun uses pounce-dumped KKTs of
+the same Mittelmann models (session 2026-10-19-01 journal).
+
+**Alternatives rejected.** Backstop with the 1e-10 floor (fast, wrong
+inertia). The r_fs fallback after a failed k+1 2×2 (no effect;
+tried-and-rejected 2026-10-20). An SSIDS-style eager TPP tail: the stuck
+block is most of the front (3312 of 4221 rows), so eager updates would
+stay level-2.
