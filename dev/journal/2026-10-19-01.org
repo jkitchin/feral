@@ -361,3 +361,46 @@ not a defect; -4391.83 is, as far as I recall, the best-known RT2 value.
 The issue850/857 failures (11) fail identically on HEAD: they pin
 trajectories of published feral 0.20, not this branch. The watchdog
 12-variable model passes on both.
+
+* 2026-10-21 13:00 :issue-221:parity:bk:review:
+Review finding, confirmed: 676df22 broke blocked/scalar bit-parity on
+fronts that cannot delay (may_delay=false, u > 0). The blocked kernel ran
+two phases (delay pass, then force_inline pass over the stuck columns)
+while factor_frontal stayed single-pass and force-accepted in place. On
+main the two are byte-identical; at 676df22..ed292fc forced_front(m)
+(m = 8/40/300, ForceAccept and PerturbToEps) differed in perm, L, D and
+contrib (reviewer: contrib up to 4.5e-8). The blocked phase 2 also made
+panel-position-dependent choices (forced 1x1 whenever the inline 2x2 was
+not allowed, e.g. swap needed at c > 0), so no single scalar policy
+matched it.
+Fix: one forced-pass policy F = scalar_pivot_step(may_delay=false,
+allow_rook=false), used by both kernels.
+- Scalar driver: same two phases (delay pass with delay_swap_to_boundary,
+  then F over [nelim, ncol) in order).
+- Blocked phase 2: every scalar step (tail, fallback) is F. The
+  force_inline panel commits a 1x1 at col only when F provably does: BK
+  argmax r not fully summed and either (a) no fully-summed entry in the
+  column, or (b) partner col+1 (a[col,col+1] != 0), peeked, fails the
+  same growth/det gates (then LAPACK test and partner path both end in
+  the 1x1 at col). (b) leaves col+1 pre-peeked; the next peek replays only
+  pivot c-1 (new peek_ahead_replay_from). Bails (r_fs partner, passing
+  2x2, refine-flag ambiguity, static floor, Fail mode) go to F.
+Evidence:
+- tests/issue_221_forced_front_parity.rs (5 tests: forced_front
+  m=8/40/300 x ForceAccept / PerturbToEps 1e-10 / 5.5e-8 floor-hit with
+  n_tiny=5, mixed front 4 sizes x 4 seeds x 3 floors, coupled stuck front
+  4 sizes x 2 eps x 3 seeds x 3 floors). On ed292fc: 4/4 original tests
+  FAIL (perm differs first). With fix: 5/5 pass. Mutation (replay all
+  pivots after pre-peek) fails 2/5. Case (b) fired 8417 times in the
+  coupled test, 2224 in the mixed test.
+- First version bailed in case (b): qcqp1000-2c i85 1.91 s -> 3.55 s
+  (9368 phase-2 bails, all r non-fs with a[col,col+1] != 0). With (b)
+  inline: 1.91 s (HEAD 1.91 s), identical inertia/nnz_l/tiny/tfa.
+- kkt-pounce 370: inertia, nnz_l, n_tiny, residual identical to ed292fc
+  (60.9 s vs 59.8 s).
+- qcqp1000-2c i76-100 (25 dumps): inertia identical on all; 3 dumps
+  differ in n_tiny by +-1 and tfa by +-1 (HEAD's blocked forced pass made
+  different, position-dependent choices); 41.7 s vs 42.8 s total.
+- cargo test --release: 982 passed, 0 failed; golden_bits and
+  blocked_ldlt unchanged.
+Not run: column25 guard (fixture absent on this machine).
