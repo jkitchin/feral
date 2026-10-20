@@ -300,3 +300,64 @@ inline pivots per partial panel).
 Conclusion: the only exact and fast route left is an a-posteriori (APP)
 blocked kernel in which a failing column does not end the panel. That
 relaxes the blocked/scalar bit-parity contract.
+
+* 2026-10-20 22:00 :issue-221:quality:increase-quality:pounce-comment:
+PR #222 comment 6294656538: the remaining pounce failures (nql180 and
+brainpc2 time out; brainpc1 slow) all vanish with
+feral_increase_quality=no, and pounce found no rule of its own that keeps
+deb7/pooling. Logged feral's state at every increase_quality call
+(temporary eprintln, pounce 68e438d0 + branch). Realized 1/max|L| of the
+factor that prompted each rung:
+- nql180: rung 1 at u=1e-8 is clean (0 floored, 0 forced) with
+  1/max|L| = 1.4e-6 >= next rung 1e-6. The factor already meets the next
+  threshold, so the rung cannot help. Later rungs add forced accepts
+  (3652 → 30554) and delays (788 → 503k), and the count stays 130079.
+- deb7: rung 1 has 6 floored; rung 2 is clean but at 2.0e-6 < 3.2e-5.
+  Neither is admissible, so both rungs are kept.
+- brainpc2: rung 1 at 1e-8 is clean, 1/max|L| = 1.0e-8 (growth at the
+  bound, a legitimate rung). The factor at 1e-6 has 1 floored + 34
+  forced and max|L| 1.8e13, which is worse.
+Prototype (env-gated): (A) decline when the factor is admissible at
+u_next; (B) undo a rung whose factor is worse.
+- One-rung undo: nql 224 s / 33 it Optimal, stuck at 3.2e-5 (70k delays).
+  Changed to undo back to the ladder start.
+- Persistent rung record: pooling exact compared a later iterate with a
+  stale factor and undid the ladder. Made the record single-use.
+- Lexicographic (violations, max|L|) "worse": brainpc1 rung 1 went from
+  (0, 1.0e8) to (2 forced, 9.8e5), so growth improved 100× but it was
+  judged worse. Forced counts are relative to the threshold, so changed to
+  n_tiny, or growth that breaks the raised bound and exceeds the growth
+  before.
+Results with ladder-start undo + single-use + violation-count worse
+(sequential, 300 s cap): nql180 Optimal 69.4 s / 42 it (was timeout;
+escalation-off 76 s); brainpc1 73.6 s (1073 it base fails, 52 it re-solve);
+brainpc2 96.9 s (561 base fails, 253 re-solve). Fixtures: deb7 exact
+Optimal/180 unchanged; pooling exact Optimal (267+82 vs 128+56 baseline,
+both through re-solve); square_flowsheet exact Optimal/95; the lbfgs legs
+fail the same way as the baseline at 68e438d0.
+
+* 2026-10-20 23:30 :issue-221:quality:pounce-tests:
+Final measure for "worse": n_tiny up, or growth that breaks the raised
+bound 1/u and exceeds the growth before (forced counts dropped; they are
+relative to u). brainpc1 rung 1 now undone because the 1e-6 factor
+floored 1 pivot (before 0). Sequential results: nql180 Optimal 69.3 s
+/ 42 it; brainpc1 73.8 s (1073 base + 52 re-solve); brainpc2 68.3 s (561
++ 155, Solved To Acceptable; an earlier identical-config run of its
+escalation-off re-solve gave 253 it Optimal, so the re-solve itself is not
+deterministic).
+feral cargo test --release: one failure, tests/pounce_interface.rs I8. It
+factored diag(2,3,5) (no multipliers) and then expected two unconditional
+rungs, which the new rule declines by design. Rewritten to escalate before
+the first factor and to assert the decline. Intent (state persists across
+factor, symbolic reused) kept.
+pounce 68e438d0 escalation tests (issue850 x2, issue850_second_opinion,
+issue857 x2, issue_250, watchdog), HEAD feral vs this change: identical
+except issue_250 pooling_rt2stp_solves_at_default_settings, which passes on
+HEAD and fails here. The objective is -4391.826 (dual inf 1.8e-7, constr
+viol 1e-8, Optimal), but the test pins Ipopt's -3273.955. On HEAD the base
+solve fails and the mu_strategy=adaptive re-solve lands on -3273.955. Here
+the default solve ends at the lower objective. A different local optimum,
+not a defect; -4391.83 is, as far as I recall, the best-known RT2 value.
+The issue850/857 failures (11) fail identically on HEAD: they pin
+trajectories of published feral 0.20, not this branch. The watchdog
+12-variable model passes on both.

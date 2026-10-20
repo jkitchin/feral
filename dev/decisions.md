@@ -8010,3 +8010,46 @@ inertia). The r_fs fallback after a failed k+1 2×2 (no effect;
 tried-and-rejected 2026-10-20). An SSIDS-style eager TPP tail: the stuck
 block is most of the front (3312 of 4221 rows), so eager updates would
 stay level-2.
+
+## 2026-10-20 — `increase_quality` judges each rung against the stored factor (issue #221)
+
+**Context.** PR #222 comment 6294656538. After the #221 kernel fixes, the
+remaining pounce failures (nql180 and brainpc2 time out, brainpc1 takes
+150 s) all disappear with `feral_increase_quality=no`. pounce found no rule
+of its own that separates them from deb7, pooling_rt2stp and a watchdog
+model that need the ladder. pounce sees only symptoms; feral sees the
+factor.
+
+**Decision.** A stage-2 rung asks for a factor whose multipliers satisfy
+`|L| <= 1/u_next`. `increase_quality` now measures the stored factor
+(`n_tiny`, `n_threshold_fail_accepts`, realized `max |L|` via the new
+`SparseFactors::max_abs_l`) and declines (`false`) when:
+1. the factor already meets `u_next` (nothing floored or forced and
+   `max |L| · u_next <= 1`): the rung cannot strengthen stability. No state
+   changes. Or:
+2. the previous rung made the factor worse. It is judged once, at the next
+   call: more floored pivots, or growth that breaks the raised bound and
+   exceeds the growth before. The threshold returns to where the ladder
+   started and the level becomes `Exhausted`.
+
+**Why these measures.** Floored pivots perturb the matrix, and `max |L|` is
+the growth that the threshold exists to bound. Both are independent of the
+threshold. A count of forced accepts is not: it is relative to the current
+`u`, and comparing it across thresholds judged brainpc1's first rung worse
+even though its growth improved 100×. The undo goes to the ladder start, not
+one rung back: a one-rung undo left nql180 at 3.2e-5 (70k delays, 224 s).
+The rung record is single-use: a persistent record let pooling_rt2stp
+compare a later iterate with a stale factor and undo the ladder.
+
+**Evidence.** pounce 68e438d0, sequential, 300 s: nql180 timeout →
+Optimal 69 s / 42 it (escalation-off 76 s); brainpc1 150 s → 74 s; brainpc2
+timeout → 68–97 s (both brainpc through pounce's re-solve); deb7 exact
+Optimal/180 with both rungs kept; pooling_rt2stp and square_flowsheet_resto
+keep their verdicts. Research note:
+`dev/research/issue-221-quality-rung-admissibility.md`.
+
+**Supersedes nothing.** The ladder's rungs, exponent and `pivtol_max` are
+unchanged. U1–U5 hold because they call without a stored factor.
+`tests/pounce_interface.rs` I8 changed premise: its clean diagonal factor
+now declines a rung, so it escalates before factoring and asserts the
+decline.
