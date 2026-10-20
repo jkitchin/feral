@@ -1,0 +1,95 @@
+#+TITLE: Session 2026-10-19-01 — issue #221 (brainpc factor 250x slower on 0.19+)
+
+* 19:00 :issue-221:repro:
+Built pounce main (ff7f2379) against local feral HEAD (23624f1) via
+--config patch.crates-io (no pounce file edits), dumped brainpc3 KKTs
+--dump kkt:34-40. New harness
+crates/feral-diagnostics/src/bin/diag_221_rook_cost.rs (pounce params,
+bk.pivot_threshold = 1e-8). iter 37/1: cold 9.08 s, warm 9.21 s,
+inertia (6904, 6901, 0), nnz_l 12,880,227. iter 34/1: 0.019 s, nnz_l
+162,019. Reproduces the issue (reporter: 9.37 s / 9.28 s).
+
+* 19:15 :issue-221:diagnosis:delays:
+iter 37: 428 fronts receive delays, sum n_delayed_in 399,871, and the
+largest fronts carry about 2000 delayed columns with nelim of 17-80.
+11,846/13,805 columns are delayed at least once (median 10 hops, max
+235). sample, 8 s: rook_rescue 3191, Schur kernels about 1370,
+scalar_pivot_step 600, swap 285. A cheaper rook alone cannot recover
+0.04 s; the delay volume is the defect.
+
+* 19:30 :issue-221:diagnosis:pivoting:
+Temporary eprintln trace (removed) at the delay sites. The origin
+fronts are single-column leaves holding a state variable, d ~ 1e-13 to
+2e-11 with colmax ~1, whose MC64 partner constraint is a ghost row.
+That delay is expected and costs one hop. In the parent fronts the
+constraint columns delay too, with d = 0 and colmax ~1. Matrix
+inspection: constraint rows couple 1.0 to their state and about
+600/675 to hub columns 6899/6900 (degree 10,348, root). So BK's
+argmax r is a hub (ghost), a[k,k+1] = 0 because the delayed state sits
+at the end of the fully-summed range, not at k+1, and rook walks the
+hub rows and fails. The pair {c, y} is never tested, though
+[[0,1],[1,1e-13]] passes both gates easily at u = 1e-8.
+
+* 19:45 :issue-221:reference:ssids:
+spral-expert agent: SSIDS ldlt_tpp.cxx:207 picks the 2x2 partner with
+find_row_abs_max over uneliminated fully-summed columns only. The test
+maxima (find_rc_abs_max_exclude :75-86) run to m. A ghost row is never
+a partner; it only tightens the tests.
+
+* 19:55 :issue-221:fix:
+scalar_pivot_step records the fully-summed argmax (gamma_fs, r_fs)
+during the existing gamma0 scan. When r is a ghost and k+1 is
+uncoupled, it uses {k, r_fs} as the 2x2 candidate, gated pre-swap by
+rook::passes_2x2_gates (same Duff-Reid and SSIDS det floor math). A
+rejected candidate gives the old path unchanged. Prototype without the
+pre-check: iter 37 0.023 s; final version identical in time, nnz_l
+402,310.
+
+* 20:05 :issue-221:validation:oracle:
+numpy eigvalsh (dense): i37 neg 6901, i38 6900, i39 6902, i35 6900.
+Count of |w| < n*eps*||A||: 129, 129, 7 and 13,795, so all four are
+numerically singular. HEAD gives 6901/6900/6903/6902 (i35 from 277
+floored pivots, cb 1, 43.8 s). The fix gives 6901/6901/6902/6901, all
+with tiny 0 and cb 0, in 0.022 s each. Backward error, plain/refined:
+i37 HEAD 7.8e-17/7.8e-17 vs fix 7.3e-19/2.5e-25; i38 3.8e-15/2.6e-18 vs
+7.6e-21/2.6e-26; i39 6.0e-16/5.5e-22 vs 8.7e-17/2.7e-23.
+On i38 the fix's count (6901) differs from eigvalsh (6900) and HEAD
+matched. The matrix has 129 eigenvalues inside the round-off band, so
+this is within the singular-matrix exemption, but it is recorded as an
+unfavourable data point.
+
+* 20:10 :issue-221:validation:corpus:
+data/matrices/kkt-pounce, 370 matrices, pounce params, HEAD worktree
+vs fix. Inertia identical 370/370, n_tiny identical. nnz_l differs on
+141 (104 corkscrw, 37 laptime) by -0.9 % to +0.03 %. Total time 69.0 s
+vs 68.6 s. One unrefined residual got worse (corkscrw_0109, abs 27 to
+531), but its normwise berr is 2e-34 vs 4e-33 with refined 9.05e-37
+identical. cargo test --release: 963 passed, 0 failed. The issue-215
+column25/qcqp1500 tests SKIP here: fixtures absent on this machine.
+
+* 20:15 :issue-221:test:
+tests/issue_221_fully_summed_2x2_partner.rs, with a hand-oracle frontal
+test (nelim 3, inertia (2,1,0), hub Schur 1e4 + 3.6e-8) and a synthetic
+brainpc-shaped KKT (saddle-point theorem oracle). Synthetic T=500: HEAD
+nnz_l 255,962 vs fix 19,359. T=2000: HEAD 4.04M in 2.83 s vs fix 78K in
+0.0044 s. Both tests FAIL on the HEAD worktree and pass with the fix.
+
+* 21:40 :issue-221:e2e:pounce:
+pounce main ff7f2379 built three ways. (a) Patched to the fix. (b) An
+attempted patch to v0.18.0, which cargo ignored ("patch was not used",
+version mismatch) and built crates.io 0.20.0, so it is a clean 0.20
+baseline. (c) A version-spoofed 0.18 build, which fails to compile:
+pounce main uses FactorStats::n_threshold_fail_accepts (0.19 API).
+So there is no local 0.18 end-to-end number; the issue's is ~1 s.
+- brainpc0: fix 68.8 s, 1512 iter (709 restoration in 23 calls, 6
+  quality escalations), Optimal. Baseline 0.20 timed out at 600 s.
+  Installed pounce 0.11 (feral 0.17): 7.9 s, 185 iter, Acceptable.
+- brainpc1, brainpc2: fix TIMEOUT at 300 s. brainpc1 reached 1397 iter,
+  cycling through restoration. A 15 s `sample` mid-run shows the busy
+  time almost all in feral::scaling::hungarian::hungarian_match_instrumented
+  (10,056 of ~10,600 busy samples), with factor_one_supernode at 19.
+  The factor-cost defect of #221 is gone there. What remains is MC64
+  matching cost on the restoration-phase KKTs plus an IPM trajectory
+  that keeps entering restoration. Not addressed here; a follow-up is
+  needed. Sweep stopped after brainpc2. brainpc3-9 and qcqp1000-2c were
+  not run end to end.
