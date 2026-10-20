@@ -8077,3 +8077,25 @@ declines a rung, which is the pre-#221 behaviour for it.
 pivots at the raised rung undo the ladder; same count climbs; a rung
 survives an `invalidate_factors` call and is judged by the next factor.
 All four fail on ed292fc.
+
+## 2026-10-21 — a rung that forces more pivots is a failed rung (issue #221)
+
+**Decision.** `FactorStability::worse_than` counts every pivot the factor
+gave up on: floored (`n_tiny`), zeroed (`n_zero`) and force-accepted below
+the threshold (`n_forced`). If the factor at the raised threshold gave up
+on more of them than the factor that prompted the raise, the rung is
+undone. This replaces the 2026-10-20 choice of floored pivots only.
+
+**Why.** That choice dropped forced accepts as "relative to the
+threshold". Relative to the *raised* threshold, a forced accept is a
+pivot the rung could not place within its own bound, which is what the
+rung exists to do. After the parity fix (1f16980), brainpc1's first rung
+forced 2 pivots where it had floored 1. The floored-only test kept the
+ladder, which climbed three more rungs to 2.9e-3 with the count unchanged
+(165 s against 74 s; pounce verified this is deterministic and bisected
+it). Summing the three counts also means a pivot that moves between them
+is not a change.
+
+**Evidence.** pounce sweep-fixtures.sh, 220 runs: identical to the
+previous rule on every line. brainpc1 74.5 s, 1 escalation; nql180
+54.9 s; brainpc2 67.2 s. Unit test Q1 in `src/numeric/solver.rs`.

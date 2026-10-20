@@ -458,3 +458,29 @@ b0845ba tests, 1e5795f changelog) outside the agent:
   way, and the time goes on the failing base run. That is trajectory
   variance on a path already shown to be sensitive to run-to-run
   variation, not a factor-cost change.
+
+* 2026-10-21 03:00 :issue-221:quality:pounce-comment:bisect:
+pounce comment 6297756350 raised two questions back to feral.
+1) lbfgs square_flowsheet_resto, feral_increase_quality=no re-solve hits 3000
+   (0.20: 178). Bisected with pounce builds per commit: main OK, 4c4fe67
+   (fully-summed 2×2 partner) fails, and so does every later commit. The
+   first KKT (m000, identical across versions) is singular to working
+   precision: eigvalsh min|λ| 3.4e-15, max 201, cond 5.8e16, inertia
+   (32,32). 0.20 floors one pivot (tiny=1). The branch pairs the column
+   and force-accepts one (tfa=1), no floor, berr 1.2e-17. Both give the
+   oracle inertia; they differ in how the near-null direction is
+   resolved, and the trajectories split from step 1. Not a feral
+   defect: the branch factor is the more accurate one. This is pounce's
+   singular-start path (the lbfgs B0 KKT).
+2) brainpc1 4 escalations / 165 s on f849a14 vs 1 / 74 s on ed292fc
+   (pounce: deterministic; bisected to 1f16980). QDIAG: rung 1e-8 → 1e-6
+   now forces 2 pivots (n_tiny 0) where before it floored 1, so the
+   n_tiny-only worse_than kept the ladder. It then climbed to 2.9e-3
+   with growth tracking each bound and the count unchanged (6905/6900).
+   Fix: worse_than counts floored + zeroed + forced ("given up"). A
+   forced accept at the raised rung is a pivot the rung could not place
+   within its own bound.
+   pounce sweep-fixtures.sh (220 runs): HEAD and HEAD+rule identical on
+   every line. main vs HEAD+rule reproduces pounce's 10-line list.
+   brainpc1 74.5 s / 1 esc; nql180 54.9 s; brainpc2 67.2 s. cargo test
+   --release 992 passed.

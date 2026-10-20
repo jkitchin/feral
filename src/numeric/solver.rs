@@ -251,15 +251,25 @@ impl FactorStability {
         self.n_tiny == 0 && self.n_forced == 0 && self.n_zero == 0 && self.max_abs_l * u <= 1.0
     }
 
+    /// Pivots the factor gave up on: floored, zeroed, or accepted below
+    /// the threshold. A pivot that moves between these counts from one
+    /// factor to the next is not a change.
+    fn n_given_up(&self) -> usize {
+        self.n_tiny + self.n_zero + self.n_forced
+    }
+
     /// The factor computed at the raised threshold `u` is worse than the
-    /// factor that prompted the raise: it gave up on more pivots (floored
-    /// plus zeroed, so a pivot that moves between the two counts is not a
-    /// change), or its growth both breaks the raised bound `1/u` and
-    /// exceeds the growth before. Both measures are independent of the
-    /// threshold, unlike a count of forced accepts. A genuinely singular
-    /// matrix has the same zero count at every rung, so it is not worse.
+    /// factor that prompted the raise: it gave up on more pivots, or its
+    /// growth both breaks the raised bound `1/u` and exceeds the growth
+    /// before. A forced accept at the raised threshold is a pivot the rung
+    /// could not place within its own bound, so more of them means the
+    /// rung did not deliver what it asked for, whatever happened to the
+    /// growth elsewhere (brainpc1: 0 → 2 forced at 1e-6 with `max |L|`
+    /// down 100×, then three more rungs that changed nothing). A genuinely
+    /// singular matrix has the same zero count at every rung, so it is not
+    /// worse.
     fn worse_than(&self, before: &Self, u: f64) -> bool {
-        self.n_tiny + self.n_zero > before.n_tiny + before.n_zero
+        self.n_given_up() > before.n_given_up()
             || (self.max_abs_l * u > 1.0 && self.max_abs_l > before.max_abs_l)
     }
 }
@@ -2421,12 +2431,12 @@ impl Solver {
     /// - **The previous rung made it worse.** In a multifrontal factor a
     ///   higher threshold means more delays, and fronts that cannot delay
     ///   floor or force-accept pivots. A raise is judged once, at the next
-    ///   call: if the factor at the raised threshold floored or zeroed more
-    ///   pivots (`n_tiny + zero` inertia) than the factor that prompted the
-    ///   raise, or its realized growth
-    ///   breaks the raised bound and exceeds the growth before, raising the
-    ///   threshold works against this problem. The threshold returns to
-    ///   where the ladder started and the ladder is marked `Exhausted`.
+    ///   call: if the factor at the raised threshold gave up on more pivots
+    ///   (floored, zeroed or force-accepted) than the factor that prompted
+    ///   the raise, or its realized growth breaks the raised bound and
+    ///   exceeds the growth before, raising the threshold works against
+    ///   this problem. The threshold returns to where the ladder started
+    ///   and the ladder is marked `Exhausted`.
     ///
     /// Without a stored factor neither test applies, and the record of an
     /// unjudged raise is kept until a factor exists to judge it. Issue #221;
@@ -3492,6 +3502,35 @@ mod tests {
         assert!(!s.increase_quality());
         assert_eq!(s.pivot_threshold(), 0.5);
         assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+    }
+
+    fn stab(n_tiny: usize, n_forced: usize, n_zero: usize, max_abs_l: f64) -> FactorStability {
+        FactorStability {
+            n_tiny,
+            n_forced,
+            max_abs_l,
+            n_zero,
+        }
+    }
+
+    /// Q1 — `worse_than` counts every pivot given up on, whatever its kind.
+    /// brainpc1 (issue #221): rung 1e-8 → 1e-6 turned a clean factor with
+    /// `max |L|` 1.0e8 into one with 2 forced accepts and `max |L|` 9.8e5.
+    /// The rung did not place those pivots within its own bound.
+    #[test]
+    fn q1_forced_accepts_at_the_raised_rung_are_worse() {
+        let before = stab(0, 0, 0, 9.97e7);
+        assert!(stab(0, 2, 0, 9.8e5).worse_than(&before, 1e-6));
+        assert!(stab(1, 0, 0, 9.8e5).worse_than(&before, 1e-6));
+        assert!(stab(0, 0, 1, 9.8e5).worse_than(&before, 1e-6));
+        // Clean, growth within the raised bound: not worse.
+        assert!(!stab(0, 0, 0, 9.8e5).worse_than(&before, 1e-6));
+        // A pivot that moves from floored to forced is not a change.
+        assert!(!stab(0, 1, 0, 9.8e5).worse_than(&stab(1, 0, 0, 9.97e7), 1e-6));
+        // Growth that breaks the raised bound and exceeds the old growth.
+        assert!(stab(0, 0, 0, 2e8).worse_than(&before, 1e-6));
+        // Growth above the old value but within the raised bound: not worse.
+        assert!(!stab(0, 0, 0, 5e5).worse_than(&stab(0, 0, 0, 1e5), 1e-6));
     }
 
     /// U5 — Repeated calls always terminate at `Exhausted` in

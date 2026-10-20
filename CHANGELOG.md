@@ -43,11 +43,11 @@ pivot threshold, and returns `false` in two cases:
   force-accepted or zeroed (a `ForceAccept` zero pivot, as on a singular
   matrix, counts), and every multiplier satisfies `|L| <= 1/u_next`.
   Nothing changes.
-- **The previous raise made the factor worse.** It floored or zeroed more
-  pivots, or its growth broke the raised bound and exceeded the growth
-  before. In a
-  multifrontal factor, a higher threshold means more delays, and fronts that
-  cannot delay floor or force-accept pivots. The threshold returns to where
+- **The previous raise made the factor worse.** It gave up on more pivots
+  (floored, zeroed or force-accepted), or its growth broke the raised bound
+  and exceeded the growth before. In a multifrontal factor, a higher
+  threshold means more delays, and fronts that cannot delay floor or
+  force-accept pivots. The threshold returns to where
   the ladder started, and the ladder is exhausted.
 
 Before a factor exists, and in the stage-1 scaling flip, the ladder behaves
