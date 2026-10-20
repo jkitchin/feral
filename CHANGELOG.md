@@ -23,6 +23,17 @@ columns through a 428-front chain:
 
 Inertia is unchanged on all 370 kkt-pounce corpus matrices.
 
+### Changed — fronts that cannot delay factor in two phases (issue #221)
+
+A root or cascade-break front with threshold pivoting on first runs a
+delay pass, which moves every column no pivot can take to the end of the
+fully-summed range, then factors those columns with `may_delay = false`
+and no rook search. The blocked kernel keeps their updates deferred, so
+such fronts no longer run at level-2 speed. `factor_frontal` (the scalar
+reference, also used for fronts under 8 columns and 32×32 fronts) runs
+the same two phases, and stays bit-identical to `factor_frontal_blocked`
+(`tests/issue_221_forced_front_parity.rs`).
+
 ### Changed — `increase_quality` declines rungs that cannot help (issue #221)
 
 `Solver::increase_quality` now checks the stored factor before raising the
