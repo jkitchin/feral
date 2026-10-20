@@ -214,3 +214,104 @@ fn without_a_factor_the_ladder_is_unchanged() {
     assert!(s.increase_quality());
     assert_eq!(s.pivot_threshold(), 1e-6);
 }
+
+fn force() -> ZeroPivotAction {
+    ZeroPivotAction::ForceAccept
+}
+
+fn zeros_of(s: &Solver) -> usize {
+    s.inertia().expect("inertia").zero
+}
+
+/// Review finding: `ForceAccept` zeroes a pivot it cannot take and counts
+/// it only in the inertia (`zero`), not in `n_tiny` or
+/// `n_threshold_fail_accepts`. A factor with exact-zero pivots must not
+/// read as admissible, or the rung is declined.
+///
+/// Hand oracles: `[[1, 1], [1, 1]]` has eigenvalues 0 and 2, so inertia
+/// `(1, 0, 1)`; BK takes the 1×1 at column 0 (`|a00| = 1 >= α·1`), so
+/// `l = 1` and the Schur complement is exactly `1 - 1·1 = 0`.
+/// `diag(1, 0, 1)` has inertia `(2, 0, 1)` and no multipliers.
+#[test]
+fn zero_pivots_make_a_factor_inadmissible() {
+    let mut s = solver(2, force());
+    let ones = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[1.0, 1.0, 1.0]).expect("csc");
+    factor_ok(&mut s, &ones);
+    let inertia = s.inertia().expect("inertia").clone();
+    assert_eq!(
+        (inertia.positive, inertia.negative, inertia.zero),
+        (1, 0, 1)
+    );
+    let st = s.last_factor_stats().expect("stats");
+    assert_eq!((st.n_tiny, st.n_threshold_fail_accepts), (0, 0));
+    assert_eq!(st.max_abs_l, 1.0, "hand: l = a10 / a00 = 1");
+    // max |L| = 1 meets 1/u for every u <= 1: only the zero pivot says
+    // the factor does not meet the next rung.
+    assert!(s.increase_quality(), "a zero pivot: the rung proceeds");
+    assert_eq!(s.pivot_threshold(), 1e-6);
+    assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+
+    let mut s = solver(3, force());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0]));
+    assert_eq!(zeros_of(&s), 1);
+    let st = s.last_factor_stats().expect("stats");
+    assert_eq!((st.n_tiny, st.n_threshold_fail_accepts), (0, 0));
+    assert_eq!(st.max_abs_l, 0.0);
+    assert!(s.increase_quality(), "a zero pivot: the rung proceeds");
+    assert_eq!(s.pivot_threshold(), 1e-6);
+}
+
+/// More zero pivots at the raised threshold is worse: the rung is undone.
+/// Hand oracle: each exact zero on the diagonal of a diagonal matrix is
+/// one zero pivot under `ForceAccept`.
+#[test]
+fn rung_that_added_zero_pivots_is_undone() {
+    let mut s = solver(5, force());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 1.0, 1.0]));
+    assert_eq!(zeros_of(&s), 1);
+    assert!(s.increase_quality());
+    assert_eq!(s.pivot_threshold(), 1e-6);
+
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(zeros_of(&s), 2);
+    assert!(!s.increase_quality(), "more zero pivots: worse");
+    assert_eq!(s.pivot_threshold(), 1e-8, "undone");
+    assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+}
+
+/// The same zero count at the raised threshold (a singular matrix keeps
+/// its zero pivots) is not worse: the ladder climbs.
+#[test]
+fn same_zero_pivots_are_not_worse() {
+    let mut s = solver(3, force());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0]));
+    assert!(s.increase_quality());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0]));
+    assert!(s.increase_quality(), "same singular matrix: not worse");
+    let want = 1e-6_f64.powf(0.75);
+    assert!((s.pivot_threshold() - want).abs() <= 1e-15 * want);
+}
+
+/// A call without a stored factor (here after `invalidate_factors`) must
+/// not drop the record of an unjudged raise: the next factor is judged
+/// against the factor that prompted it.
+#[test]
+fn unjudged_rung_survives_a_call_without_a_factor() {
+    let mut s = solver(5, perturb());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").n_tiny, 2);
+    assert!(s.increase_quality()); // 1e-8 -> 1e-6, record n_tiny = 2
+
+    s.invalidate_factors();
+    assert!(s.increase_quality(), "no factor: the ladder moves on");
+    assert!(s.pivot_threshold() > 1e-6);
+
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").n_tiny, 3);
+    assert!(
+        !s.increase_quality(),
+        "judged against the kept record (2 floored): worse"
+    );
+    assert_eq!(s.pivot_threshold(), 1e-8, "back to where the ladder began");
+    assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+}

@@ -404,3 +404,22 @@ Evidence:
 - cargo test --release: 982 passed, 0 failed; golden_bits and
   blocked_ldlt unchanged.
 Not run: column25 guard (fixture absent on this machine).
+
+* 2026-10-21 13:40 :issue-221:quality:review:
+Review finding, confirmed: FactorStability ignored zero pivots.
+try_reject_1x1_frontal's ForceAccept branch (and the gamma0 == 0 zero-
+column branch) moves only inertia.zero, so a factor of [[1,1],[1,1]]
+under the default params read as admissible (n_tiny 0, tfa 0, max |L| 1)
+and increase_quality declined the rung. Fix: FactorStability.n_zero from
+the new SparseFactors::n_zero_pivots; admissible_at requires 0;
+worse_than compares n_tiny + n_zero. Also rung_before.take() ran with no
+stored factor, dropping the record; it is now consumed only against a
+factor, and the stage-2 branch keeps it when now == None.
+Tests (tests/issue_221_quality_rung.rs, +4): all four FAIL with the old
+solver.rs (zero_pivots_make_a_factor_inadmissible,
+rung_that_added_zero_pivots_is_undone, same_zero_pivots_are_not_worse,
+unjudged_rung_survives_a_call_without_a_factor) and pass with the fix;
+the 8 existing tests pass unchanged. cargo test --release: 986 passed.
+Not re-run: the pounce sweeps (nql180, brainpc1/2). If their stored
+factors carry ForceAccept zero pivots, rungs that were declined as
+"already admissible" will now be taken.

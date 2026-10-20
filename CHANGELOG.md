@@ -28,17 +28,20 @@ Inertia is unchanged on all 370 kkt-pounce corpus matrices.
 `Solver::increase_quality` now checks the stored factor before raising the
 pivot threshold, and returns `false` in two cases:
 
-- **The factor already meets the next threshold.** Nothing was floored or
-  force-accepted, and every multiplier satisfies `|L| <= 1/u_next`. Nothing
-  changes.
-- **The previous raise made the factor worse.** It floored more pivots, or
-  its growth broke the raised bound and exceeded the growth before. In a
+- **The factor already meets the next threshold.** Nothing was floored,
+  force-accepted or zeroed (a `ForceAccept` zero pivot, as on a singular
+  matrix, counts), and every multiplier satisfies `|L| <= 1/u_next`.
+  Nothing changes.
+- **The previous raise made the factor worse.** It floored or zeroed more
+  pivots, or its growth broke the raised bound and exceeded the growth
+  before. In a
   multifrontal factor, a higher threshold means more delays, and fronts that
   cannot delay floor or force-accept pivots. The threshold returns to where
   the ladder started, and the ladder is exhausted.
 
 Before a factor exists, and in the stage-1 scaling flip, the ladder behaves
-as before. `FactorStats::max_abs_l` reports the realized `max |L_ij|`, so
+as before; a raise not yet judged waits for the next stored factor.
+`SparseFactors::n_zero_pivots` reports the zero part of the inertia. `FactorStats::max_abs_l` reports the realized `max |L_ij|`, so
 `1 / max_abs_l` is the threshold the factor actually meets.
 
 On pounce 68e438d0 (default options, 300 s cap):

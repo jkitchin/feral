@@ -1339,6 +1339,16 @@ impl SparseFactors {
             .sum()
     }
 
+    /// Number of pivots counted as zero eigenvalues (the `zero` part of
+    /// the factor's inertia, summed over supernodes). Under
+    /// `ZeroPivotAction::ForceAccept` a pivot with `|d| <= zero_tol` that a
+    /// front cannot delay is accepted as an exact zero (L column and `D`
+    /// entry zeroed) and counted here, not in [`n_tiny`](Self::n_tiny) or
+    /// [`n_threshold_fail_accepts`](Self::n_threshold_fail_accepts).
+    pub fn n_zero_pivots(&self) -> usize {
+        self.node_factors.iter().map(|nf| nf.inertia.zero).sum()
+    }
+
     /// Largest realized multiplier `max |L_ij|` (`i > j`) over every
     /// eliminated column, excluding the unit diagonal and the in-block
     /// coupling of 2×2 pivots (that entry lives in `D`). `0.0` when no

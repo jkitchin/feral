@@ -8053,3 +8053,27 @@ unchanged. U1–U5 hold because they call without a stored factor.
 `tests/pounce_interface.rs` I8 changed premise: its clean diagonal factor
 now declines a rung, so it escalates before factoring and asserts the
 decline.
+
+## 2026-10-21 — Zero pivots count against rung admissibility (issue #221)
+
+**Decision.** `FactorStability` gains `n_zero` (the zero part of the
+stored factor's inertia, `SparseFactors::n_zero_pivots`).
+`admissible_at` requires `n_zero == 0`. `worse_than` compares pivots given
+up, `n_tiny + n_zero`, against the factor that prompted the raise. A call
+without a stored factor leaves the unjudged rung record in place (it was
+consumed and lost before).
+
+**Why.** `ForceAccept` (the default for root fronts) zeroes a pivot it
+cannot take and counts it only in the inertia, not in `n_tiny` or
+`n_threshold_fail_accepts`, so a factor with exact-zero pivots read as
+admissible and the rung was declined (review of PR #222). The sum in
+`worse_than` treats a pivot moving between floored and zeroed as no
+change; a genuinely singular matrix keeps its zero count at every rung, so
+it is not judged worse. Admissibility is stricter: such a factor never
+declines a rung, which is the pre-#221 behaviour for it.
+
+**Evidence.** tests/issue_221_quality_rung.rs: `[[1,1],[1,1]]` (inertia
+(1,0,1), max |L| = 1, by hand) and `diag(1,0,1)` now proceed; more zero
+pivots at the raised rung undo the ladder; same count climbs; a rung
+survives an `invalidate_factors` call and is judged by the next factor.
+All four fail on ed292fc.

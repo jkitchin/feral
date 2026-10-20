@@ -223,6 +223,12 @@ struct FactorStability {
     n_forced: usize,
     /// Realized `max |L_ij|` ([`SparseFactors::max_abs_l`]).
     max_abs_l: f64,
+    /// Pivots counted as zero eigenvalues
+    /// ([`SparseFactors::n_zero_pivots`]). `ForceAccept`, the default for
+    /// root fronts, zeroes a pivot it cannot take and counts it only here,
+    /// so without this field a factor with exact-zero pivots looked
+    /// admissible.
+    n_zero: usize,
 }
 
 impl FactorStability {
@@ -231,22 +237,29 @@ impl FactorStability {
             n_tiny: factors.n_tiny(),
             n_forced: factors.n_threshold_fail_accepts(),
             max_abs_l: factors.max_abs_l(),
+            n_zero: factors.n_zero_pivots(),
         }
     }
 
-    /// Every pivot of the factor passes threshold `u`: none was floored or
-    /// forced, and every multiplier satisfies `|L| <= 1/u`.
+    /// Every pivot of the factor passes threshold `u`: none was floored,
+    /// forced or zeroed, and every multiplier satisfies `|L| <= 1/u`.
+    /// A factor with a zero pivot is never admissible: a raised threshold
+    /// may take that column as part of a 2×2 or after other pivots, and a
+    /// genuinely singular matrix keeps its zero pivots at every rung, so
+    /// the ladder is then left to the caller's other remedies.
     fn admissible_at(&self, u: f64) -> bool {
-        self.n_tiny == 0 && self.n_forced == 0 && self.max_abs_l * u <= 1.0
+        self.n_tiny == 0 && self.n_forced == 0 && self.n_zero == 0 && self.max_abs_l * u <= 1.0
     }
 
     /// The factor computed at the raised threshold `u` is worse than the
-    /// factor that prompted the raise: it floored more pivots, or its
-    /// growth both breaks the raised bound `1/u` and exceeds the growth
-    /// before. Both measures are independent of the threshold, unlike a
-    /// count of forced accepts.
+    /// factor that prompted the raise: it gave up on more pivots (floored
+    /// plus zeroed, so a pivot that moves between the two counts is not a
+    /// change), or its growth both breaks the raised bound `1/u` and
+    /// exceeds the growth before. Both measures are independent of the
+    /// threshold, unlike a count of forced accepts. A genuinely singular
+    /// matrix has the same zero count at every rung, so it is not worse.
     fn worse_than(&self, before: &Self, u: f64) -> bool {
-        self.n_tiny > before.n_tiny
+        self.n_tiny + self.n_zero > before.n_tiny + before.n_zero
             || (self.max_abs_l * u > 1.0 && self.max_abs_l > before.max_abs_l)
     }
 }
@@ -2399,20 +2412,24 @@ impl Solver {
     /// on to its next remedy, e.g. Ipopt's `δ_c`):
     ///
     /// - **Already admissible.** No pivot of the stored factor escaped the
-    ///   threshold test and its realized `max |L|` already meets the next
+    ///   threshold test (none floored, force-accepted, or zeroed: a factor
+    ///   with a zero pivot, e.g. `ForceAccept` on a singular matrix, never
+    ///   qualifies) and its realized `max |L|` already meets the next
     ///   rung's bound. The factor is a valid factorization at the higher
     ///   threshold, so refactoring cannot strengthen its stability. The
     ///   ladder is left as it is.
     /// - **The previous rung made it worse.** In a multifrontal factor a
     ///   higher threshold means more delays, and fronts that cannot delay
     ///   floor or force-accept pivots. A raise is judged once, at the next
-    ///   call: if the factor at the raised threshold floored more pivots
-    ///   than the factor that prompted the raise, or its realized growth
+    ///   call: if the factor at the raised threshold floored or zeroed more
+    ///   pivots (`n_tiny + zero` inertia) than the factor that prompted the
+    ///   raise, or its realized growth
     ///   breaks the raised bound and exceeds the growth before, raising the
     ///   threshold works against this problem. The threshold returns to
     ///   where the ladder started and the ladder is marked `Exhausted`.
     ///
-    /// Without a stored factor neither test applies. Issue #221;
+    /// Without a stored factor neither test applies, and the record of an
+    /// unjudged raise is kept until a factor exists to judge it. Issue #221;
     /// `dev/research/issue-221-quality-rung-admissibility.md`.
     pub fn increase_quality(&mut self) -> bool {
         const FIRST_PIVOT_THRESHOLD: f64 = 0.01;
@@ -2420,7 +2437,13 @@ impl Solver {
         const EPS_CAP: f64 = 1e-12;
 
         let now = self.last_factors.as_ref().map(FactorStability::of);
-        if let (Some(before), Some(now)) = (self.rung_before.take(), now) {
+        // The record is consumed only against a stored factor; with none
+        // (a failed or invalidated factor) it waits for the next one.
+        let judged = match now {
+            Some(_) => self.rung_before.take(),
+            None => None,
+        };
+        if let (Some(before), Some(now)) = (judged, now) {
             if now.worse_than(&before, self.numeric_params.bk.pivot_threshold) {
                 if let Some(start) = self.ladder_start.take() {
                     self.numeric_params.bk.pivot_threshold = start;
@@ -2448,7 +2471,12 @@ impl Solver {
                     return false;
                 }
                 self.ladder_start.get_or_insert(current);
-                self.rung_before = now;
+                // Without a stored factor keep any unjudged record: the
+                // next factor is then judged against the last factor that
+                // prompted a raise.
+                if now.is_some() {
+                    self.rung_before = now;
+                }
                 self.bump_pivot_threshold(FIRST_PIVOT_THRESHOLD, PIVOT_EXPONENT, EPS_CAP);
                 true
             }
