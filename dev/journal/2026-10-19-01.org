@@ -444,3 +444,17 @@ Missing tests from the review, added:
   n_tiny. New: m = 300 with floor 5.5e-8 (5 floored) and m = 8 with
   6.5e-8 (6 floored). Pass, same 1e-12 relative tolerance.
 cargo test --release: 991 passed, 0 failed; clippy --all-targets clean.
+
+* 2026-10-21 01:30 :issue-221:verify:pounce:guard:
+Verified the review-fix commits (1f16980 parity, 140e395 zero pivots,
+b0845ba tests, 1e5795f changelog) outside the agent:
+- column25 Sylvester guard (iters 10/12/13/15/17/19/25 × seeds 0/1/4/8):
+  75597 on all 28, tiny 0. Unchanged.
+- pounce 68e438d0, sequential, 300 s: deb7 Optimal/180 (97.56);
+  pooling_rt2stp Optimal -4391.826 (267+82); square_flowsheet_resto
+  Optimal/95; nql180 Optimal 54.5 s / 37 it (was 69 s / 42); brainpc2
+  Optimal 65.5 s (561 base + 143 re-solve); brainpc1 Optimal 165 s (954
+  base + 52 re-solve; was 74 s, 1073 + 52). The base solve fails either
+  way, and the time goes on the failing base run. That is trajectory
+  variance on a path already shown to be sensitive to run-to-run
+  variation, not a factor-cost change.
