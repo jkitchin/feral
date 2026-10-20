@@ -269,3 +269,15 @@ difference (objective 7.3810516e5 vs 7.3810506e5, same inertia), and
 the branch's path then visits harder late KKTs and takes 140 iterations.
 Per-matrix cost is at or below 0.18; the end-to-end difference is
 trajectory.
+
+* 2026-10-20 19:30 :issue-221:e2e:sweep:
+Mittelmann sweep, 47 models, pounce 68e438d0 solve_quality_audit=no,
+300 s cap, 3 parallel. Feral 0.18 vs branch (dc50331):
+- solved: 0.18 46/47, branch 45/47; WM_CFy times out on both;
+- lost: nql180 (0.18 272.6 s, 71 it; branch timeout);
+- slower more than 2x: qcqp1000-2c (34.2 s, 99 it -> 77.7 s, 140 it;
+  trajectory, see 16:30);
+- faster more than 2x: qcqp1500-1nc (134.6 s -> 40.9 s, both 77 it);
+- total wall: 2022 s -> 1927 s.
+User decision: hand the remaining trajectory work to pounce via a PR
+comment.
