@@ -6193,3 +6193,54 @@ into a cascade-break front. It is not partner selection. feral 0.18 on
 the same matrix: 2.25 s, nnz(L) 7.69M, max 345 delays per front, n_tiny
 0, inertia (6007, 5107, 0) = expected, berr 5.9e-30.
 Journal: dev/journal/2026-10-19-01.org (2026-10-20 entries).
+
+## 2026-10-20 — #221: BK decisions inline in the blocked panel via lazy row replay
+
+**Approach.** Most scalar-path accepts in delay-heavy fronts (nql180 iter
+6 after pounce's quality escalation, u = 0.01) are hard BK cases the
+panel bails on:
+- 2×2 with partner `r` needing a mid-panel swap: 131k;
+- `k+1` fallback 2×2: 36k;
+- `r_fs` 2×2: 6.7k;
+- LAPACK-extension 1×1: 29k;
+- swap-1×1: 9.5k.
+Each is followed by an eager rank-1/rank-2 update of the whole trailing
+matrix (`do_1x1_update` 17,280 samples).
+
+The panel was taught to mirror `scalar_pivot_step`'s decision chain on
+deferred state:
+- `lazy_sym_row` computes a row's current values from the pending
+  pivots, bit-identical to the column replay (unit-tested against
+  `peek_ahead_replay` and a per-element `replay_entry`, FMA and non-FMA);
+- `rook::gates_from_parts` shares the 2×2 gate arithmetic.
+
+**Symptoms / why rejected.**
+
+1. Mid-panel swaps break blocked/scalar bit-parity
+   (`tests/blocked_ldlt.rs::test_indefinite_bk77_parity`: `l[549]`
+   differs by 1 ulp; `golden_bits_nofma_2x2_heavy_96`). The lazy row
+   itself is exact (0 mismatches against a full replay). The swap moves
+   entries of deferred column `col+1` into other deferred columns, whose
+   later replay rounds `(d·L_i)·L_j` where eager rounds `(d·L_j)·L_i`.
+   So swaps were limited to `c == 0`, which made the tests green again.
+2. Even so it is slower. Interleaved A/B against the committed kernel
+   on the same machine:
+
+   | case                | committed | lazy    |
+   |---------------------|-----------|---------|
+   | nql180 i6, u = 0.01 | 10.30 s   | 14.34 s |
+   | qcqp1000-2c i85     | 1.86 s    | 2.74 s  |
+   | qcqp1500-1c i76     | 5.49 s    | 7.22 s  |
+
+   Scalar rank-1 work fell (`axpy_minus_unroll4` 17.5k to 2.7k samples),
+   but bails stayed about as frequent (partial panels 738k to 685k; 456k
+   are `k+1` 2×2 candidates that fail the growth bound after the lazy
+   work). Each bail now flushes 1-2 pending pivots through the packing
+   Schur kernel (`packed_schur_tiles` 13.6k to 19.6k), which costs more
+   than the rank-1 axpys it replaced.
+
+**Lesson.** In these fronts the cost is the bail frequency, not the
+eager update. Speeding up a bail-heavy panel would need a-posteriori
+blocking, with failed-column backtracking as in SSIDS APP, so failures
+do not force a flush. That is a larger redesign. Code kept out of tree
+(scratch `factor.rs.lazy2`). Journal: 2026-10-19-01.org.

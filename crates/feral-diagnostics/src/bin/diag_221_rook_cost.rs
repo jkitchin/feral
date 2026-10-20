@@ -40,6 +40,26 @@ fn load(path: &str) -> Result<(CscMatrix, Vec<f64>), Box<dyn std::error::Error>>
     Ok((CscMatrix::from_triplets(n, &r, &c, &v)?, rhs))
 }
 
+/// `A <- D·A·D` with `d_i` in [0.7, 1.4] from a fixed xorshift stream
+/// (same generator as tests/issue_215_delay_growth_cap.rs). Sylvester's
+/// law keeps the inertia, so every seed must count the same.
+fn congruence(m: &mut CscMatrix, seed: u64) {
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0xD1B5_4A32_D192_ED03);
+    let d: Vec<f64> = (0..m.n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            0.7 + 0.7 * ((x >> 11) as f64 / (1u64 << 53) as f64)
+        })
+        .collect();
+    for j in 0..m.n {
+        for p in m.col_ptr[j]..m.col_ptr[j + 1] {
+            m.values[p] *= d[j] * d[m.row_idx[p]];
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -51,13 +71,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         feral::dense::factor::PANEL_DIAG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     for path in &args {
-        let (a, b) = load(path)?;
+        let (mut a, b) = load(path)?;
+        if let Some(seed) = feral::env::u64_var("FERAL_221_SEED") {
+            congruence(&mut a, seed);
+        }
         let mut np = NumericParams::default();
-        np.bk.pivot_threshold = std::env::var("FERAL_221_U")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1e-8);
+        np.bk.pivot_threshold = feral::env::f64_var("FERAL_221_U").unwrap_or(1e-8);
         let mut s = Solver::with_params(np, SupernodeParams::default());
+        if let Some(e) = feral::env::f64_var("FERAL_221_CB_EPS") {
+            s = s.with_cascade_break_eps(e);
+        }
         if std::env::var_os("FERAL_221_COMPACT").is_some() {
             let t = Instant::now();
             s.factor(&a, None);
@@ -71,11 +94,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .zip(&b)
                 .map(|(p, q)| (p - q).abs())
                 .fold(0.0, f64::max);
+            let sym = s.work_estimate().map(|w| w.factor_nnz).unwrap_or(0);
+            let (mut carry, mut sym_area) = (0usize, 0usize);
+            if let Some(f) = s.factors() {
+                for nf in &f.node_factors {
+                    carry += nf.n_delayed_in * nf.nrow;
+                    sym_area += (nf.ncol - nf.n_delayed_in) * (nf.nrow - nf.n_delayed_in);
+                }
+            }
+            // Chain-excess calibration (issue #221 backstop): per node,
+            // excess = actual front area - symbolic area, summed over
+            // children that still delay; sym = subtree symbolic area.
+            let (mut worst_ratio, mut worst_excess) = (0.0f64, 0usize);
+            if let (Some(f), Some(sy)) = (s.factors(), s.symbolic()) {
+                let ns = sy.supernodes.len();
+                let mut ex = vec![0usize; ns];
+                let mut sa = vec![0usize; ns];
+                for (i, sn) in sy.supernodes.iter().enumerate() {
+                    let nf = &f.node_factors[i];
+                    let own_sym = sn.ncol * sn.nrow;
+                    let own_act = nf.ncol * nf.nrow;
+                    let mut e = own_act.saturating_sub(own_sym);
+                    let mut a = own_sym;
+                    for &c in &sn.children {
+                        a += sa[c];
+                        if f.node_factors[c].ncol > f.node_factors[c].nelim {
+                            e += ex[c];
+                        }
+                    }
+                    sa[i] = a;
+                    ex[i] = e;
+                    let ratio = e as f64 / a.max(1) as f64;
+                    if ratio > worst_ratio && e > 0 {
+                        worst_ratio = ratio;
+                        worst_excess = e;
+                    }
+                }
+            }
+            println!("    chain: worst excess/subtree = {worst_ratio:.2} at excess {worst_excess}");
             println!(
-                "{path} {dt:.4} {:?} nnz_l={:?} tiny={:?} res={r:.2e}",
+                "{path} {dt:.4} {:?} nnz_l={:?} tiny={:?} res={r:.2e} grow={:.2} carry/area={:.2}",
                 s.inertia().map(|i| (i.positive, i.negative, i.zero)),
                 st.as_ref().map(|x| x.nnz_l),
                 st.as_ref().map(|x| x.n_tiny),
+                st.as_ref()
+                    .map(|x| x.nnz_l as f64 / sym.max(1) as f64)
+                    .unwrap_or(0.0),
+                carry as f64 / sym_area.max(1) as f64,
             );
             continue;
         }
@@ -111,6 +176,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 g(&pd::SCALAR_2X2_DELAY_DET),
                 g(&pd::SCALAR_2X2_DELAY_BOTH),
                 g(&pd::SCALAR_2X2_DELAY_NEGDET),
+            );
+            println!(
+                "  panel: full={} partial={} delayed={} inline_pivots={} scalar_pivots={} scalar_tail={} fb_bound={} fb_swap1x1={} fb_lapack={} fb_growth={}",
+                g(&pd::PANEL_FULL),
+                g(&pd::PANEL_PARTIAL),
+                g(&pd::PANEL_DELAYED),
+                g(&pd::PIVOTS_INLINE),
+                g(&pd::PIVOTS_SCALAR),
+                g(&pd::SCALAR_TAIL_STEPS),
+                g(&pd::FALLBACK_2X2_NEED_SWAP_OR_BOUND),
+                g(&pd::FALLBACK_2X2_SWAP_1X1_WINS),
+                g(&pd::FALLBACK_2X2_LAPACK_1X1_WINS),
+                g(&pd::FALLBACK_2X2_GROWTH_OR_DET),
             );
         }
         // Normwise backward error of the plain and refined solves.

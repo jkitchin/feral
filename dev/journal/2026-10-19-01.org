@@ -180,3 +180,92 @@ qcqp1500-1c: the branch is faster early (iter 60-72: 0.85 s vs 2.7 s)
 but slower late (iter 76: 11.8 s with 4603 floored vs 8.4 s with 2).
 brainpc1/2: per-factor parity; the regression is the inertia-driven
 trajectory (see 2026-10-19 23:45).
+
+* 2026-10-20 12:30 :issue-215:fixtures:guard:
+The #215 fixtures are not on this machine: not tests/data/large, not
+kkt-mittelmann, not gh999-decisive-pair.zip, nothing under ~. Sources
+are available: column25.zip (pounce gh#1003 attachment) and
+qcqp1500-1nc.nl.
+- pounce 68e438d0 + feral 0.18 dumps: column25 i011 has one solve
+  (Success), and qcqp1500-1nc i0 has n = 22013 (fixture: 12008, an older
+  KKT form). Neither discriminates: 0.18 is exact on both.
+- pounce 68e438d0 + feral fdef8b1 (pre-#215), column25 iters 3-30:
+  WrongInertia +1 on many first solves from iter 10. The second solves
+  (after the first delta_x rung) at iters 10/12/13/15/17/19/25 make a
+  guard set. Sylvester oracle: all congruence seeds must agree.
+  - 0.18: counts 75597-75601 vary by seed, with floored pivots.
+  - current: 75597 on all 28 (7 matrices x 4 seeds), tiny 0.
+
+* 2026-10-20 13:30 :issue-221:backstop:calibration:
+Offline chain metric: excess = actual front area - symbolic area,
+summed over still-delaying children and reset at a front that delays
+nothing; ratio = excess / subtree symbolic area.
+| case                          | worst ratio |
+|-------------------------------+-------------|
+| column25 guard                | 3.65-3.72   |
+| brainpc3 i35 / i37            | 2.82 / 1.36 |
+| qcqp1500-1c i64               | 2.61        |
+| nql180 i6, u = 1e-8           | 0.36        |
+| qcqp1000-2c i76 (fast, exact) | 17.6        |
+| nql180 i6, u = 0.01           | 36          |
+| qcqp1500-1c i76               | 60          |
+| qcqp1000-2c i85               | 224         |
+Prototype (uncommitted): ContribBlock carries sub_sym_area and
+chain_excess, and cascade-break engages when
+chain_excess > max(2^20, 10 x subtree symbolic area).
+
+* 2026-10-20 14:00 :issue-221:backstop:result:inertia:
+Prototype at the default CB floor (cascade_break_eps 1e-10):
+| case           | before                          | backstop                       |
+|----------------+---------------------------------+--------------------------------|
+| qc85           | 4.8 s, neg 5105, tiny 3259      | 1.29 s, neg 5103, tiny 4839    |
+| q15c76         | 12.7 s                          | 4.65 s, neg 10500 (exp 10508), tiny 4722 |
+| nql6 u=0.01    | 49 s                            | 25 s, neg 130079, tiny 1       |
+| qc76           | tiny 0                          | 306 floored, inertia ok        |
+| brainpc3, nql u=1e-8 | -                         | unchanged                      |
+| column25 guard | -                               | unchanged (75597 x 12, tiny 0) |
+CB floor sweep:
+| floor        | qc85                     | q15c76                    |
+|--------------+--------------------------+---------------------------|
+| 1e-12        | 5103 (wrong)             | 10481 (wrong)             |
+| 1e-14, 1e-16 | 4.4 s / 3.8 s, 5107 OK   | 12.1 s / 12.3 s, 10508 OK |
+So the #213 floor (1e-10) makes backstopped CB fronts inertia-wrong on
+qcqp, and a round-off floor restores exactness but gives back the time:
+CB fronts with many threshold failures run through the scalar path
+(rook scans plus unblocked do_1x1_update, the nql180 hot spot in
+pounce). 0.18 did qc85 in 2.25 s, exact, with tiny 0.
+
+* 2026-10-20 16:00 :issue-221:tpp-tail:results:
+Two-phase forced fronts (676df22) plus backstop and 1e-14 floor
+(e702ac9), harness:
+- qc85: 1.86 s, 5107 exact (0.18: 2.25 s);
+- q15c76: 5.5 s, 10508 exact (0.18: 8.4 s);
+- nql180 i6 at u = 0.01: 10.3 s, 130079 (0.18: 5.7 s, 131049 wrong).
+kkt-pounce 370 identical; column25 guard 28/28.
+K sweep (temporary env, not committed):
+| K   | nql u=0.01 | column25 i012     |
+|-----+------------+-------------------|
+| 3   | 6.95 s     | 10-11 s, exact    |
+| 1   | 5.25 s     | 11-12 s, exact    |
+| 0.3 | 4.85 s     | wrong on seed 4   |
+Lower K moves cost onto column25, so K stays at 10.
+Lazy inline BK decisions were tried and rejected (tried-and-rejected
+2026-10-20): 40% slower, and mid-panel swaps break bit-parity.
+
+* 2026-10-20 16:30 :issue-221:e2e:trajectory:
+pounce 68e438d0, solve_quality_audit=no, feral 0.18 vs this branch:
+| model       | 0.18                 | branch               |
+|-------------+----------------------+----------------------|
+| qcqp1000-2c | 28.2 s, 100 it       | 85.5 s, 142 it       |
+| qcqp1500-1c | 235 s, 101 it        | 240.8 s, 135 it      |
+| brainpc1    | 1.1 s, 59 it         | 148.6 s, 1363 it     |
+| brainpc2    | 47.1 s, 278 it       | timeout, 185 it      |
+| nql180      | 257 s, 72 it         | timeout, 25 it       |
+qcqp1000-2c decomposed: on the 100 KKTs of 0.18's own trajectory, the
+branch factors in 46.8 s vs 51.2 s for 0.18, with identical inertia
+except iters 91/93 (0.18: 5102/5098 with 19 floored; branch: 5107 =
+expected). The runs diverge at iter 76 by a round-off-level step
+difference (objective 7.3810516e5 vs 7.3810506e5, same inertia), and
+the branch's path then visits harder late KKTs and takes 140 iterations.
+Per-matrix cost is at or below 0.18; the end-to-end difference is
+trajectory.
