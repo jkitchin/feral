@@ -4,6 +4,12 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-20
+
+**Breaking.** `FactorStats` (`feral::FactorStats`) is an exhaustive
+public struct and gains the public field `max_abs_l: f64`. Code that
+builds it with a struct literal stops compiling; add the field.
+
 ### Fixed — delayed-pivot cascade on KKTs with hub couplings (issue #221)
 
 A zero-diagonal constraint column whose largest entry couples to a row
