@@ -423,3 +423,24 @@ the 8 existing tests pass unchanged. cargo test --release: 986 passed.
 Not re-run: the pounce sweeps (nql180, brainpc1/2). If their stored
 factors carry ForceAccept zero pivots, rungs that were declined as
 "already admissible" will now be taken.
+
+* 2026-10-21 14:10 :issue-221:test:backstop:review:
+Missing tests from the review, added:
+- tests/issue_221_delay_chain_backstop.rs: KKT with chain x_0..x_L
+  (tridiag 4/1), hub h (10), d = 100 zero-diagonal constraints z_i with
+  B_i = 1e-6 e_{x_i} + e_h (full row rank). Saddle-point theorem:
+  inertia (L+2, d, 0). Natural order, nemin 1, default params. L = 220:
+  max n_delayed_in 100, one cascade-break node at chain index 166
+  (excess passes 2^20; sub_sym_area < 1e3), inertia (222, 100, 0) exact.
+  L = 130 (excess ~0.65M < 2^20): no cascade-break, inertia exact.
+  Mutation DELAY_CHAIN_FLOOR = 2^40: the firing test fails (cb 0).
+  0.02 s in release.
+- tests/issue_221_quality_rung.rs max_abs_l_on_a_2x2_pivot: 3x3 where BK
+  takes D = [[0.1,1],[1,0.2]] (det -0.98); hand row-2 multipliers
+  0.18/0.98 and 0.57/0.98, max |L| = 0.57/0.98 (the in-block 1 is in D),
+  inertia (2,1,0). Passes within 8 ulp.
+- tests/issue_221_tpp_tail.rs: check_forced_front now uses the floored
+  pivots sign(δ)·max(|δ|, floor) in the ghost Schur oracle and asserts
+  n_tiny. New: m = 300 with floor 5.5e-8 (5 floored) and m = 8 with
+  6.5e-8 (6 floored). Pass, same 1e-12 relative tolerance.
+cargo test --release: 991 passed, 0 failed; clippy --all-targets clean.

@@ -52,7 +52,20 @@ fn params(on_zero: ZeroPivotAction) -> BunchKaufmanParams {
 fn check_forced_front(m: usize, on_zero: ZeroPivotAction) {
     let h = 1e4;
     let (a, delta, coup) = forced_front(m, h);
+    // Under `PerturbToEps { abs_floor }` a threshold-failing pivot with
+    // `|δ| < abs_floor` is replaced by `sign(δ)·abs_floor` before it is
+    // used, so the hand oracle eliminates the floored values.
+    let floor = match on_zero {
+        ZeroPivotAction::PerturbToEps { abs_floor } => abs_floor,
+        _ => 0.0,
+    };
+    let want_tiny = delta.iter().filter(|d| d.abs() < floor).count();
+    let delta: Vec<f64> = delta
+        .iter()
+        .map(|d| d.signum() * d.abs().max(floor))
+        .collect();
     let ff = factor_frontal_blocked(&a, m, false, &params(on_zero)).expect("factor");
+    assert_eq!(ff.n_tiny, want_tiny, "floored pivots");
 
     assert_eq!(
         ff.nelim, m,
@@ -97,6 +110,21 @@ fn forced_front_wide_perturb_to_eps() {
     // Cascade-break semantics. Every |δ| >= 1e-8 is above the 1e-10
     // floor, so nothing is floored and the hand oracle still holds.
     check_forced_front(300, ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
+}
+
+#[test]
+fn forced_front_wide_perturb_to_eps_floors_small_pivots() {
+    // |δ_i| = (1 + i)·1e-8 < 5.5e-8 for i = 0..=4: those five pivots are
+    // floored to sign(δ_i)·5.5e-8 (n_tiny = 5) and the ghost Schur
+    // complement uses the floored values; the signs, hence the inertia,
+    // are unchanged.
+    check_forced_front(300, ZeroPivotAction::PerturbToEps { abs_floor: 5.5e-8 });
+}
+
+#[test]
+fn forced_front_small_perturb_to_eps_floors_most_pivots() {
+    // m = 8: |δ_i| <= 8e-8, so with a 6.5e-8 floor six of eight floor.
+    check_forced_front(8, ZeroPivotAction::PerturbToEps { abs_floor: 6.5e-8 });
 }
 
 /// Mixed front: `m` pairs `[[0, 1], [1, 0]]` placed `m` columns apart

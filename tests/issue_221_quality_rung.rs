@@ -104,6 +104,49 @@ fn max_abs_l_is_the_realized_multiplier() {
     assert_eq!(s.last_factor_stats().expect("stats").max_abs_l, 0.0);
 }
 
+/// `max_abs_l` on a factor with a 2×2 pivot. Hand calculation for
+///
+/// ```text
+/// A = [[0.1, 1,   0.6],
+///      [1,   0.2, 0.3],
+///      [0.6, 0.3, 5  ]]
+/// ```
+///
+/// Column 0: `|a00| = 0.1 < α·1`, argmax row 1 with `γ_r = 1`,
+/// `|a11| = 0.2 < α·1`, and `0.1·1 < α·1²`, so BK takes the 2×2
+/// `D = [[0.1, 1], [1, 0.2]]`, `det D = -0.98`. Row 2's multipliers are
+/// `[0.6, 0.3]·D⁻¹ = [(0.2·0.6 - 0.3)/det, (0.1·0.3 - 0.6)/det]
+/// = [0.18/0.98, 0.57/0.98]`, so `max |L| = 0.57/0.98`. The in-block
+/// coupling `1` lives in `D` and is not a multiplier. Inertia: `det D < 0`
+/// gives one of each sign, and the Schur complement
+/// `5 - (0.6·0.18 + 0.3·0.57)/0.98 > 0` is positive: `(2, 1, 0)`.
+#[test]
+fn max_abs_l_on_a_2x2_pivot() {
+    let a = CscMatrix::from_triplets(
+        3,
+        &[0, 1, 2, 1, 2, 2],
+        &[0, 0, 0, 1, 1, 2],
+        &[0.1, 1.0, 0.6, 0.2, 0.3, 5.0],
+    )
+    .expect("csc");
+    let mut s = solver(3, NumericParams::default().bk.on_zero_pivot);
+    factor_ok(&mut s, &a);
+    let f = s.factors().expect("factors");
+    let two_by_two = f.node_factors.iter().any(|nf| {
+        let ff = &nf.frontal_factors;
+        ff.nelim >= 2 && ff.d_subdiag[0] != 0.0
+    });
+    assert!(two_by_two, "BK takes the 2x2 at columns 0 and 1");
+    let i = s.inertia().expect("inertia");
+    assert_eq!((i.positive, i.negative, i.zero), (2, 1, 0));
+    let want = 0.57 / 0.98;
+    let got = s.last_factor_stats().expect("stats").max_abs_l;
+    assert!(
+        (got - want).abs() <= 8.0 * f64::EPSILON * want,
+        "max |L| {got:e}, hand {want:e}"
+    );
+}
+
 #[test]
 fn rung_is_declined_when_the_factor_already_meets_it() {
     let n = 6;
