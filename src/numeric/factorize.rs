@@ -1339,6 +1339,34 @@ impl SparseFactors {
             .sum()
     }
 
+    /// Largest realized multiplier `max |L_ij|` (`i > j`) over every
+    /// eliminated column, excluding the unit diagonal and the in-block
+    /// coupling of 2×2 pivots (that entry lives in `D`). `0.0` when no
+    /// column has a multiplier.
+    ///
+    /// Threshold pivoting with parameter `u` accepts a pivot only when its
+    /// multipliers satisfy `|L| <= 1/u`, so `1 / max_abs_l()` is the largest
+    /// threshold the computed factor already meets (pivots counted by
+    /// `n_tiny` or `n_threshold_fail_accepts` aside). One pass over `L`.
+    pub fn max_abs_l(&self) -> f64 {
+        let mut max = 0.0f64;
+        for nf in &self.node_factors {
+            let ff = &nf.frontal_factors;
+            for j in 0..ff.nelim {
+                let first = if j + 1 < ff.nelim && ff.d_subdiag[j] != 0.0 {
+                    j + 2
+                } else {
+                    j + 1
+                };
+                let col = &ff.l[j * ff.nrow..(j + 1) * ff.nrow];
+                for v in &col[first.min(ff.nrow)..] {
+                    max = max.max(v.abs());
+                }
+            }
+        }
+        max
+    }
+
     /// Number of non-root supernodes factored under the cascade-break
     /// trigger (`may_delay = false` because the node's delay budget was
     /// exceeded). The flag is set from the budget alone, before any pivot

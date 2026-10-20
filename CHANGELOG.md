@@ -23,6 +23,37 @@ columns through a 428-front chain:
 
 Inertia is unchanged on all 370 kkt-pounce corpus matrices.
 
+### Changed — `increase_quality` declines rungs that cannot help (issue #221)
+
+`Solver::increase_quality` now checks the stored factor before raising the
+pivot threshold, and returns `false` in two cases:
+
+- **The factor already meets the next threshold.** Nothing was floored or
+  force-accepted, and every multiplier satisfies `|L| <= 1/u_next`. Nothing
+  changes.
+- **The previous raise made the factor worse.** It floored more pivots, or
+  its growth broke the raised bound and exceeded the growth before. In a
+  multifrontal factor, a higher threshold means more delays, and fronts that
+  cannot delay floor or force-accept pivots. The threshold returns to where
+  the ladder started, and the ladder is exhausted.
+
+Before a factor exists, and in the stage-1 scaling flip, the ladder behaves
+as before. `FactorStats::max_abs_l` reports the realized `max |L_ij|`, so
+`1 / max_abs_l` is the threshold the factor actually meets.
+
+On pounce 68e438d0 (default options, 300 s cap):
+
+| model | before | after | `feral_increase_quality=no` |
+|---|---|---|---|
+| nql180 | timeout (threshold up to 0.086) | Optimal, 69 s | 76 s |
+| brainpc1 | 150 s | 74 s | 17 s |
+| brainpc2 | timeout | 68–97 s | 58 s |
+| deb7 (exact) | Optimal/180 | Optimal/180, both rungs kept | — |
+
+`tests/pounce_interface.rs` I8 now escalates before its first factor:
+the diagonal matrix it factors has no multipliers, so a rung after it is
+declined.
+
 ## [0.20.0] - 2026-10-17
 
 **Breaking.** `FactorScratch` (`feral::dense::factor`) is an exhaustive

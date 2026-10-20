@@ -155,6 +155,12 @@ pub struct FactorStats {
     /// trust it. Mirrors
     /// [`SparseFactors::n_threshold_fail_accepts`](crate::numeric::factorize::SparseFactors::n_threshold_fail_accepts).
     pub n_threshold_fail_accepts: usize,
+    /// Largest realized multiplier `max |L_ij|`. With `n_tiny == 0` and
+    /// `n_threshold_fail_accepts == 0`, `1 / max_abs_l` is the largest
+    /// pivot threshold this factor already satisfies, whatever threshold
+    /// it was computed with. Mirrors
+    /// [`SparseFactors::max_abs_l`](crate::numeric::factorize::SparseFactors::max_abs_l).
+    pub max_abs_l: f64,
 }
 
 impl FactorStats {
@@ -202,6 +208,47 @@ pub enum QualityLevel {
     PivotRaised,
     /// Both stages exhausted; `pivot_threshold` is at `pivtol_max`.
     Exhausted,
+}
+
+/// How far a stored factor is from satisfying a pivot threshold, as
+/// [`Solver::increase_quality`] judges it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FactorStability {
+    /// Pivots floored to `±floor` (`n_tiny`): the factor is of a perturbed
+    /// matrix, whatever the threshold.
+    n_tiny: usize,
+    /// Pivots that failed the threshold and were accepted unchanged
+    /// (`n_threshold_fail_accepts`). Relative to the threshold the factor
+    /// was computed with; their growth is part of `max_abs_l`.
+    n_forced: usize,
+    /// Realized `max |L_ij|` ([`SparseFactors::max_abs_l`]).
+    max_abs_l: f64,
+}
+
+impl FactorStability {
+    fn of(factors: &SparseFactors) -> Self {
+        Self {
+            n_tiny: factors.n_tiny(),
+            n_forced: factors.n_threshold_fail_accepts(),
+            max_abs_l: factors.max_abs_l(),
+        }
+    }
+
+    /// Every pivot of the factor passes threshold `u`: none was floored or
+    /// forced, and every multiplier satisfies `|L| <= 1/u`.
+    fn admissible_at(&self, u: f64) -> bool {
+        self.n_tiny == 0 && self.n_forced == 0 && self.max_abs_l * u <= 1.0
+    }
+
+    /// The factor computed at the raised threshold `u` is worse than the
+    /// factor that prompted the raise: it floored more pivots, or its
+    /// growth both breaks the raised bound `1/u` and exceeds the growth
+    /// before. Both measures are independent of the threshold, unlike a
+    /// count of forced accepts.
+    fn worse_than(&self, before: &Self, u: f64) -> bool {
+        self.n_tiny > before.n_tiny
+            || (self.max_abs_l * u > 1.0 && self.max_abs_l > before.max_abs_l)
+    }
 }
 
 /// Structural fingerprint used to detect when the cached
@@ -376,6 +423,13 @@ pub struct Solver {
     snode_params: SupernodeParams,
     pivtol_max: f64,
     quality_level: QualityLevel,
+    /// `pivot_threshold` before the first stage-2 bump, where an undone
+    /// ladder returns to.
+    ladder_start: Option<f64>,
+    /// Stability of the factor that prompted the most recent stage-2
+    /// bump. The next `increase_quality` call consumes it to judge that
+    /// bump, so a rung is judged once, against the factor that prompted it.
+    rung_before: Option<FactorStability>,
     last_symbolic: Option<SymbolicFactorization>,
     last_factors: Option<SparseFactors>,
     last_inertia: Option<Inertia>,
@@ -621,6 +675,8 @@ impl Solver {
             snode_params: sn,
             pivtol_max: 0.5,
             quality_level: QualityLevel::Baseline,
+            ladder_start: None,
+            rung_before: None,
             last_symbolic: None,
             last_factors: None,
             last_inertia: None,
@@ -2316,7 +2372,8 @@ impl Solver {
     }
 
     /// Two-stage quality escalation. Persistent across `factor()`
-    /// calls. Returns `false` when both stages are exhausted.
+    /// calls. Returns `false` when it declines to change anything: both
+    /// stages exhausted, or a stage-2 rung that cannot help (below).
     /// Mirrors `IpTSymLinearSolver::IncreaseQuality`.
     ///
     /// Stage 1 (`Baseline → ScalingEnabled`): if scaling strategy
@@ -2335,29 +2392,76 @@ impl Solver {
     /// `pivot_threshold = 1e-8` (MA27 default, issue #2), so for
     /// `Solver::new()` callers the W5 special case is dead and the
     /// cascade goes 1e-8 → 1e-6 → 10^-4.5 → ... → `pivtol_max`.
+    ///
+    /// A stage-2 rung asks for a factor with a tighter multiplier bound
+    /// `|L| <= 1/u`. Measured against the stored factor, two rungs cannot
+    /// deliver that, and both are declined (`false`, so the caller moves
+    /// on to its next remedy, e.g. Ipopt's `δ_c`):
+    ///
+    /// - **Already admissible.** No pivot of the stored factor escaped the
+    ///   threshold test and its realized `max |L|` already meets the next
+    ///   rung's bound. The factor is a valid factorization at the higher
+    ///   threshold, so refactoring cannot strengthen its stability. The
+    ///   ladder is left as it is.
+    /// - **The previous rung made it worse.** In a multifrontal factor a
+    ///   higher threshold means more delays, and fronts that cannot delay
+    ///   floor or force-accept pivots. A raise is judged once, at the next
+    ///   call: if the factor at the raised threshold floored more pivots
+    ///   than the factor that prompted the raise, or its realized growth
+    ///   breaks the raised bound and exceeds the growth before, raising the
+    ///   threshold works against this problem. The threshold returns to
+    ///   where the ladder started and the ladder is marked `Exhausted`.
+    ///
+    /// Without a stored factor neither test applies. Issue #221;
+    /// `dev/research/issue-221-quality-rung-admissibility.md`.
     pub fn increase_quality(&mut self) -> bool {
         const FIRST_PIVOT_THRESHOLD: f64 = 0.01;
         const PIVOT_EXPONENT: f64 = 0.75;
         const EPS_CAP: f64 = 1e-12;
 
+        let now = self.last_factors.as_ref().map(FactorStability::of);
+        if let (Some(before), Some(now)) = (self.rung_before.take(), now) {
+            if now.worse_than(&before, self.numeric_params.bk.pivot_threshold) {
+                if let Some(start) = self.ladder_start.take() {
+                    self.numeric_params.bk.pivot_threshold = start;
+                }
+                self.quality_level = QualityLevel::Exhausted;
+                return false;
+            }
+        }
+
         match self.quality_level {
             QualityLevel::Exhausted => false,
-            QualityLevel::Baseline => {
-                // Stage 1: flip Identity → InfNorm if applicable.
-                if matches!(self.numeric_params.scaling, ScalingStrategy::Identity) {
-                    self.numeric_params.scaling = ScalingStrategy::InfNorm;
-                    self.quality_level = QualityLevel::ScalingEnabled;
-                    true
-                } else {
-                    // Stage 1 is a no-op; fall through to stage 2.
-                    self.bump_pivot_threshold(FIRST_PIVOT_THRESHOLD, PIVOT_EXPONENT, EPS_CAP);
-                    true
-                }
+            QualityLevel::Baseline
+                if matches!(self.numeric_params.scaling, ScalingStrategy::Identity) =>
+            {
+                // Stage 1: flip Identity → InfNorm.
+                self.numeric_params.scaling = ScalingStrategy::InfNorm;
+                self.quality_level = QualityLevel::ScalingEnabled;
+                true
             }
-            QualityLevel::ScalingEnabled | QualityLevel::PivotRaised => {
+            // Stage 2; from `Baseline` this means stage 1 is a no-op.
+            QualityLevel::Baseline | QualityLevel::ScalingEnabled | QualityLevel::PivotRaised => {
+                let current = self.numeric_params.bk.pivot_threshold;
+                let next = self.next_pivot_threshold(FIRST_PIVOT_THRESHOLD, PIVOT_EXPONENT);
+                if now.is_some_and(|st| st.admissible_at(next)) {
+                    return false;
+                }
+                self.ladder_start.get_or_insert(current);
+                self.rung_before = now;
                 self.bump_pivot_threshold(FIRST_PIVOT_THRESHOLD, PIVOT_EXPONENT, EPS_CAP);
                 true
             }
+        }
+    }
+
+    /// The threshold the stage-2 rule would move to next.
+    fn next_pivot_threshold(&self, first_jump: f64, exponent: f64) -> f64 {
+        let pivtol = self.numeric_params.bk.pivot_threshold;
+        if pivtol == 0.0 {
+            first_jump
+        } else {
+            pivtol.powf(exponent).min(self.pivtol_max)
         }
     }
 
@@ -2365,13 +2469,9 @@ impl Solver {
     /// Caller has already decided that stage 2 should fire and
     /// that `Exhausted` is not the current state.
     fn bump_pivot_threshold(&mut self, first_jump: f64, exponent: f64, eps_cap: f64) {
-        let pivtol = &mut self.numeric_params.bk.pivot_threshold;
-        if *pivtol == 0.0 {
-            *pivtol = first_jump;
-        } else {
-            *pivtol = pivtol.powf(exponent).min(self.pivtol_max);
-        }
-        self.quality_level = if *pivtol >= self.pivtol_max - eps_cap {
+        let next = self.next_pivot_threshold(first_jump, exponent);
+        self.numeric_params.bk.pivot_threshold = next;
+        self.quality_level = if next >= self.pivtol_max - eps_cap {
             QualityLevel::Exhausted
         } else {
             QualityLevel::PivotRaised
@@ -2582,6 +2682,7 @@ impl Solver {
         let n_tiny = factors.n_tiny();
         let n_cascade_break_nodes = factors.n_cascade_break_nodes();
         let n_threshold_fail_accepts = factors.n_threshold_fail_accepts();
+        let max_abs_l = factors.max_abs_l();
         let sym = self.last_symbolic.as_ref()?;
         let mut n_supernodes = 0usize;
         let mut max_front_rows = 0usize;
@@ -2611,6 +2712,7 @@ impl Solver {
             n_tiny,
             n_cascade_break_nodes,
             n_threshold_fail_accepts,
+            max_abs_l,
         })
     }
 

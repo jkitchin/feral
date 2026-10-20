@@ -398,10 +398,15 @@ fn i7_quality_escalation_loop_terminates_with_correct_inertia() {
 
 /// I8 — solver lifetime: state persists across `factor()` calls.
 ///
-/// Factor once, then call `increase_quality()` twice. The second
-/// `factor()` should observe the bumped pivot threshold via
-/// `solver.pivot_threshold()`, and the new factorization should
-/// still succeed.
+/// Call `increase_quality()` twice, then factor twice. Both factors
+/// should observe the bumped pivot threshold via
+/// `solver.pivot_threshold()`, reuse the symbolic factorization, and
+/// succeed.
+///
+/// The bumps come before the first factor because, since issue #221, a
+/// rung is declined when the stored factor already meets the next
+/// threshold, and the diagonal matrix here has no multipliers at all. That
+/// decline is asserted at the end.
 ///
 /// Note: `NumericParams::default()` baseline `pivot_threshold` is
 /// `1e-8` (MA27 `cntl[1]` default, issue #2), so the W5
@@ -413,7 +418,6 @@ fn i8_solver_lifetime_state_persists() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
 
     let mut solver = Solver::new();
-    let _ = solver.factor(&csc, None);
     assert_eq!(solver.quality_level(), QualityLevel::Baseline);
     assert_eq!(
         solver.pivot_threshold(),
@@ -436,14 +440,22 @@ fn i8_solver_lifetime_state_persists() {
     let want_after_2 = want_after_1.powf(0.75);
     assert!((solver.pivot_threshold() - want_after_2).abs() < 1e-15);
 
-    // Re-factor: state persists, factor still succeeds, symbolic
-    // cache reused (same pattern).
+    // Factor twice: state persists, factor succeeds, symbolic cache
+    // reused on the second call (same pattern).
+    let status = solver.factor(&csc, None);
+    assert!(matches!(status, FactorStatus::Success));
     let n_sym_before = solver.symbolic_call_count();
     let status = solver.factor(&csc, None);
     assert!(matches!(status, FactorStatus::Success));
     assert_eq!(solver.symbolic_call_count(), n_sym_before);
     // Pivot threshold did not get reset by factor().
     assert!((solver.pivot_threshold() - want_after_2).abs() < 1e-15);
+
+    // A diagonal factor has no multipliers, so it meets every threshold:
+    // the next rung is declined and nothing changes.
+    assert!(!solver.increase_quality());
+    assert!((solver.pivot_threshold() - want_after_2).abs() < 1e-15);
+    assert_eq!(solver.quality_level(), QualityLevel::PivotRaised);
 }
 
 /// `Solver::min_diagonal()` returns `None` before any successful factor.
