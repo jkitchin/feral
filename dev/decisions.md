@@ -7931,3 +7931,33 @@ other changed matrices are within ±3 % or faster.
   of delays rather than fixing their sign handling.
 
 Research: `dev/research/issue-215-delay-budget-exact-inertia.md`.
+
+## 2026-10-19 — 2×2 partner falls back to the fully-summed argmax (issue #221)
+
+**Decision.** In `scalar_pivot_step`, the 2×2 partner candidates are now
+tried in this order:
+1. BK's argmax `r`, if fully summed;
+2. `k+1`, if coupled (#46);
+3. the largest entry among the fully-summed rows (`r_fs`), only if
+   `{k, r_fs}` passes the Duff-Reid growth bound and the SSIDS det floor,
+   checked before any swap.
+
+A rejected candidate leaves the old path unchanged.
+
+**Why.** A ghost-row argmax (a hub coupling) plus an uncoupled `k+1`
+made a zero-diagonal constraint delay even when its matched partner was
+fully summed in the same front. On brainpc3 this carried about 2000
+delays through 428 fronts once #215's budget allowed it: 9.4 s against
+0.02 s. SSIDS's TPP kernel restricts the partner search to fully-summed
+columns (`ldlt_tpp.cxx:207`), so this aligns feral with SSIDS.
+
+**Cost.** None measured. The kkt-pounce corpus has identical inertia on
+370/370 and nnz(L) within −0.9 %/+0.03 % on the 141 that changed.
+
+**Alternatives rejected.**
+- Cheaper rook scans: rook is about half the time, and the Schur work on
+  the delay-swollen fronts remains.
+- Tightening the #215 delay budget back toward 0.18: reintroduces
+  cascade-break floored pivots (brainpc3 i35 HEAD: 277 floored, cb 1).
+
+Research: `dev/research/issue-221-fully-summed-2x2-partner.md`.

@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — delayed-pivot cascade on KKTs with hub couplings (issue #221)
+
+A zero-diagonal constraint column whose largest entry couples to a row
+that is not yet fully summed (for example a parameter shared by every
+time step) now pairs with its largest fully-summed entry as a 2×2 pivot,
+as SSIDS does. Before, it was delayed whenever its partner was not at the
+adjacent column. The candidate must pass the usual growth and determinant
+gates.
+
+On pounce's brainpc3 KKTs, feral 0.19/0.20 carried about 2000 delayed
+columns through a 428-front chain:
+
+| brainpc3 KKT | before | after |
+|---|---|---|
+| iter 37 | 9.4 s, nnz(L) 12.9M | 0.022 s, nnz(L) 402K |
+| iter 35 | 43.8 s, 277 floored pivots | 0.022 s, none |
+
+Inertia is unchanged on all 370 kkt-pounce corpus matrices.
+
 ## [0.20.0] - 2026-10-17
 
 **Breaking.** `FactorScratch` (`feral::dense::factor`) is an exhaustive

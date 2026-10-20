@@ -4330,7 +4330,7 @@ fn scalar_pivot_step(
     }
 
     // Find max |A[i,k]| for i in (k, ncol) — restricted to fully-summed rows
-    let (gamma0, r) = {
+    let (gamma0, r, gamma_fs, r_fs) = {
         let mut max_val = 0.0f64;
         let mut max_row = k + 1;
         // Search within fully-summed rows first
@@ -4341,6 +4341,8 @@ fn scalar_pivot_step(
                 max_row = i;
             }
         }
+        // Fully-summed argmax: the issue #221 2×2 partner fallback.
+        let (gamma_fs, r_fs) = (max_val, max_row);
         // Also check sub-diagonal rows (they contribute to gamma0 for
         // the BK pivot test, but are never swapped into pivot position)
         for i in ncol..nrow {
@@ -4350,7 +4352,7 @@ fn scalar_pivot_step(
                 max_row = i;
             }
         }
-        (max_val, max_row)
+        (max_val, max_row, gamma_fs, r_fs)
     };
 
     if gamma0 == 0.0 {
@@ -4501,10 +4503,26 @@ fn scalar_pivot_step(
     // bit-identical to the pre-#46 kernel for every structurally
     // uncoupled neighbour. See
     // `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`.
+    //
+    // Issue #221: when `k+1` is uncoupled too, try the largest
+    // fully-summed entry of column `k` (`r_fs`), as SSIDS's TPP partner
+    // search does. Delayed columns land at the end of the fully-summed
+    // range, so a matched pair split across supernodes is rarely adjacent
+    // in the parent front. A zero-diagonal constraint column whose largest
+    // entry couples to a hub row that is not yet fully summed then delays
+    // at every front up the tree (brainpc3: about 2000 delays carried
+    // through 428 fronts, 9 s against 0.02 s). The candidate is taken only
+    // if it already passes both 2×2 gates, checked before any swap, so a
+    // rejected candidate leaves the old path (rook-wrapped 1×1) unchanged.
     let partner = if r_is_fully_summed && k + 1 < ncol {
         Some(r)
     } else if k + 1 < ncol && a[k * nrow + (k + 1)] != 0.0 {
         Some(k + 1)
+    } else if k + 1 < ncol
+        && gamma_fs != 0.0
+        && crate::dense::rook::passes_2x2_gates(a, nrow, k, k, r_fs, params.pivot_threshold)
+    {
+        Some(r_fs)
     } else {
         None
     };
