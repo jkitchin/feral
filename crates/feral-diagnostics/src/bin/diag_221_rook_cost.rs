@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|nf| (nf.n_delayed_in, nf.nrow, nf.ncol, nf.nelim))
                 .collect();
             let total_in: usize = fronts.iter().map(|x| x.0).sum();
-            fronts.sort_by(|x, y| y.0.cmp(&x.0));
+            fronts.sort_by_key(|x| std::cmp::Reverse(x.0));
             println!(
                 "  delayed fronts: {} of {}, sum n_delayed_in = {total_in}",
                 fronts.len(),
