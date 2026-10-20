@@ -46,10 +46,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("usage: diag_221_rook_cost <kkt.jsonl> [...]");
         std::process::exit(2);
     }
+    let diag = std::env::var_os("FERAL_221_PANEL_DIAG").is_some();
+    if diag {
+        feral::dense::factor::PANEL_DIAG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     for path in &args {
         let (a, b) = load(path)?;
         let mut np = NumericParams::default();
-        np.bk.pivot_threshold = 1e-8;
+        np.bk.pivot_threshold = std::env::var("FERAL_221_U")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1e-8);
         let mut s = Solver::with_params(np, SupernodeParams::default());
         if std::env::var_os("FERAL_221_COMPACT").is_some() {
             let t = Instant::now();
@@ -91,6 +98,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     x.ordering_info, x.scaling_info
                 );
             }
+        }
+        if diag {
+            use feral::dense::factor::panel_diag as pd;
+            let g =
+                |c: &std::sync::atomic::AtomicU64| c.swap(0, std::sync::atomic::Ordering::Relaxed);
+            println!(
+                "  delays (cold+warm): 1x1={} 1x1_tiny={} 2x2_growth={} 2x2_det={} 2x2_both={} 2x2_negdet={}",
+                g(&pd::SCALAR_1X1_DELAY),
+                g(&pd::SCALAR_1X1_DELAY_TINY),
+                g(&pd::SCALAR_2X2_DELAY_GROWTH),
+                g(&pd::SCALAR_2X2_DELAY_DET),
+                g(&pd::SCALAR_2X2_DELAY_BOTH),
+                g(&pd::SCALAR_2X2_DELAY_NEGDET),
+            );
         }
         // Normwise backward error of the plain and refined solves.
         let berr = |x: &[f64]| {

@@ -6163,3 +6163,33 @@ reuses memory: 16.2 MB of cache-cold lines per refactor. mimalloc (which
 reuses memory) was 1.7-1.8x *faster* than glibc. The #200 bump-allocator
 result ("0.6-7.7%, allocation ruled out") used the bump instrument and
 does not rule allocation out. See dev/journal/2026-10-16-01.org.
+
+## 2026-10-20 — #221 follow-up: fall back to `r_fs` when the `k+1` 2×2 fails the gates
+
+**Approach.** Extend the #221 partner fallback. When `a[k,k+1] != 0` but
+`{k, k+1}` fails the pre-swap 2×2 gates (`rook::passes_2x2_gates`), try
+the fully-summed argmax `r_fs` before delaying. The motivation was
+qcqp1000-2c late KKTs (pounce 68e438d0 dump iter 85), whose delays were
+dominated by #46 `k+1` partners coupled only by round-off (`a[k,k+1]` of
+1e-12 down to 1e-53) with `d11, d22 ~ -1e-9`.
+
+**Symptoms / why rejected.** No effect:
+
+| iter-85 KKT | before | with the change |
+|---|---|---|
+| 2×2 growth delays | 73,736 | 74,232 |
+| 1×1 delays | 32,984 | 32,066 |
+| Σ n_delayed_in | 53,393 | 53,201 |
+| nnz(L) | 12.27M | 12.25M |
+| floored pivots | 3259 | 3262 |
+| time | 4.15 s | 4.32 s |
+
+`r_fs` fails the gates as well. These columns have a ~-1e-9 diagonal,
+only round-off couplings inside the fully-summed set, and O(1) entries
+in non-fully-summed rows (|d| = 1e-9 < u·colmax = 1e-8). No fully-summed
+partner is stable, so SSIDS-style TPP would delay them too. The cost
+comes from #215's delay budget letting about 3000 of them ride a chain
+into a cascade-break front. It is not partner selection. feral 0.18 on
+the same matrix: 2.25 s, nnz(L) 7.69M, max 345 delays per front, n_tiny
+0, inertia (6007, 5107, 0) = expected, berr 5.9e-30.
+Journal: dev/journal/2026-10-19-01.org (2026-10-20 entries).

@@ -136,3 +136,47 @@ Conclusion: the remaining brainpc slowdown is pounce's trajectory
 reacting to a now-correct inertia, plus the inherent MC64 cost on the
 iterates that trajectory reaches. It is not a feral factor-cost or
 accuracy defect.
+
+* 2026-10-20 09:00 :issue-221:ci:
+PR #222 `check` failed: clippy 1.99.1 (CI) flags unnecessary_sort_by in
+diag_221_rook_cost. Local was rustc 1.93 and did not flag it. Fixed with
+sort_by_key(Reverse) in 4be7aed. After `rustup update stable` to 1.99.1,
+`pre-commit run --all-files` passes and cargo test --release gives
+965/0.
+
+* 2026-10-20 09:30 :issue-221:pounce-comment:qcqp:
+The PR comment (pounce 68e438d0, solve_quality_audit=no) lists five
+models still regressing vs 0.18: brainpc1, brainpc2, qcqp1000-2c,
+qcqp1500-1c, nql180. brainpc3-9 were pounce's audit re-solve and are
+fixed there.
+qcqp1000-2c late KKTs (dumped from pounce 68e438d0 + this branch):
+- iter 85: 0.18 2.25 s, nnz(L) 7.69M, 0 floored, inertia = expected
+  5107, berr 5.9e-30, max 345 delays/front.
+- main: 4.19 s, 12.28M, 3266 floored.
+- this branch: 4.15 s, 12.27M, 3259 floored, neg 5105 (wrong).
+41 delayed fronts carry up to ~3300 delays (nelim ~30 each) into a
+cascade-break front. The delays are 2x2 growth fails (73,736) and 1x1
+fails (32,984): d ~ -1e-9, column O(1) in non-fully-summed rows, #46
+k+1 partners coupled only by round-off. Trying r_fs after a failed k+1
+2x2 had no effect (tried-and-rejected 2026-10-20). So this is #215's
+budget, not partner choice.
+
+* 2026-10-20 10:30 :issue-221:pounce-comment:nql180:quality:
+Per-matrix at u = 1e-8, 0.18 and the fix are identical on nql180
+(iter 6: 4.0 s, 22.0M, neg 130080) and on brainpc2. But pounce sets
+increase_quality = true, and Solver::increase_quality raises u to 0.01
+and beyond. At u = 0.01 on nql180 iter 6:
+- 0.18: 5.7 s, 43M, neg 131049 (wrong by ~970), 51 floored.
+- this branch: 49.4 s, 142M, neg 130079, 0 floored.
+At u = 0.0316: 0.18 6.0 s, 44M, neg 130611; branch 53.9 s, 150M,
+neg 130080.
+#215 said "nql180 no longer reaches any budget". That holds at
+u = 1e-8, not after escalation.
+End to end, pounce 68e438d0 built with feral =0.18.0 (with an
+n_threshold_fail_accepts stub) vs this branch, sequential runs:
+nql180 0.18 256.7 s, 72 iter, Optimal, 12 escalations; branch timeout
+at 300 s after 13 iterations.
+qcqp1500-1c: the branch is faster early (iter 60-72: 0.85 s vs 2.7 s)
+but slower late (iter 76: 11.8 s with 4603 floored vs 8.4 s with 2).
+brainpc1/2: per-factor parity; the regression is the inertia-driven
+trajectory (see 2026-10-19 23:45).
