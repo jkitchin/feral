@@ -93,3 +93,46 @@ So there is no local 0.18 end-to-end number; the issue's is ~1 s.
   that keeps entering restoration. Not addressed here; a follow-up is
   needed. Sweep stopped after brainpc2. brainpc3-9 and qcqp1000-2c were
   not run end to end.
+
+* 23:10 :issue-221:mc64:e2e:
+User asked to fix the brainpc1/2 timeouts on this branch.
+FERAL_MC64_TRACE=1 on brainpc1 (pounce main + fix, 90 s): 141 MC64
+matchings, all n = 13805, median 526 ms and max 2.2 s per call (first
+call 0.8 ms). New probe diag_221_mc64_cost on the brainpc1 dumps (iters
+60-140) shows 4500-5900 augmenting searches, ~1500 nodes touched and
+~11k edge scans per search: O(searches x hub degree 10348). That cost
+is inherent (tried-and-rejected 2026-06-06-03; SPRAL has the same).
+
+* 23:30 :issue-221:bisect:trajectory:
+Built pounce 9a97f997 (the reporter's 0.18 commit) twice: crates.io
+feral 0.18.0, and the fix version-spoofed to 0.18.0 so the patch
+applies. Settings are --no-options-file. With 0.18 the run is far from
+the issue's "~1 s":
+
+| model    | 0.18                                         | fix                     |
+|----------+----------------------------------------------+-------------------------|
+| brainpc1 | 34.7 s, 58+526 iter, 401 restoration         | TIMEOUT 300 s           |
+| brainpc3 | 51.9 s, 43+506 iter                          | TIMEOUT 300 s           |
+| brainpc0 | 7.4 s, 185+24 iter                           | 62.6 s, 1512 iter       |
+
+MC64 in the first 60 s of brainpc1: 0.18 does 161 calls in 16.6 s
+(103 ms each) and finishes 613 iterations. The fix does 86 calls in
+54.5 s (633 ms each) and reaches 310 iterations. src/scaling is
+unchanged since v0.18.0. The per-call cost tracks the iterates, not the
+code.
+
+* 23:45 :issue-221:inertia:oracle:
+The two trajectories are identical through iter 41 and split at iter 42
+(0.18 takes alpha_pr 2.48e-2, the fix takes 1.0). On the shared iter-42
+first KKT (iter_042/kkt_solve_001):
+- 0.18 gives neg 6901, n_tiny 665, refined berr 1.5e-17;
+- the fix gives neg 6902, n_tiny 0, refined berr 1.5e-27;
+- eigvalsh gives neg 6902.
+So the fix is correct, and 0.18's count came from floored pivots (the
+#213/#215 defect). Iter 41/001: both 6902, eigvalsh 6902. Downstream
+fix-trajectory matrices i53/i54 are scaled so badly that eigvalsh is
+unusable (13793 of 13805 |w| below n*eps*||A||, ||A|| = 1.5e12).
+Conclusion: the remaining brainpc slowdown is pounce's trajectory
+reacting to a now-correct inertia, plus the inherent MC64 cost on the
+iterates that trajectory reaches. It is not a feral factor-cost or
+accuracy defect.
