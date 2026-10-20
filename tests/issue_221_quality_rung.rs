@@ -1,0 +1,360 @@
+//! Issue #221 (PR #222, pounce side): `Solver::increase_quality` declines a
+//! stage-2 rung that cannot help.
+//!
+//! A rung raises the pivot threshold `u` to `u'`, which asks for a factor
+//! whose multipliers satisfy `|L| <= 1/u'`. Two cases are declined
+//! (`dev/research/issue-221-quality-rung-admissibility.md`):
+//!
+//! - the stored factor already meets `u'`: nothing floored or
+//!   force-accepted, and realized `max |L| <= 1/u'`;
+//! - the previous rung made the factor worse (more pivots escaped the
+//!   test). The threshold returns to where the ladder started and the
+//!   ladder is exhausted.
+//!
+//! Oracles are hand calculations:
+//! - a diagonal matrix has no multipliers, so `max |L| = 0`;
+//! - under `PerturbToEps`, each exactly zero diagonal of a diagonal matrix
+//!   is one floored pivot (`n_tiny`), as `tests/issue_55_n_tiny_counter.rs`
+//!   pins;
+//! - for the tridiagonal `T = tridiag(b, 1, b)` eliminated in natural
+//!   order, `d_1 = 1`, `l_k = b / d_k`, `d_{k+1} = 1 - b·l_k`.
+//!
+//! The scaling is `External(1, ..., 1)`, which leaves the matrix unchanged
+//! and is not `Identity`, so `increase_quality` goes straight to stage 2,
+//! as it does under pounce's `Auto` scaling.
+
+use feral::dense::factor::ZeroPivotAction;
+use feral::numeric::factorize::NumericParams;
+use feral::numeric::solver::{FactorStatus, QualityLevel, Solver};
+use feral::scaling::ScalingStrategy;
+use feral::sparse::csc::CscMatrix;
+use feral::symbolic::{OrderingMethod, SupernodeParams};
+use feral::BunchKaufmanParams;
+
+fn diag_csc(values: &[f64]) -> CscMatrix {
+    let n = values.len();
+    let idx: Vec<usize> = (0..n).collect();
+    CscMatrix::from_triplets(n, &idx, &idx, values).expect("diag csc")
+}
+
+fn tridiag_csc(n: usize, b: f64) -> CscMatrix {
+    let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..n {
+        r.push(i);
+        c.push(i);
+        v.push(1.0);
+        if i + 1 < n {
+            r.push(i + 1);
+            c.push(i);
+            v.push(b);
+        }
+    }
+    CscMatrix::from_triplets(n, &r, &c, &v).expect("tridiag csc")
+}
+
+/// Natural order, no amalgamation, unit scaling: the factor is exactly
+/// the hand elimination.
+fn solver(n: usize, on_zero: ZeroPivotAction) -> Solver {
+    let np = NumericParams {
+        scaling: ScalingStrategy::External(vec![1.0; n]),
+        bk: BunchKaufmanParams {
+            on_zero_pivot: on_zero,
+            ..NumericParams::default().bk
+        },
+        ..NumericParams::default()
+    };
+    let sn = SupernodeParams {
+        nemin: 1,
+        ..SupernodeParams::default()
+    };
+    Solver::with_params(np, sn).with_ordering(OrderingMethod::External((0..n).collect()))
+}
+
+fn perturb() -> ZeroPivotAction {
+    ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 }
+}
+
+fn factor_ok(s: &mut Solver, a: &CscMatrix) {
+    let st = s.factor(a, None);
+    assert!(matches!(st, FactorStatus::Success), "factor: {st:?}");
+}
+
+#[test]
+fn max_abs_l_is_the_realized_multiplier() {
+    let (n, b) = (6, 0.25);
+    let mut s = solver(n, NumericParams::default().bk.on_zero_pivot);
+    factor_ok(&mut s, &tridiag_csc(n, b));
+    // Hand recurrence. T is diagonally dominant, so every l_k < 1 and the
+    // natural order is what BK takes (|d_k| >= alpha·b).
+    let mut d = 1.0f64;
+    let mut want = 0.0f64;
+    for _ in 0..n - 1 {
+        let l = b / d;
+        want = want.max(l);
+        d = 1.0 - b * l;
+    }
+    let got = s.last_factor_stats().expect("stats").max_abs_l;
+    assert!(
+        (got - want).abs() <= 4.0 * f64::EPSILON * want,
+        "max |L| {got:e}, hand {want:e}"
+    );
+
+    let mut s = solver(3, NumericParams::default().bk.on_zero_pivot);
+    factor_ok(&mut s, &diag_csc(&[2.0, 3.0, 5.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").max_abs_l, 0.0);
+}
+
+/// `max_abs_l` on a factor with a 2×2 pivot. Hand calculation for
+///
+/// ```text
+/// A = [[0.1, 1,   0.6],
+///      [1,   0.2, 0.3],
+///      [0.6, 0.3, 5  ]]
+/// ```
+///
+/// Column 0: `|a00| = 0.1 < α·1`, argmax row 1 with `γ_r = 1`,
+/// `|a11| = 0.2 < α·1`, and `0.1·1 < α·1²`, so BK takes the 2×2
+/// `D = [[0.1, 1], [1, 0.2]]`, `det D = -0.98`. Row 2's multipliers are
+/// `[0.6, 0.3]·D⁻¹ = [(0.2·0.6 - 0.3)/det, (0.1·0.3 - 0.6)/det]
+/// = [0.18/0.98, 0.57/0.98]`, so `max |L| = 0.57/0.98`. The in-block
+/// coupling `1` lives in `D` and is not a multiplier. Inertia: `det D < 0`
+/// gives one of each sign, and the Schur complement
+/// `5 - (0.6·0.18 + 0.3·0.57)/0.98 > 0` is positive: `(2, 1, 0)`.
+#[test]
+fn max_abs_l_on_a_2x2_pivot() {
+    let a = CscMatrix::from_triplets(
+        3,
+        &[0, 1, 2, 1, 2, 2],
+        &[0, 0, 0, 1, 1, 2],
+        &[0.1, 1.0, 0.6, 0.2, 0.3, 5.0],
+    )
+    .expect("csc");
+    let mut s = solver(3, NumericParams::default().bk.on_zero_pivot);
+    factor_ok(&mut s, &a);
+    let f = s.factors().expect("factors");
+    let two_by_two = f.node_factors.iter().any(|nf| {
+        let ff = &nf.frontal_factors;
+        ff.nelim >= 2 && ff.d_subdiag[0] != 0.0
+    });
+    assert!(two_by_two, "BK takes the 2x2 at columns 0 and 1");
+    let i = s.inertia().expect("inertia");
+    assert_eq!((i.positive, i.negative, i.zero), (2, 1, 0));
+    let want = 0.57 / 0.98;
+    let got = s.last_factor_stats().expect("stats").max_abs_l;
+    assert!(
+        (got - want).abs() <= 8.0 * f64::EPSILON * want,
+        "max |L| {got:e}, hand {want:e}"
+    );
+}
+
+#[test]
+fn rung_is_declined_when_the_factor_already_meets_it() {
+    let n = 6;
+    let mut s = solver(n, NumericParams::default().bk.on_zero_pivot);
+    factor_ok(&mut s, &tridiag_csc(n, 0.25));
+    let st = s.last_factor_stats().expect("stats");
+    assert_eq!((st.n_tiny, st.n_threshold_fail_accepts), (0, 0));
+
+    // max |L| < 0.27, so the factor meets every threshold up to 1/0.27.
+    assert!(!s.increase_quality(), "rung 1e-8 -> 1e-6 cannot help");
+    assert_eq!(s.pivot_threshold(), 1e-8, "threshold unchanged");
+    assert_eq!(s.quality_level(), QualityLevel::Baseline);
+}
+
+#[test]
+fn rung_proceeds_when_pivots_escaped_the_threshold() {
+    let mut s = solver(5, perturb());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").n_tiny, 2);
+
+    assert!(s.increase_quality());
+    assert_eq!(s.pivot_threshold(), 1e-6);
+    assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+}
+
+#[test]
+fn rung_that_made_the_factor_worse_is_undone() {
+    let mut s = solver(5, perturb());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert!(s.increase_quality());
+    assert_eq!(s.pivot_threshold(), 1e-6);
+
+    // At the raised threshold, three pivots escape instead of two.
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").n_tiny, 3);
+    assert!(
+        !s.increase_quality(),
+        "a rung that made it worse is declined"
+    );
+    assert_eq!(s.pivot_threshold(), 1e-8, "and undone");
+    assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+    assert!(!s.increase_quality(), "and not retried");
+    assert_eq!(s.pivot_threshold(), 1e-8);
+}
+
+#[test]
+fn undo_returns_to_the_start_of_the_ladder() {
+    let mut s = solver(5, perturb());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert!(s.increase_quality()); // 1e-8 -> 1e-6
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert!(s.increase_quality()); // 1e-6 -> 1e-6^0.75, not worse
+    assert!(s.pivot_threshold() > 1e-6);
+
+    factor_ok(&mut s, &diag_csc(&[0.0, 0.0, 1.0, 0.0, 0.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").n_tiny, 4);
+    assert!(!s.increase_quality());
+    assert_eq!(s.pivot_threshold(), 1e-8, "back to where the ladder began");
+    assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+}
+
+#[test]
+fn rung_that_did_not_make_it_worse_is_kept() {
+    let mut s = solver(5, perturb());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert!(s.increase_quality());
+
+    // Same two floored pivots at 1e-6: not worse, so the ladder climbs.
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert!(s.increase_quality());
+    let want = 1e-6_f64.powf(0.75);
+    assert!((s.pivot_threshold() - want).abs() <= 1e-15 * want);
+    assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+
+    // A clean factor at the raised threshold: kept, and the next rung is
+    // declined because the factor already meets it.
+    factor_ok(&mut s, &diag_csc(&[1.0, 2.0, 1.0, 2.0, 1.0]));
+    assert!(!s.increase_quality());
+    assert!((s.pivot_threshold() - want).abs() <= 1e-15 * want);
+    assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+}
+
+/// A rung is judged once, by the first call after it, against the factor
+/// that prompted it. A later iterate is not compared with that stale
+/// factor (pooling_rt2stp: a clean factor declined the next rung, and a
+/// later iterate with two floored pivots then read as "worse" than the
+/// factor three calls back, which undid the whole ladder).
+#[test]
+fn a_rung_is_judged_only_by_the_next_call() {
+    let mut s = solver(5, perturb());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert!(s.increase_quality()); // 1e-8 -> 1e-6
+
+    factor_ok(&mut s, &diag_csc(&[1.0, 2.0, 1.0, 2.0, 1.0]));
+    assert!(!s.increase_quality(), "clean: next rung already met");
+    assert_eq!(s.pivot_threshold(), 1e-6);
+
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 0.0, 0.0, 1.0]));
+    assert!(s.increase_quality(), "floored pivots: the ladder climbs");
+    let want = 1e-6_f64.powf(0.75);
+    assert!((s.pivot_threshold() - want).abs() <= 1e-15 * want);
+    assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+}
+
+#[test]
+fn without_a_factor_the_ladder_is_unchanged() {
+    let mut s = solver(3, NumericParams::default().bk.on_zero_pivot);
+    assert!(s.increase_quality());
+    assert_eq!(s.pivot_threshold(), 1e-6);
+}
+
+fn force() -> ZeroPivotAction {
+    ZeroPivotAction::ForceAccept
+}
+
+fn zeros_of(s: &Solver) -> usize {
+    s.inertia().expect("inertia").zero
+}
+
+/// Review finding: `ForceAccept` zeroes a pivot it cannot take and counts
+/// it only in the inertia (`zero`), not in `n_tiny` or
+/// `n_threshold_fail_accepts`. A factor with exact-zero pivots must not
+/// read as admissible, or the rung is declined.
+///
+/// Hand oracles: `[[1, 1], [1, 1]]` has eigenvalues 0 and 2, so inertia
+/// `(1, 0, 1)`; BK takes the 1×1 at column 0 (`|a00| = 1 >= α·1`), so
+/// `l = 1` and the Schur complement is exactly `1 - 1·1 = 0`.
+/// `diag(1, 0, 1)` has inertia `(2, 0, 1)` and no multipliers.
+#[test]
+fn zero_pivots_make_a_factor_inadmissible() {
+    let mut s = solver(2, force());
+    let ones = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[1.0, 1.0, 1.0]).expect("csc");
+    factor_ok(&mut s, &ones);
+    let inertia = s.inertia().expect("inertia").clone();
+    assert_eq!(
+        (inertia.positive, inertia.negative, inertia.zero),
+        (1, 0, 1)
+    );
+    let st = s.last_factor_stats().expect("stats");
+    assert_eq!((st.n_tiny, st.n_threshold_fail_accepts), (0, 0));
+    assert_eq!(st.max_abs_l, 1.0, "hand: l = a10 / a00 = 1");
+    // max |L| = 1 meets 1/u for every u <= 1: only the zero pivot says
+    // the factor does not meet the next rung.
+    assert!(s.increase_quality(), "a zero pivot: the rung proceeds");
+    assert_eq!(s.pivot_threshold(), 1e-6);
+    assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+
+    let mut s = solver(3, force());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0]));
+    assert_eq!(zeros_of(&s), 1);
+    let st = s.last_factor_stats().expect("stats");
+    assert_eq!((st.n_tiny, st.n_threshold_fail_accepts), (0, 0));
+    assert_eq!(st.max_abs_l, 0.0);
+    assert!(s.increase_quality(), "a zero pivot: the rung proceeds");
+    assert_eq!(s.pivot_threshold(), 1e-6);
+}
+
+/// More zero pivots at the raised threshold is worse: the rung is undone.
+/// Hand oracle: each exact zero on the diagonal of a diagonal matrix is
+/// one zero pivot under `ForceAccept`.
+#[test]
+fn rung_that_added_zero_pivots_is_undone() {
+    let mut s = solver(5, force());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 1.0, 1.0]));
+    assert_eq!(zeros_of(&s), 1);
+    assert!(s.increase_quality());
+    assert_eq!(s.pivot_threshold(), 1e-6);
+
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(zeros_of(&s), 2);
+    assert!(!s.increase_quality(), "more zero pivots: worse");
+    assert_eq!(s.pivot_threshold(), 1e-8, "undone");
+    assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+}
+
+/// The same zero count at the raised threshold (a singular matrix keeps
+/// its zero pivots) is not worse: the ladder climbs.
+#[test]
+fn same_zero_pivots_are_not_worse() {
+    let mut s = solver(3, force());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0]));
+    assert!(s.increase_quality());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0]));
+    assert!(s.increase_quality(), "same singular matrix: not worse");
+    let want = 1e-6_f64.powf(0.75);
+    assert!((s.pivot_threshold() - want).abs() <= 1e-15 * want);
+}
+
+/// A call without a stored factor (here after `invalidate_factors`) must
+/// not drop the record of an unjudged raise: the next factor is judged
+/// against the factor that prompted it.
+#[test]
+fn unjudged_rung_survives_a_call_without_a_factor() {
+    let mut s = solver(5, perturb());
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 1.0, 0.0, 1.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").n_tiny, 2);
+    assert!(s.increase_quality()); // 1e-8 -> 1e-6, record n_tiny = 2
+
+    s.invalidate_factors();
+    assert!(s.increase_quality(), "no factor: the ladder moves on");
+    assert!(s.pivot_threshold() > 1e-6);
+
+    factor_ok(&mut s, &diag_csc(&[1.0, 0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(s.last_factor_stats().expect("stats").n_tiny, 3);
+    assert!(
+        !s.increase_quality(),
+        "judged against the kept record (2 floored): worse"
+    );
+    assert_eq!(s.pivot_threshold(), 1e-8, "back to where the ladder began");
+    assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+}

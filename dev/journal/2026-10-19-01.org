@@ -1,0 +1,486 @@
+#+TITLE: Session 2026-10-19-01 — issue #221 (brainpc factor 250x slower on 0.19+)
+
+* 19:00 :issue-221:repro:
+Built pounce main (ff7f2379) against local feral HEAD (23624f1) via
+--config patch.crates-io (no pounce file edits), dumped brainpc3 KKTs
+--dump kkt:34-40. New harness
+crates/feral-diagnostics/src/bin/diag_221_rook_cost.rs (pounce params,
+bk.pivot_threshold = 1e-8). iter 37/1: cold 9.08 s, warm 9.21 s,
+inertia (6904, 6901, 0), nnz_l 12,880,227. iter 34/1: 0.019 s, nnz_l
+162,019. Reproduces the issue (reporter: 9.37 s / 9.28 s).
+
+* 19:15 :issue-221:diagnosis:delays:
+iter 37: 428 fronts receive delays, sum n_delayed_in 399,871, and the
+largest fronts carry about 2000 delayed columns with nelim of 17-80.
+11,846/13,805 columns are delayed at least once (median 10 hops, max
+235). sample, 8 s: rook_rescue 3191, Schur kernels about 1370,
+scalar_pivot_step 600, swap 285. A cheaper rook alone cannot recover
+0.04 s; the delay volume is the defect.
+
+* 19:30 :issue-221:diagnosis:pivoting:
+Temporary eprintln trace (removed) at the delay sites. The origin
+fronts are single-column leaves holding a state variable, d ~ 1e-13 to
+2e-11 with colmax ~1, whose MC64 partner constraint is a ghost row.
+That delay is expected and costs one hop. In the parent fronts the
+constraint columns delay too, with d = 0 and colmax ~1. Matrix
+inspection: constraint rows couple 1.0 to their state and about
+600/675 to hub columns 6899/6900 (degree 10,348, root). So BK's
+argmax r is a hub (ghost), a[k,k+1] = 0 because the delayed state sits
+at the end of the fully-summed range, not at k+1, and rook walks the
+hub rows and fails. The pair {c, y} is never tested, though
+[[0,1],[1,1e-13]] passes both gates easily at u = 1e-8.
+
+* 19:45 :issue-221:reference:ssids:
+spral-expert agent: SSIDS ldlt_tpp.cxx:207 picks the 2x2 partner with
+find_row_abs_max over uneliminated fully-summed columns only. The test
+maxima (find_rc_abs_max_exclude :75-86) run to m. A ghost row is never
+a partner; it only tightens the tests.
+
+* 19:55 :issue-221:fix:
+scalar_pivot_step records the fully-summed argmax (gamma_fs, r_fs)
+during the existing gamma0 scan. When r is a ghost and k+1 is
+uncoupled, it uses {k, r_fs} as the 2x2 candidate, gated pre-swap by
+rook::passes_2x2_gates (same Duff-Reid and SSIDS det floor math). A
+rejected candidate gives the old path unchanged. Prototype without the
+pre-check: iter 37 0.023 s; final version identical in time, nnz_l
+402,310.
+
+* 20:05 :issue-221:validation:oracle:
+numpy eigvalsh (dense): i37 neg 6901, i38 6900, i39 6902, i35 6900.
+Count of |w| < n*eps*||A||: 129, 129, 7 and 13,795, so all four are
+numerically singular. HEAD gives 6901/6900/6903/6902 (i35 from 277
+floored pivots, cb 1, 43.8 s). The fix gives 6901/6901/6902/6901, all
+with tiny 0 and cb 0, in 0.022 s each. Backward error, plain/refined:
+i37 HEAD 7.8e-17/7.8e-17 vs fix 7.3e-19/2.5e-25; i38 3.8e-15/2.6e-18 vs
+7.6e-21/2.6e-26; i39 6.0e-16/5.5e-22 vs 8.7e-17/2.7e-23.
+On i38 the fix's count (6901) differs from eigvalsh (6900) and HEAD
+matched. The matrix has 129 eigenvalues inside the round-off band, so
+this is within the singular-matrix exemption, but it is recorded as an
+unfavourable data point.
+
+* 20:10 :issue-221:validation:corpus:
+data/matrices/kkt-pounce, 370 matrices, pounce params, HEAD worktree
+vs fix. Inertia identical 370/370, n_tiny identical. nnz_l differs on
+141 (104 corkscrw, 37 laptime) by -0.9 % to +0.03 %. Total time 69.0 s
+vs 68.6 s. One unrefined residual got worse (corkscrw_0109, abs 27 to
+531), but its normwise berr is 2e-34 vs 4e-33 with refined 9.05e-37
+identical. cargo test --release: 963 passed, 0 failed. The issue-215
+column25/qcqp1500 tests SKIP here: fixtures absent on this machine.
+
+* 20:15 :issue-221:test:
+tests/issue_221_fully_summed_2x2_partner.rs, with a hand-oracle frontal
+test (nelim 3, inertia (2,1,0), hub Schur 1e4 + 3.6e-8) and a synthetic
+brainpc-shaped KKT (saddle-point theorem oracle). Synthetic T=500: HEAD
+nnz_l 255,962 vs fix 19,359. T=2000: HEAD 4.04M in 2.83 s vs fix 78K in
+0.0044 s. Both tests FAIL on the HEAD worktree and pass with the fix.
+
+* 21:40 :issue-221:e2e:pounce:
+pounce main ff7f2379 built three ways. (a) Patched to the fix. (b) An
+attempted patch to v0.18.0, which cargo ignored ("patch was not used",
+version mismatch) and built crates.io 0.20.0, so it is a clean 0.20
+baseline. (c) A version-spoofed 0.18 build, which fails to compile:
+pounce main uses FactorStats::n_threshold_fail_accepts (0.19 API).
+So there is no local 0.18 end-to-end number; the issue's is ~1 s.
+- brainpc0: fix 68.8 s, 1512 iter (709 restoration in 23 calls, 6
+  quality escalations), Optimal. Baseline 0.20 timed out at 600 s.
+  Installed pounce 0.11 (feral 0.17): 7.9 s, 185 iter, Acceptable.
+- brainpc1, brainpc2: fix TIMEOUT at 300 s. brainpc1 reached 1397 iter,
+  cycling through restoration. A 15 s `sample` mid-run shows the busy
+  time almost all in feral::scaling::hungarian::hungarian_match_instrumented
+  (10,056 of ~10,600 busy samples), with factor_one_supernode at 19.
+  The factor-cost defect of #221 is gone there. What remains is MC64
+  matching cost on the restoration-phase KKTs plus an IPM trajectory
+  that keeps entering restoration. Not addressed here; a follow-up is
+  needed. Sweep stopped after brainpc2. brainpc3-9 and qcqp1000-2c were
+  not run end to end.
+
+* 23:10 :issue-221:mc64:e2e:
+User asked to fix the brainpc1/2 timeouts on this branch.
+FERAL_MC64_TRACE=1 on brainpc1 (pounce main + fix, 90 s): 141 MC64
+matchings, all n = 13805, median 526 ms and max 2.2 s per call (first
+call 0.8 ms). New probe diag_221_mc64_cost on the brainpc1 dumps (iters
+60-140) shows 4500-5900 augmenting searches, ~1500 nodes touched and
+~11k edge scans per search: O(searches x hub degree 10348). That cost
+is inherent (tried-and-rejected 2026-06-06-03; SPRAL has the same).
+
+* 23:30 :issue-221:bisect:trajectory:
+Built pounce 9a97f997 (the reporter's 0.18 commit) twice: crates.io
+feral 0.18.0, and the fix version-spoofed to 0.18.0 so the patch
+applies. Settings are --no-options-file. With 0.18 the run is far from
+the issue's "~1 s":
+
+| model    | 0.18                                         | fix                     |
+|----------+----------------------------------------------+-------------------------|
+| brainpc1 | 34.7 s, 58+526 iter, 401 restoration         | TIMEOUT 300 s           |
+| brainpc3 | 51.9 s, 43+506 iter                          | TIMEOUT 300 s           |
+| brainpc0 | 7.4 s, 185+24 iter                           | 62.6 s, 1512 iter       |
+
+MC64 in the first 60 s of brainpc1: 0.18 does 161 calls in 16.6 s
+(103 ms each) and finishes 613 iterations. The fix does 86 calls in
+54.5 s (633 ms each) and reaches 310 iterations. src/scaling is
+unchanged since v0.18.0. The per-call cost tracks the iterates, not the
+code.
+
+* 23:45 :issue-221:inertia:oracle:
+The two trajectories are identical through iter 41 and split at iter 42
+(0.18 takes alpha_pr 2.48e-2, the fix takes 1.0). On the shared iter-42
+first KKT (iter_042/kkt_solve_001):
+- 0.18 gives neg 6901, n_tiny 665, refined berr 1.5e-17;
+- the fix gives neg 6902, n_tiny 0, refined berr 1.5e-27;
+- eigvalsh gives neg 6902.
+So the fix is correct, and 0.18's count came from floored pivots (the
+#213/#215 defect). Iter 41/001: both 6902, eigvalsh 6902. Downstream
+fix-trajectory matrices i53/i54 are scaled so badly that eigvalsh is
+unusable (13793 of 13805 |w| below n*eps*||A||, ||A|| = 1.5e12).
+Conclusion: the remaining brainpc slowdown is pounce's trajectory
+reacting to a now-correct inertia, plus the inherent MC64 cost on the
+iterates that trajectory reaches. It is not a feral factor-cost or
+accuracy defect.
+
+* 2026-10-20 09:00 :issue-221:ci:
+PR #222 `check` failed: clippy 1.99.1 (CI) flags unnecessary_sort_by in
+diag_221_rook_cost. Local was rustc 1.93 and did not flag it. Fixed with
+sort_by_key(Reverse) in 4be7aed. After `rustup update stable` to 1.99.1,
+`pre-commit run --all-files` passes and cargo test --release gives
+965/0.
+
+* 2026-10-20 09:30 :issue-221:pounce-comment:qcqp:
+The PR comment (pounce 68e438d0, solve_quality_audit=no) lists five
+models still regressing vs 0.18: brainpc1, brainpc2, qcqp1000-2c,
+qcqp1500-1c, nql180. brainpc3-9 were pounce's audit re-solve and are
+fixed there.
+qcqp1000-2c late KKTs (dumped from pounce 68e438d0 + this branch):
+- iter 85: 0.18 2.25 s, nnz(L) 7.69M, 0 floored, inertia = expected
+  5107, berr 5.9e-30, max 345 delays/front.
+- main: 4.19 s, 12.28M, 3266 floored.
+- this branch: 4.15 s, 12.27M, 3259 floored, neg 5105 (wrong).
+41 delayed fronts carry up to ~3300 delays (nelim ~30 each) into a
+cascade-break front. The delays are 2x2 growth fails (73,736) and 1x1
+fails (32,984): d ~ -1e-9, column O(1) in non-fully-summed rows, #46
+k+1 partners coupled only by round-off. Trying r_fs after a failed k+1
+2x2 had no effect (tried-and-rejected 2026-10-20). So this is #215's
+budget, not partner choice.
+
+* 2026-10-20 10:30 :issue-221:pounce-comment:nql180:quality:
+Per-matrix at u = 1e-8, 0.18 and the fix are identical on nql180
+(iter 6: 4.0 s, 22.0M, neg 130080) and on brainpc2. But pounce sets
+increase_quality = true, and Solver::increase_quality raises u to 0.01
+and beyond. At u = 0.01 on nql180 iter 6:
+- 0.18: 5.7 s, 43M, neg 131049 (wrong by ~970), 51 floored.
+- this branch: 49.4 s, 142M, neg 130079, 0 floored.
+At u = 0.0316: 0.18 6.0 s, 44M, neg 130611; branch 53.9 s, 150M,
+neg 130080.
+#215 said "nql180 no longer reaches any budget". That holds at
+u = 1e-8, not after escalation.
+End to end, pounce 68e438d0 built with feral =0.18.0 (with an
+n_threshold_fail_accepts stub) vs this branch, sequential runs:
+nql180 0.18 256.7 s, 72 iter, Optimal, 12 escalations; branch timeout
+at 300 s after 13 iterations.
+qcqp1500-1c: the branch is faster early (iter 60-72: 0.85 s vs 2.7 s)
+but slower late (iter 76: 11.8 s with 4603 floored vs 8.4 s with 2).
+brainpc1/2: per-factor parity; the regression is the inertia-driven
+trajectory (see 2026-10-19 23:45).
+
+* 2026-10-20 12:30 :issue-215:fixtures:guard:
+The #215 fixtures are not on this machine: not tests/data/large, not
+kkt-mittelmann, not gh999-decisive-pair.zip, nothing under ~. Sources
+are available: column25.zip (pounce gh#1003 attachment) and
+qcqp1500-1nc.nl.
+- pounce 68e438d0 + feral 0.18 dumps: column25 i011 has one solve
+  (Success), and qcqp1500-1nc i0 has n = 22013 (fixture: 12008, an older
+  KKT form). Neither discriminates: 0.18 is exact on both.
+- pounce 68e438d0 + feral fdef8b1 (pre-#215), column25 iters 3-30:
+  WrongInertia +1 on many first solves from iter 10. The second solves
+  (after the first delta_x rung) at iters 10/12/13/15/17/19/25 make a
+  guard set. Sylvester oracle: all congruence seeds must agree.
+  - 0.18: counts 75597-75601 vary by seed, with floored pivots.
+  - current: 75597 on all 28 (7 matrices x 4 seeds), tiny 0.
+
+* 2026-10-20 13:30 :issue-221:backstop:calibration:
+Offline chain metric: excess = actual front area - symbolic area,
+summed over still-delaying children and reset at a front that delays
+nothing; ratio = excess / subtree symbolic area.
+| case                          | worst ratio |
+|-------------------------------+-------------|
+| column25 guard                | 3.65-3.72   |
+| brainpc3 i35 / i37            | 2.82 / 1.36 |
+| qcqp1500-1c i64               | 2.61        |
+| nql180 i6, u = 1e-8           | 0.36        |
+| qcqp1000-2c i76 (fast, exact) | 17.6        |
+| nql180 i6, u = 0.01           | 36          |
+| qcqp1500-1c i76               | 60          |
+| qcqp1000-2c i85               | 224         |
+Prototype (uncommitted): ContribBlock carries sub_sym_area and
+chain_excess, and cascade-break engages when
+chain_excess > max(2^20, 10 x subtree symbolic area).
+
+* 2026-10-20 14:00 :issue-221:backstop:result:inertia:
+Prototype at the default CB floor (cascade_break_eps 1e-10):
+| case           | before                          | backstop                       |
+|----------------+---------------------------------+--------------------------------|
+| qc85           | 4.8 s, neg 5105, tiny 3259      | 1.29 s, neg 5103, tiny 4839    |
+| q15c76         | 12.7 s                          | 4.65 s, neg 10500 (exp 10508), tiny 4722 |
+| nql6 u=0.01    | 49 s                            | 25 s, neg 130079, tiny 1       |
+| qc76           | tiny 0                          | 306 floored, inertia ok        |
+| brainpc3, nql u=1e-8 | -                         | unchanged                      |
+| column25 guard | -                               | unchanged (75597 x 12, tiny 0) |
+CB floor sweep:
+| floor        | qc85                     | q15c76                    |
+|--------------+--------------------------+---------------------------|
+| 1e-12        | 5103 (wrong)             | 10481 (wrong)             |
+| 1e-14, 1e-16 | 4.4 s / 3.8 s, 5107 OK   | 12.1 s / 12.3 s, 10508 OK |
+So the #213 floor (1e-10) makes backstopped CB fronts inertia-wrong on
+qcqp, and a round-off floor restores exactness but gives back the time:
+CB fronts with many threshold failures run through the scalar path
+(rook scans plus unblocked do_1x1_update, the nql180 hot spot in
+pounce). 0.18 did qc85 in 2.25 s, exact, with tiny 0.
+
+* 2026-10-20 16:00 :issue-221:tpp-tail:results:
+Two-phase forced fronts (676df22) plus backstop and 1e-14 floor
+(e702ac9), harness:
+- qc85: 1.86 s, 5107 exact (0.18: 2.25 s);
+- q15c76: 5.5 s, 10508 exact (0.18: 8.4 s);
+- nql180 i6 at u = 0.01: 10.3 s, 130079 (0.18: 5.7 s, 131049 wrong).
+kkt-pounce 370 identical; column25 guard 28/28.
+K sweep (temporary env, not committed):
+| K   | nql u=0.01 | column25 i012     |
+|-----+------------+-------------------|
+| 3   | 6.95 s     | 10-11 s, exact    |
+| 1   | 5.25 s     | 11-12 s, exact    |
+| 0.3 | 4.85 s     | wrong on seed 4   |
+Lower K moves cost onto column25, so K stays at 10.
+Lazy inline BK decisions were tried and rejected (tried-and-rejected
+2026-10-20): 40% slower, and mid-panel swaps break bit-parity.
+
+* 2026-10-20 16:30 :issue-221:e2e:trajectory:
+pounce 68e438d0, solve_quality_audit=no, feral 0.18 vs this branch:
+| model       | 0.18                 | branch               |
+|-------------+----------------------+----------------------|
+| qcqp1000-2c | 28.2 s, 100 it       | 85.5 s, 142 it       |
+| qcqp1500-1c | 235 s, 101 it        | 240.8 s, 135 it      |
+| brainpc1    | 1.1 s, 59 it         | 148.6 s, 1363 it     |
+| brainpc2    | 47.1 s, 278 it       | timeout, 185 it      |
+| nql180      | 257 s, 72 it         | timeout, 25 it       |
+qcqp1000-2c decomposed: on the 100 KKTs of 0.18's own trajectory, the
+branch factors in 46.8 s vs 51.2 s for 0.18, with identical inertia
+except iters 91/93 (0.18: 5102/5098 with 19 floored; branch: 5107 =
+expected). The runs diverge at iter 76 by a round-off-level step
+difference (objective 7.3810516e5 vs 7.3810506e5, same inertia), and
+the branch's path then visits harder late KKTs and takes 140 iterations.
+Per-matrix cost is at or below 0.18; the end-to-end difference is
+trajectory.
+
+* 2026-10-20 19:30 :issue-221:e2e:sweep:
+Mittelmann sweep, 47 models, pounce 68e438d0 solve_quality_audit=no,
+300 s cap, 3 parallel. Feral 0.18 vs branch (dc50331):
+- solved: 0.18 46/47, branch 45/47; WM_CFy times out on both;
+- lost: nql180 (0.18 272.6 s, 71 it; branch timeout);
+- slower more than 2x: qcqp1000-2c (34.2 s, 99 it -> 77.7 s, 140 it;
+  trajectory, see 16:30);
+- faster more than 2x: qcqp1500-1nc (134.6 s -> 40.9 s, both 77 it);
+- total wall: 2022 s -> 1927 s.
+User decision: hand the remaining trajectory work to pounce via a PR
+comment.
+
+* 2026-10-20 20:30 :issue-221:remaining-lever:
+User: "fast but wrong is not good"; investigate the remaining lever.
+Phase timers on nql180 i6 at u = 0.01 (two factorizations, summed over
+threads): dense 40.2 s = panel 1.5 + Schur 10.4 + scalar tail 0.15 +
+other 28.0. The other is the panel-bail -> flush -> scalar-step cycle
+(about 790k delays and 196k scalar accepts per two factors; avg 0.27
+inline pivots per partial panel).
+- Lazy inline BK, retried with flushes of 1-2 pivots routed to the
+  per-pivot strided loop (bit-identical, parity tests green): still
+  slower under load (qc85 ~2.9 s vs 2.6, q15c76 ~8.5 vs 7.0, nql equal).
+  Inline accepts are flushed at the next bail, so nothing batches.
+  Reverted.
+- Lower backstop K: fast and seemingly exact with escalation on, but
+  inertia-wrong on the #215 guard once escalation is disabled (K = 3:
+  27/28 wrong; K = 1: 28/28 wrong). Rejected (tried-and-rejected).
+Conclusion: the only exact and fast route left is an a-posteriori (APP)
+blocked kernel in which a failing column does not end the panel. That
+relaxes the blocked/scalar bit-parity contract.
+
+* 2026-10-20 22:00 :issue-221:quality:increase-quality:pounce-comment:
+PR #222 comment 6294656538: the remaining pounce failures (nql180 and
+brainpc2 time out; brainpc1 slow) all vanish with
+feral_increase_quality=no, and pounce found no rule of its own that keeps
+deb7/pooling. Logged feral's state at every increase_quality call
+(temporary eprintln, pounce 68e438d0 + branch). Realized 1/max|L| of the
+factor that prompted each rung:
+- nql180: rung 1 at u=1e-8 is clean (0 floored, 0 forced) with
+  1/max|L| = 1.4e-6 >= next rung 1e-6. The factor already meets the next
+  threshold, so the rung cannot help. Later rungs add forced accepts
+  (3652 → 30554) and delays (788 → 503k), and the count stays 130079.
+- deb7: rung 1 has 6 floored; rung 2 is clean but at 2.0e-6 < 3.2e-5.
+  Neither is admissible, so both rungs are kept.
+- brainpc2: rung 1 at 1e-8 is clean, 1/max|L| = 1.0e-8 (growth at the
+  bound, a legitimate rung). The factor at 1e-6 has 1 floored + 34
+  forced and max|L| 1.8e13, which is worse.
+Prototype (env-gated): (A) decline when the factor is admissible at
+u_next; (B) undo a rung whose factor is worse.
+- One-rung undo: nql 224 s / 33 it Optimal, stuck at 3.2e-5 (70k delays).
+  Changed to undo back to the ladder start.
+- Persistent rung record: pooling exact compared a later iterate with a
+  stale factor and undid the ladder. Made the record single-use.
+- Lexicographic (violations, max|L|) "worse": brainpc1 rung 1 went from
+  (0, 1.0e8) to (2 forced, 9.8e5), so growth improved 100× but it was
+  judged worse. Forced counts are relative to the threshold, so changed to
+  n_tiny, or growth that breaks the raised bound and exceeds the growth
+  before.
+Results with ladder-start undo + single-use + violation-count worse
+(sequential, 300 s cap): nql180 Optimal 69.4 s / 42 it (was timeout;
+escalation-off 76 s); brainpc1 73.6 s (1073 it base fails, 52 it re-solve);
+brainpc2 96.9 s (561 base fails, 253 re-solve). Fixtures: deb7 exact
+Optimal/180 unchanged; pooling exact Optimal (267+82 vs 128+56 baseline,
+both through re-solve); square_flowsheet exact Optimal/95; the lbfgs legs
+fail the same way as the baseline at 68e438d0.
+
+* 2026-10-20 23:30 :issue-221:quality:pounce-tests:
+Final measure for "worse": n_tiny up, or growth that breaks the raised
+bound 1/u and exceeds the growth before (forced counts dropped; they are
+relative to u). brainpc1 rung 1 now undone because the 1e-6 factor
+floored 1 pivot (before 0). Sequential results: nql180 Optimal 69.3 s
+/ 42 it; brainpc1 73.8 s (1073 base + 52 re-solve); brainpc2 68.3 s (561
++ 155, Solved To Acceptable; an earlier identical-config run of its
+escalation-off re-solve gave 253 it Optimal, so the re-solve itself is not
+deterministic).
+feral cargo test --release: one failure, tests/pounce_interface.rs I8. It
+factored diag(2,3,5) (no multipliers) and then expected two unconditional
+rungs, which the new rule declines by design. Rewritten to escalate before
+the first factor and to assert the decline. Intent (state persists across
+factor, symbolic reused) kept.
+pounce 68e438d0 escalation tests (issue850 x2, issue850_second_opinion,
+issue857 x2, issue_250, watchdog), HEAD feral vs this change: identical
+except issue_250 pooling_rt2stp_solves_at_default_settings, which passes on
+HEAD and fails here. The objective is -4391.826 (dual inf 1.8e-7, constr
+viol 1e-8, Optimal), but the test pins Ipopt's -3273.955. On HEAD the base
+solve fails and the mu_strategy=adaptive re-solve lands on -3273.955. Here
+the default solve ends at the lower objective. A different local optimum,
+not a defect; -4391.83 is, as far as I recall, the best-known RT2 value.
+The issue850/857 failures (11) fail identically on HEAD: they pin
+trajectories of published feral 0.20, not this branch. The watchdog
+12-variable model passes on both.
+
+* 2026-10-21 13:00 :issue-221:parity:bk:review:
+Review finding, confirmed: 676df22 broke blocked/scalar bit-parity on
+fronts that cannot delay (may_delay=false, u > 0). The blocked kernel ran
+two phases (delay pass, then force_inline pass over the stuck columns)
+while factor_frontal stayed single-pass and force-accepted in place. On
+main the two are byte-identical; at 676df22..ed292fc forced_front(m)
+(m = 8/40/300, ForceAccept and PerturbToEps) differed in perm, L, D and
+contrib (reviewer: contrib up to 4.5e-8). The blocked phase 2 also made
+panel-position-dependent choices (forced 1x1 whenever the inline 2x2 was
+not allowed, e.g. swap needed at c > 0), so no single scalar policy
+matched it.
+Fix: one forced-pass policy F = scalar_pivot_step(may_delay=false,
+allow_rook=false), used by both kernels.
+- Scalar driver: same two phases (delay pass with delay_swap_to_boundary,
+  then F over [nelim, ncol) in order).
+- Blocked phase 2: every scalar step (tail, fallback) is F. The
+  force_inline panel commits a 1x1 at col only when F provably does: BK
+  argmax r not fully summed and either (a) no fully-summed entry in the
+  column, or (b) partner col+1 (a[col,col+1] != 0), peeked, fails the
+  same growth/det gates (then LAPACK test and partner path both end in
+  the 1x1 at col). (b) leaves col+1 pre-peeked; the next peek replays only
+  pivot c-1 (new peek_ahead_replay_from). Bails (r_fs partner, passing
+  2x2, refine-flag ambiguity, static floor, Fail mode) go to F.
+Evidence:
+- tests/issue_221_forced_front_parity.rs (5 tests: forced_front
+  m=8/40/300 x ForceAccept / PerturbToEps 1e-10 / 5.5e-8 floor-hit with
+  n_tiny=5, mixed front 4 sizes x 4 seeds x 3 floors, coupled stuck front
+  4 sizes x 2 eps x 3 seeds x 3 floors). On ed292fc: 4/4 original tests
+  FAIL (perm differs first). With fix: 5/5 pass. Mutation (replay all
+  pivots after pre-peek) fails 2/5. Case (b) fired 8417 times in the
+  coupled test, 2224 in the mixed test.
+- First version bailed in case (b): qcqp1000-2c i85 1.91 s -> 3.55 s
+  (9368 phase-2 bails, all r non-fs with a[col,col+1] != 0). With (b)
+  inline: 1.91 s (HEAD 1.91 s), identical inertia/nnz_l/tiny/tfa.
+- kkt-pounce 370: inertia, nnz_l, n_tiny, residual identical to ed292fc
+  (60.9 s vs 59.8 s).
+- qcqp1000-2c i76-100 (25 dumps): inertia identical on all; 3 dumps
+  differ in n_tiny by +-1 and tfa by +-1 (HEAD's blocked forced pass made
+  different, position-dependent choices); 41.7 s vs 42.8 s total.
+- cargo test --release: 982 passed, 0 failed; golden_bits and
+  blocked_ldlt unchanged.
+Not run: column25 guard (fixture absent on this machine).
+
+* 2026-10-21 13:40 :issue-221:quality:review:
+Review finding, confirmed: FactorStability ignored zero pivots.
+try_reject_1x1_frontal's ForceAccept branch (and the gamma0 == 0 zero-
+column branch) moves only inertia.zero, so a factor of [[1,1],[1,1]]
+under the default params read as admissible (n_tiny 0, tfa 0, max |L| 1)
+and increase_quality declined the rung. Fix: FactorStability.n_zero from
+the new SparseFactors::n_zero_pivots; admissible_at requires 0;
+worse_than compares n_tiny + n_zero. Also rung_before.take() ran with no
+stored factor, dropping the record; it is now consumed only against a
+factor, and the stage-2 branch keeps it when now == None.
+Tests (tests/issue_221_quality_rung.rs, +4): all four FAIL with the old
+solver.rs (zero_pivots_make_a_factor_inadmissible,
+rung_that_added_zero_pivots_is_undone, same_zero_pivots_are_not_worse,
+unjudged_rung_survives_a_call_without_a_factor) and pass with the fix;
+the 8 existing tests pass unchanged. cargo test --release: 986 passed.
+Not re-run: the pounce sweeps (nql180, brainpc1/2). If their stored
+factors carry ForceAccept zero pivots, rungs that were declined as
+"already admissible" will now be taken.
+
+* 2026-10-21 14:10 :issue-221:test:backstop:review:
+Missing tests from the review, added:
+- tests/issue_221_delay_chain_backstop.rs: KKT with chain x_0..x_L
+  (tridiag 4/1), hub h (10), d = 100 zero-diagonal constraints z_i with
+  B_i = 1e-6 e_{x_i} + e_h (full row rank). Saddle-point theorem:
+  inertia (L+2, d, 0). Natural order, nemin 1, default params. L = 220:
+  max n_delayed_in 100, one cascade-break node at chain index 166
+  (excess passes 2^20; sub_sym_area < 1e3), inertia (222, 100, 0) exact.
+  L = 130 (excess ~0.65M < 2^20): no cascade-break, inertia exact.
+  Mutation DELAY_CHAIN_FLOOR = 2^40: the firing test fails (cb 0).
+  0.02 s in release.
+- tests/issue_221_quality_rung.rs max_abs_l_on_a_2x2_pivot: 3x3 where BK
+  takes D = [[0.1,1],[1,0.2]] (det -0.98); hand row-2 multipliers
+  0.18/0.98 and 0.57/0.98, max |L| = 0.57/0.98 (the in-block 1 is in D),
+  inertia (2,1,0). Passes within 8 ulp.
+- tests/issue_221_tpp_tail.rs: check_forced_front now uses the floored
+  pivots sign(δ)·max(|δ|, floor) in the ghost Schur oracle and asserts
+  n_tiny. New: m = 300 with floor 5.5e-8 (5 floored) and m = 8 with
+  6.5e-8 (6 floored). Pass, same 1e-12 relative tolerance.
+cargo test --release: 991 passed, 0 failed; clippy --all-targets clean.
+
+* 2026-10-21 01:30 :issue-221:verify:pounce:guard:
+Verified the review-fix commits (1f16980 parity, 140e395 zero pivots,
+b0845ba tests, 1e5795f changelog) outside the agent:
+- column25 Sylvester guard (iters 10/12/13/15/17/19/25 × seeds 0/1/4/8):
+  75597 on all 28, tiny 0. Unchanged.
+- pounce 68e438d0, sequential, 300 s: deb7 Optimal/180 (97.56);
+  pooling_rt2stp Optimal -4391.826 (267+82); square_flowsheet_resto
+  Optimal/95; nql180 Optimal 54.5 s / 37 it (was 69 s / 42); brainpc2
+  Optimal 65.5 s (561 base + 143 re-solve); brainpc1 Optimal 165 s (954
+  base + 52 re-solve; was 74 s, 1073 + 52). The base solve fails either
+  way, and the time goes on the failing base run. That is trajectory
+  variance on a path already shown to be sensitive to run-to-run
+  variation, not a factor-cost change.
+
+* 2026-10-21 03:00 :issue-221:quality:pounce-comment:bisect:
+pounce comment 6297756350 raised two questions back to feral.
+1) lbfgs square_flowsheet_resto, feral_increase_quality=no re-solve hits 3000
+   (0.20: 178). Bisected with pounce builds per commit: main OK, 4c4fe67
+   (fully-summed 2×2 partner) fails, and so does every later commit. The
+   first KKT (m000, identical across versions) is singular to working
+   precision: eigvalsh min|λ| 3.4e-15, max 201, cond 5.8e16, inertia
+   (32,32). 0.20 floors one pivot (tiny=1). The branch pairs the column
+   and force-accepts one (tfa=1), no floor, berr 1.2e-17. Both give the
+   oracle inertia; they differ in how the near-null direction is
+   resolved, and the trajectories split from step 1. Not a feral
+   defect: the branch factor is the more accurate one. This is pounce's
+   singular-start path (the lbfgs B0 KKT).
+2) brainpc1 4 escalations / 165 s on f849a14 vs 1 / 74 s on ed292fc
+   (pounce: deterministic; bisected to 1f16980). QDIAG: rung 1e-8 → 1e-6
+   now forces 2 pivots (n_tiny 0) where before it floored 1, so the
+   n_tiny-only worse_than kept the ladder. It then climbed to 2.9e-3
+   with growth tracking each bound and the count unchanged (6905/6900).
+   Fix: worse_than counts floored + zeroed + forced ("given up"). A
+   forced accept at the raised rung is a pivot the rung could not place
+   within its own bound.
+   pounce sweep-fixtures.sh (220 runs): HEAD and HEAD+rule identical on
+   every line. main vs HEAD+rule reproduces pounce's 10-line list.
+   brainpc1 74.5 s / 1 esc; nql180 54.9 s; brainpc2 67.2 s. cargo test
+   --release 992 passed.

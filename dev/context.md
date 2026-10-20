@@ -1,79 +1,74 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-10-16T22:13:11Z
+Generated: 2026-10-20T21:44:12Z
 
 ## Latest Session
-File: dev/sessions/2026-10-16-01.md
+File: dev/sessions/2026-10-19-01.md
 ```
-# Session 2026-10-16-01
+# Session 2026-10-19-01
 
-## Benchmark note (read first): not comparable to 2026-10-10-01
+## Benchmark note (read first): local corpus is the 2 synthetic fixtures
 
-This ran in a cloud container (x86_64 KVM guest) without the local KKT
-corpus. `cargo run --bin bench --release` found only the 2 generated
-synthetic-regression fixtures. Both pass inertia and residual, and no
-oracle timings are available. No factor-ratio p90 could be computed, so
-nothing here can be compared with the previous session. No solver source
-changed this session.
+`cargo run --bin bench --release` found only the 2 generated
+synthetic-regression fixtures, as in 2026-10-16-01. Both pass inertia and
+residual, and no oracle timings are available, so no factor-ratio p90 can
+be compared. The comparable evidence is the HEAD-vs-fix sweep over
+`data/matrices/kkt-pounce` (370 matrices) below.
+
+## Unfavourable results (read second)
+
+- **brainpc1 and brainpc2 still time out (300 s) in pounce with the fix.**
+  The factorization is no longer the cost. A mid-run `sample` puts almost
+  all busy time in MC64 `hungarian_match_instrumented`, while the IPM keeps
+  cycling through restoration (brainpc1 reached 1397 iterations).
+- brainpc0 now solves (68.8 s, 1512 iterations, 709 restoration), but the
+  issue reports about 1 s on pounce 0.12/feral 0.18. Baseline 0.20 timed
+  out at 600 s.
+- brainpc3 i38/1: the fix counts 6901 negative, eigvalsh gives 6900, and
+  HEAD gave 6900. The matrix has 129 eigenvalues below n·eps·‖A‖, so it
+  is numerically singular and falls under the singular-matrix exemption.
+  It is still a data point against.
+
+## Addendum: brainpc1/2 follow-up (same session)
+
+- pounce 9a97f997 (the reporter's 0.18 commit), `--no-options-file`:
+  - feral 0.18: brainpc1 34.7 s, brainpc3 51.9 s, brainpc0 7.4 s
+  - the fix: brainpc1 and brainpc3 time out at 300 s; brainpc0 62.6 s
+- The trajectories split at iter 42. On that shared KKT:
+  - eigvalsh: 6902 negative
+  - the fix: 6902, n_tiny 0, refined berr 1.5e-27
+  - 0.18: 6901, n_tiny 665
+  So 0.18 converged on a wrong count.
+- On the fix's trajectory, MC64 costs ~630 ms per call (0.18's: ~100 ms).
+  This is inherent hub-column Hungarian cost on those iterates; the
+  scaling code is unchanged since v0.18.0.
+- POUNCE_FERAL_SCALING=infnorm: brainpc1 18.8 s but brainpc0 228 s.
+  Scaling only reshuffles the trajectory.
+- Decision (user): open the PR and test whether the remaining stall can
+  be fixed on the pounce side with this feral.
+- New probe: `diag_221_mc64_cost`.
 
 ## Goal
 
-Review the #153 comment 6223093143 (pounce#1020: same instruction stream,
-about 2.6x lower IPC on x86 cloud hosts). Run the measurements it asks
-for on x86 Linux, then post the review.
+Fix issue #221: brainpc3 KKT factor 0.038 s (0.18) → 9.4 s (0.19/0.20).
 
 ## Accomplished
 
-- `crates/feral-diagnostics/src/bin/diag_153_chain_x86.rs`: a synthetic
-  hanging-chain KKT close to the reporter's (11875 vs 11874 supernodes,
-  max front 19 vs 20). It has modes wall / profile / alloc / bump / once,
-  plus a mimalloc arm behind a local cfg.
-- Callgrind: 192.0M Ir per warm refactor, compared with the reporter's
-  215.7M (x86) and 191.2M (aarch64). Same profile shape: infnorm 24.6%,
-  glibc malloc 18-19%, memset/memcpy 8.4%.
-- The scaling route on warm refactors is plain InfNorm. The pre-MC64 trial
-  (`scaling/mod.rs:458`) does not fire.
-- Allocation is the dominant x86 lever on this matrix:
-  - mimalloc runs 1.7-1.8x faster than glibc (10/10 alternating rounds,
-    identical inertia and nnz_l);
-  - glibc `tcache_count=65535` gives about 1.3x;
-  - a bump arena is 1.04-1.085x *slower* (no reuse, so cache-cold).
-- 93,138 allocations (16.2 MB) per warm refactor, 7.84 per supernode,
-  almost all of them per-front outputs re-allocated every refactor.
-  Sites are listed in the journal.
-- Details and every number: `dev/journal/2026-10-16-01.org`.
-
-## Benchmark Results
-```
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
-
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+- Root cause, from the reporter's own matrices dumped with pounce:
 ```
 
 ## Git Status
 ```
-9833139 dev: journal the recycling corpus sweep (#153)
-2d4e707 perf(numeric): recycle the dense fast path's node buffers too (#153)
-257c6dc perf(numeric): recycle per-front output buffers on warm refactors (#153)
-5f4175d dev: research note and plan for per-front output recycling (#153)
-34e9fed dev: journal the corpus-wide glibc vs mimalloc warm-refactor sweep (#153)
+80a8094 fix(solver): a rung that forces more pivots is undone (#221)
+f849a14 dev: journal verification of the #221 review fixes
+1e5795f docs(changelog): two-phase factorization of fronts that cannot delay (#221)
+b0845ba test: delay-chain backstop, max_abs_l on a 2x2, floored forced fronts (#221)
+140e395 fix(solver): zero pivots make a factor inadmissible for a rung (#221)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
@@ -82,17 +77,22 @@ test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test numeric::solver::tests::warm_refactor_recycles_output_buffers_issue_153 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 457 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.55s
+test result: ok. 460 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.32s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-10-16-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-10-19-01.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -105,85 +105,61 @@ Sparse solver: 2/2 total
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 
-Dense failure analysis: no failures
-
-Sparse failure analysis: no failures
-
---- Dense ∩ Sparse failure overlap ---
-Failed in BOTH dense and sparse:  0
-Failed in dense only:             0
-Failed in sparse only:            0
-
---- Dense perf vs oracles: no matrices have oracle timings ---
-
---- Sparse perf vs oracles: no matrices have oracle timings ---
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)          0        -     <= 2.0      N/A
-medium (<500)                 0        -     <= 3.0      N/A
-EXIT 0
-
 ```
 
 ## Recent Decisions
+it is not judged worse. Admissibility is stricter: such a factor never
+declines a rung, which is the pre-#221 behaviour for it.
 
-## 2026-10-10 — The delay budget bounds front growth, not supernode width (issue #215)
+**Evidence.** tests/issue_221_quality_rung.rs: `[[1,1],[1,1]]` (inertia
+(1,0,1), max |L| = 1, by hand) and `diag(1,0,1)` now proceed; more zero
+pivots at the raised rung undo the ladder; same count climbs; a rung
+survives an `invalidate_factors` call and is judged by the next factor.
+All four fail on ed292fc.
 
-**Decision.** `assign_delayed_capacities` sets
-`delayed_capacity = min(subtree_ncol − own_ncol, max(3·nrow, 4096 − nrow))`,
-replacing `min(worst, max(4·own_ncol, 16))` from issue #55. Cascade-break
-stays as the over-budget path, now acting as a memory backstop. Add
-`FactorStats::inertia_uncertain()` (= `n_tiny`) so callers can tell
-when the inertia was computed from floored pivots.
+## 2026-10-21 — a rung that forces more pivots is a failed rung (issue #221)
 
-**Why.** Under cascade-break, pivots are floored to `sign(d)·eps`, and
-when `|d|` is round-off that sign is noise. The old cap scaled with
-`own_ncol`, so thin IPM-KKT supernodes hit it at front sizes far below
-any memory concern. column25 `i011_s002` under 9 inertia-preserving
-congruences was wrong on 3 with the old cap and 0 without it. The
-pinene/nql180 blowups that motivated the old cap no longer reach any
-budget at HEAD (cb 0). Across the kkt-mittelmann corpus, the new cap
-admits every delay observed under unbounded delay.
+**Decision.** `FactorStability::worse_than` counts every pivot the factor
+gave up on: floored (`n_tiny`), zeroed (`n_zero`) and force-accepted below
+the threshold (`n_forced`). If the factor at the raised threshold gave up
+on more of them than the factor that prompted the raise, the rung is
+undone. This replaces the 2026-10-20 choice of floored pivots only.
 
-**Cost.** `qcqp1500-1nc_0000`: +52 % nnz(L), ~4.6× factor time. The
-other changed matrices are within ±3 % or faster.
+**Why.** That choice dropped forced accepts as "relative to the
+threshold". Relative to the *raised* threshold, a forced accept is a
+pivot the rung could not place within its own bound, which is what the
+rung exists to do. After the parity fix (1f16980), brainpc1's first rung
+forced 2 pivots where it had floored 1. The floored-only test kept the
+ladder, which climbed three more rungs to 2.9e-3 with the count unchanged
+(165 s against 74 s; pounce verified this is deterministic and bisected
+it). Summing the three counts also means a pivot that moves between them
+is not a change.
 
-**Alternatives rejected.**
-- Auto re-analysis; see the withdrawal entry above.
-- Unbounded delay with no backstop: exact, but nothing stops a future
-  dense-front blowup.
-- Swap-to-boundary: deferred as follow-up, since it reduces the volume
-  of delays rather than fixing their sign handling.
-
-Research: `dev/research/issue-215-delay-budget-exact-inertia.md`.
+**Evidence.** pounce sweep-fixtures.sh, 220 runs: identical to the
+previous rule on every line. brainpc1 74.5 s, 1 escalation; nql180
+54.9 s; brainpc2 67.2 s. Unit test Q1 in `src/numeric/solver.rs`.
 
 ## Recent Tried-and-Rejected
-(`diag_153_chain_x86`, n = 40006, Amf + LdltCompress). Callgrind shows
-`mc64::compute_matching` once (the cold factor only). The warm
-`ScalingInfo` is `Applied` with `mc64_cache_hit_count() == 0`, so the warm
-route is `pick_scaling_strategy -> InfNorm` (line 437), not the line-458
-trial. `compute_infnorm`'s 24.6% of Ir is the ordinary 10-sweep InfNorm
-cost, which is already covered by the 2026-08-09 / 2026-08-15 entries.
+- **Undo one rung, not to the ladder start.** nql180 stopped at
+  u = 3.2e-5 (rungs 1e-8 → 1e-6 → 3.2e-5 → 4.2e-4, the last worse with
+  5548 violations). It kept ~70k delays per factor: 224 s, 33 iterations.
+  The earlier rungs had never cured the one-short count.
+- **A persistent rung record.** pooling_rt2stp compared a later iterate
+  (2 floored pivots) with the factor that prompted a rung three calls
+  earlier. A clean factor in between had declined the next rung, so the
+  stale comparison undid the whole ladder.
+- **Lexicographic (violations, then max|L|).** It judged brainpc1's first
+  rung worse on max|L| alone and undid a rung that was not the problem.
+- **Floored pivots only (n_tiny), forced accepts ignored.** After the
+  parity fix 1f16980, brainpc1's first rung forced 2 pivots where it had
+  floored 1. The rule kept the ladder, which climbed three more rungs to
+  2.9e-3 with the inertia count unchanged: 165 s against 74 s with the
+  shipped rule. pounce confirmed it is deterministic and bisected it.
 
-**2. "glibc trims or mmaps per refactor and page faults explain the x86
-slowness."** Falsified. The glibc default gives 139 minor faults and 0.3 ms
-sys per 19 ms refactor. Setting `GLIBC_TUNABLES` trim_threshold and
-mmap_threshold to 4G cuts faults to 5 and is no faster (min 19.15 / 17.72
-ms vs 18.26 / 17.75).
-
-**Instrument defect, recorded so it is not reused:** a pointer-bump arena
-with no-op free is NOT a lower bound on allocator cost. On this matrix it
-was 1.04-1.085x *slower* than glibc (paired, 3 x 60), because it never
-reuses memory: 16.2 MB of cache-cold lines per refactor. mimalloc (which
-reuses memory) was 1.7-1.8x *faster* than glibc. The #200 bump-allocator
-result ("0.6-7.7%, allocation ruled out") used the bump instrument and
-does not rule allocation out. See dev/journal/2026-10-16-01.org.
+An a-posteriori-pivoting (APP) blocked kernel for cheaper delays was also
+considered and set aside, not tried: it would break the blocked/scalar
+bit-parity contract (`tests/blocked_ldlt.rs`, `tests/golden_bits.rs`),
+which the maintainer chose to keep.
 
 ## Source Files
 ```
@@ -256,8 +232,8 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -274,6 +250,20 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_215_delay_growth_cap.rs
+tests/issue_221_delay_chain_backstop.rs
+tests/issue_221_forced_front_parity.rs
+tests/issue_221_fully_summed_2x2_partner.rs
+tests/issue_221_quality_rung.rs
+tests/issue_221_tpp_tail.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -292,31 +282,22 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_215_delay_growth_cap.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
-tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
+tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_scaling.rs
-tests/lu_sparse.rs
 tests/lu_sparse_rhs.rs
+tests/lu_sparse.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -329,13 +310,13 @@ tests/n4_mc64_retry_latch.rs
 tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
-tests/pounce710_refine_cap_nrhs2.rs
 tests/pounce_interface.rs
+tests/pounce710_refine_cap_nrhs2.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
 tests/refined_solve_core_stability.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs

@@ -1673,9 +1673,14 @@ enum PanelStatus {
 /// kernel uses this "break on first failure" model — see
 /// `dev/research/phase-2.3-delayed-pivoting.md` for the reference.
 ///
-/// When `may_delay == false` (the root supernode), the existing
-/// `ZeroPivotAction::ForceAccept` path handles failed pivots by zeroing the
-/// L column and counting a zero pivot, exactly as before.
+/// When `may_delay == false` (the root supernode or a cascade-break
+/// front) and threshold pivoting is on, the front runs in two phases
+/// (issue #221): a delay pass that swaps every column no pivot can take
+/// to the end of the fully-summed range, then a forced pass over those
+/// columns with `may_delay == false` and no rook search, where
+/// `on_zero_pivot` (`ForceAccept`, `PerturbToEps`, ...) handles each
+/// threshold failure. The blocked kernel runs the same two phases and is
+/// bit-identical (`tests/issue_221_forced_front_parity.rs`).
 ///
 /// After eliminating `nelim` pivots, the `(nrow - nelim) × (nrow - nelim)`
 /// trailing block of the working matrix is extracted as the contribution
@@ -1923,35 +1928,61 @@ fn factor_frontal_in_place_with_scratch_impl(
     // this path is byte-identical to the pre-fix loop.
     let mut ncol_eff = ncol;
 
-    // Factor only the first ncol columns. Pivot search is restricted to
-    // [k, ncol_eff); `ncol_eff` shrinks as stuck columns are delayed.
-    while k < ncol_eff {
-        match scalar_pivot_step(
-            a,
-            nrow,
-            ncol_eff,
-            k,
-            may_delay,
-            params,
-            &mut perm,
-            subdiag,
-            &mut pos,
-            &mut neg,
-            &mut zero,
-            &mut needs_refinement,
-            &mut n_rook_rescues,
-            &mut n_tiny,
-            &mut n_threshold_fail_accepts,
-            &mut cached_maxfromm,
-        )? {
-            PivotStepResult::Advanced(n) => k += n,
-            PivotStepResult::Delayed => {
-                delay_swap_to_boundary(a, nrow, k, &mut ncol_eff, &mut perm);
-                // The column now at `k` changed; drop the stale
-                // MAXFROMM stash (it described the swapped-out column).
-                cached_maxfromm = None;
+    // Issue #221: a front that cannot delay (cascade-break or root) with
+    // threshold pivoting on runs in two phases, exactly as the blocked
+    // kernel does (`factor_frontal_blocked_in_place_with_scratch`), so
+    // the two stay bit-identical:
+    // - phase 1 runs with delays enabled: every column gets the full BK /
+    //   partner / rook search, and a failing column is swapped to the end
+    //   of the fully-summed range by `delay_swap_to_boundary`;
+    // - phase 2 factors those leftover columns `[nelim, ncol)` in order
+    //   with `may_delay == false` and no rook search (`allow_rook ==
+    //   false`), so a threshold-failing 1×1 is force-accepted in place.
+    //   The blocked panel takes that decision inline (`force_inline`).
+    // Without threshold pivoting nothing can delay, so one pass suffices.
+    let two_phase = !may_delay && params.pivot_threshold > 0.0;
+    let mut loop_may_delay = may_delay || two_phase;
+    let mut allow_rook = true;
+    loop {
+        // Factor only the first ncol columns. Pivot search is restricted
+        // to [k, ncol_eff); `ncol_eff` shrinks as stuck columns are delayed.
+        while k < ncol_eff {
+            match scalar_pivot_step(
+                a,
+                nrow,
+                ncol_eff,
+                k,
+                loop_may_delay,
+                allow_rook,
+                params,
+                &mut perm,
+                subdiag,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
+                &mut n_rook_rescues,
+                &mut n_tiny,
+                &mut n_threshold_fail_accepts,
+                &mut cached_maxfromm,
+            )? {
+                PivotStepResult::Advanced(n) => k += n,
+                PivotStepResult::Delayed => {
+                    delay_swap_to_boundary(a, nrow, k, &mut ncol_eff, &mut perm);
+                    // The column now at `k` changed; drop the stale
+                    // MAXFROMM stash (it described the swapped-out column).
+                    cached_maxfromm = None;
+                }
             }
         }
+        if two_phase && allow_rook && ncol_eff < ncol {
+            ncol_eff = ncol;
+            loop_may_delay = false;
+            allow_rook = false;
+            cached_maxfromm = None;
+            continue;
+        }
+        break;
     }
 
     if let (Some(p), Some(t)) = (profile.as_deref_mut(), t_pivot) {
@@ -2334,137 +2365,43 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     // boundary instead of breaking the loop. `may_delay == false` never
     // delays, so `ncol_eff` then stays `== ncol`.
     let mut ncol_eff = ncol;
-    while k < ncol_eff {
-        let remaining = ncol_eff - k;
-        // Scalar tail engages when too few columns are left to amortize
-        // the deferred-Schur dispatch. With W-1 the first panel may
-        // process all `ncol` columns when `ncol <= bs`; subsequent
-        // iterations fall into the scalar tail only once fewer than
-        // `PANEL_MIN_NCOL` columns remain (matching the entry gate).
-        if remaining < PANEL_MIN_NCOL {
-            // Scalar tail: process remaining pivots one at a time.
-            // Reborrow `a` (a `&mut [f64]`) so the same binding can be
-            // passed across multiple call sites.
-            diag_inc(&panel_diag::SCALAR_TAIL_STEPS);
-            let _pt = phase_timing::start();
-            let step = scalar_pivot_step(
-                &mut *a,
-                nrow,
-                ncol_eff,
-                k,
-                may_delay,
-                params,
-                &mut perm,
-                &mut *subdiag,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-                &mut n_rook_rescues,
-                &mut n_tiny,
-                &mut n_threshold_fail_accepts,
-                &mut cached_maxfromm,
-            )?;
-            phase_timing::stop(&phase_timing::SCALARTAIL_NS, _pt);
-            match step {
-                PivotStepResult::Advanced(n) => {
-                    diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
-                    k += n;
-                }
-                PivotStepResult::Delayed => {
-                    delay_swap_to_boundary(&mut *a, nrow, k, &mut ncol_eff, &mut perm);
-                    cached_maxfromm = None;
-                }
-            }
-            continue;
-        }
-
-        // Clamp the panel cap to the remaining elimination range so the
-        // last partial panel never peeks past column `ncol - 1`. Without
-        // this clamp, when `ncol % bs != 0` the last panel call would
-        // read/write columns in the contribution-block region.
-        let panel_cap = bs.min(remaining);
-        // The panel rewrites column `k` and beyond; any cached MAXFROMM
-        // from a prior scalar fallback no longer describes the post-panel
-        // column. Clear so the next scalar step falls back to a full
-        // AMAX scan exactly as Plain would.
-        cached_maxfromm = None;
-        let _pt = phase_timing::start();
-        let (n_elim, status) = lblt_panel_frontal(
-            &mut *a,
-            nrow,
-            ncol_eff,
-            k,
-            panel_cap,
-            may_delay,
-            params,
-            &mut pos,
-            &mut neg,
-            &mut zero,
-            &mut needs_refinement,
-            &mut n_tiny,
-            &mut n_threshold_fail_accepts,
-            &mut *d_panel,
-            &mut *subdiag,
-            &mut perm,
-        )?;
-        phase_timing::stop(&phase_timing::PANELFACTOR_NS, _pt);
-        // On ScalarFallback and Delayed the panel peek-ahead'd column
-        // `k+n_elim` (applied pivots 0..n_elim-1 to it) before deciding
-        // it could not pivot. In scalar semantics that column's state at
-        // break time already matches what pivots 0..n_elim-1 produce via
-        // eager updates, so `apply_blocked_schur` must skip it to avoid
-        // a double rank-1 update. On Full the column at `k+n_elim` was
-        // not peek-ahead'd, so the deferred update starts there normally.
-        let j_start = match status {
-            PanelStatus::Full => k + n_elim,
-            PanelStatus::ScalarFallback | PanelStatus::Delayed => k + n_elim + 1,
-            // Phase A (dev/plans/dense-kernel-blas3.md): the no-swap
-            // 2×2 inline path peek-ahead'd col+1 before bailing, so
-            // BOTH col=k+n_elim and col+1=k+n_elim+1 already carry the
-            // deferred updates from pivots 0..n_elim-1. Skip them
-            // both to avoid a double rank-1 update.
-            PanelStatus::ScalarFallbackPeekedNext => k + n_elim + 2,
-        };
-        let _pt = phase_timing::start();
-        apply_blocked_schur(
-            &mut *a,
-            nrow,
-            k,
-            n_elim,
-            j_start,
-            &*d_panel,
-            &*subdiag,
-            params.fma,
-            params.intrafront_parallel,
-            Some(&mut pack_pool),
-        );
-        phase_timing::stop(&phase_timing::SCHUR_NS, _pt);
-        k += n_elim;
-
-        // Phase B-1.5 attribution: count panel outcome and committed pivots.
-        diag_add(&panel_diag::PIVOTS_INLINE, n_elim as u64);
-        match status {
-            PanelStatus::Full => diag_inc(&panel_diag::PANEL_FULL),
-            PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
-                diag_inc(&panel_diag::PANEL_PARTIAL)
-            }
-            PanelStatus::Delayed => diag_inc(&panel_diag::PANEL_DELAYED),
-        }
-
-        match status {
-            PanelStatus::Full => {}
-            PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
-                // One scalar step to handle the 2×2/swap case the panel declined.
-                if k >= ncol_eff {
-                    break;
-                }
-                match scalar_pivot_step(
+    // Issue #221: a front that cannot delay (cascade-break or root) runs
+    // in two phases when threshold pivoting is on. Phase 1 is the normal
+    // blocked pass with delays enabled internally, so every column gets
+    // the full BK / partner / rook search and a failing column is swapped
+    // to the end of the fully-summed range. Phase 2 factors those stuck
+    // columns with `force_inline`: the panel force-accepts them in place
+    // with deferred, blocked updates. Before, each one left the panel and
+    // paid a rook scan plus an unblocked rank-1 update of the whole
+    // trailing matrix, so a front with thousands of them ran at level-2
+    // speed (qcqp1000-2c, nql180 after quality escalation). The scalar
+    // kernel (`factor_frontal_in_place_with_scratch_impl`) runs the same
+    // two phases; every phase-2 scalar step passes `allow_rook == false`
+    // to match the panel, which cannot rook inline.
+    let two_phase = !may_delay && params.pivot_threshold > 0.0;
+    let mut loop_may_delay = may_delay || two_phase;
+    let mut force_inline = false;
+    loop {
+        while k < ncol_eff {
+            let remaining = ncol_eff - k;
+            // Scalar tail engages when too few columns are left to amortize
+            // the deferred-Schur dispatch. With W-1 the first panel may
+            // process all `ncol` columns when `ncol <= bs`; subsequent
+            // iterations fall into the scalar tail only once fewer than
+            // `PANEL_MIN_NCOL` columns remain (matching the entry gate).
+            if remaining < PANEL_MIN_NCOL {
+                // Scalar tail: process remaining pivots one at a time.
+                // Reborrow `a` (a `&mut [f64]`) so the same binding can be
+                // passed across multiple call sites.
+                diag_inc(&panel_diag::SCALAR_TAIL_STEPS);
+                let _pt = phase_timing::start();
+                let step = scalar_pivot_step(
                     &mut *a,
                     nrow,
                     ncol_eff,
                     k,
-                    may_delay,
+                    loop_may_delay,
+                    !force_inline,
                     params,
                     &mut perm,
                     &mut *subdiag,
@@ -2476,7 +2413,9 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                     &mut n_tiny,
                     &mut n_threshold_fail_accepts,
                     &mut cached_maxfromm,
-                )? {
+                )?;
+                phase_timing::stop(&phase_timing::SCALARTAIL_NS, _pt);
+                match step {
                     PivotStepResult::Advanced(n) => {
                         diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
                         k += n;
@@ -2486,21 +2425,142 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                         cached_maxfromm = None;
                     }
                 }
+                continue;
             }
-            // Fine-grained delay (Track A2 / Fix 1): the panel stopped
-            // because the pivot at column `k` (the value after the
-            // `k += n_elim` above) was rejected under the `may_delay`
-            // contract. `apply_blocked_schur` already brought the
-            // trailing columns current, so the front is clean — swap
-            // the stuck column to the boundary and keep eliminating
-            // instead of forfeiting the supernode tail.
-            PanelStatus::Delayed => {
-                delay_swap_to_boundary(&mut *a, nrow, k, &mut ncol_eff, &mut perm);
-                cached_maxfromm = None;
+
+            // Clamp the panel cap to the remaining elimination range so the
+            // last partial panel never peeks past column `ncol - 1`. Without
+            // this clamp, when `ncol % bs != 0` the last panel call would
+            // read/write columns in the contribution-block region.
+            let panel_cap = bs.min(remaining);
+            // The panel rewrites column `k` and beyond; any cached MAXFROMM
+            // from a prior scalar fallback no longer describes the post-panel
+            // column. Clear so the next scalar step falls back to a full
+            // AMAX scan exactly as Plain would.
+            cached_maxfromm = None;
+            let _pt = phase_timing::start();
+            let (n_elim, status) = lblt_panel_frontal(
+                &mut *a,
+                nrow,
+                ncol_eff,
+                k,
+                panel_cap,
+                loop_may_delay,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
+                &mut n_tiny,
+                &mut n_threshold_fail_accepts,
+                &mut *d_panel,
+                &mut *subdiag,
+                &mut perm,
+                force_inline,
+            )?;
+            phase_timing::stop(&phase_timing::PANELFACTOR_NS, _pt);
+            // On ScalarFallback and Delayed the panel peek-ahead'd column
+            // `k+n_elim` (applied pivots 0..n_elim-1 to it) before deciding
+            // it could not pivot. In scalar semantics that column's state at
+            // break time already matches what pivots 0..n_elim-1 produce via
+            // eager updates, so `apply_blocked_schur` must skip it to avoid
+            // a double rank-1 update. On Full the column at `k+n_elim` was
+            // not peek-ahead'd, so the deferred update starts there normally.
+            let j_start = match status {
+                PanelStatus::Full => k + n_elim,
+                PanelStatus::ScalarFallback | PanelStatus::Delayed => k + n_elim + 1,
+                // Phase A (dev/plans/dense-kernel-blas3.md): the no-swap
+                // 2×2 inline path peek-ahead'd col+1 before bailing, so
+                // BOTH col=k+n_elim and col+1=k+n_elim+1 already carry the
+                // deferred updates from pivots 0..n_elim-1. Skip them
+                // both to avoid a double rank-1 update.
+                PanelStatus::ScalarFallbackPeekedNext => k + n_elim + 2,
+            };
+            let _pt = phase_timing::start();
+            apply_blocked_schur(
+                &mut *a,
+                nrow,
+                k,
+                n_elim,
+                j_start,
+                &*d_panel,
+                &*subdiag,
+                params.fma,
+                params.intrafront_parallel,
+                Some(&mut pack_pool),
+            );
+            phase_timing::stop(&phase_timing::SCHUR_NS, _pt);
+            k += n_elim;
+
+            // Phase B-1.5 attribution: count panel outcome and committed pivots.
+            diag_add(&panel_diag::PIVOTS_INLINE, n_elim as u64);
+            match status {
+                PanelStatus::Full => diag_inc(&panel_diag::PANEL_FULL),
+                PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
+                    diag_inc(&panel_diag::PANEL_PARTIAL)
+                }
+                PanelStatus::Delayed => diag_inc(&panel_diag::PANEL_DELAYED),
+            }
+
+            match status {
+                PanelStatus::Full => {}
+                PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
+                    // One scalar step to handle the 2×2/swap case the panel declined.
+                    if k >= ncol_eff {
+                        break;
+                    }
+                    match scalar_pivot_step(
+                        &mut *a,
+                        nrow,
+                        ncol_eff,
+                        k,
+                        loop_may_delay,
+                        !force_inline,
+                        params,
+                        &mut perm,
+                        &mut *subdiag,
+                        &mut pos,
+                        &mut neg,
+                        &mut zero,
+                        &mut needs_refinement,
+                        &mut n_rook_rescues,
+                        &mut n_tiny,
+                        &mut n_threshold_fail_accepts,
+                        &mut cached_maxfromm,
+                    )? {
+                        PivotStepResult::Advanced(n) => {
+                            diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
+                            k += n;
+                        }
+                        PivotStepResult::Delayed => {
+                            delay_swap_to_boundary(&mut *a, nrow, k, &mut ncol_eff, &mut perm);
+                            cached_maxfromm = None;
+                        }
+                    }
+                }
+                // Fine-grained delay (Track A2 / Fix 1): the panel stopped
+                // because the pivot at column `k` (the value after the
+                // `k += n_elim` above) was rejected under the `may_delay`
+                // contract. `apply_blocked_schur` already brought the
+                // trailing columns current, so the front is clean — swap
+                // the stuck column to the boundary and keep eliminating
+                // instead of forfeiting the supernode tail.
+                PanelStatus::Delayed => {
+                    delay_swap_to_boundary(&mut *a, nrow, k, &mut ncol_eff, &mut perm);
+                    cached_maxfromm = None;
+                }
             }
         }
-    }
 
+        if two_phase && !force_inline && ncol_eff < ncol {
+            ncol_eff = ncol;
+            loop_may_delay = false;
+            force_inline = true;
+            cached_maxfromm = None;
+            continue;
+        }
+        break;
+    }
     let nelim = k;
     let n_delayed = ncol - nelim;
 
@@ -2873,16 +2933,36 @@ fn lblt_panel_frontal(
     // `swap_rows_cols(a, nrow, col+1, r, perm)` and the change must
     // be visible to the caller's L extract step.
     perm: &mut [usize],
+    // Issue #221: forced-inline mode for the stuck columns of a front
+    // that cannot delay (cascade-break, root). A threshold-failing 1×1,
+    // or a 2×2 candidate whose scalar outcome is provably the 1×1 at
+    // `col`, is force-accepted at `col` inside the panel (no rook rescue,
+    // which would need the stale trailing rows; the scalar forced pass
+    // skips rook too), so its update stays deferred and blocked. Every
+    // other case bails to `scalar_pivot_step`, keeping bit-parity with
+    // the scalar kernel. Only used with `may_delay == false`.
+    force_inline: bool,
 ) -> Result<(usize, PanelStatus), FeralError> {
+    debug_assert!(!(force_inline && may_delay));
     let alpha_bk = params.alpha;
     let cap = bs;
     let mut c = 0usize;
+    // Forced-inline mode: set when the previous step evaluated the
+    // `{col, col+1}` 2×2 (so column `col+1` already carries pivots
+    // `0..c-1`) and then took a 1×1 at `col`. The next peek then
+    // applies only pivot `c-1`, in the same order the eager path does.
+    let mut next_prepeeked = false;
     while c < cap {
         let col = k + c;
 
         // Peek-ahead: apply pending rank-1 (and rank-2 for accepted
         // panel-internal 2×2's) updates from pivots 0..c.
-        peek_ahead_column(a, nrow, k, c, d_panel, subdiag, params.fma);
+        if next_prepeeked {
+            peek_ahead_replay_from(a, nrow, k, c - 1, c, col, d_panel, subdiag, params.fma);
+            next_prepeeked = false;
+        } else {
+            peek_ahead_column(a, nrow, k, c, d_panel, subdiag, params.fma);
+        }
 
         // Compute gamma0 + argmax row over rows (col+1)..nrow
         // (unrestricted — matches scalar's gamma0 search, which
@@ -2965,168 +3045,245 @@ fn lblt_panel_frontal(
                 && (!need_swap || r < ncol)
                 && !DISABLE_PANEL_INLINE_2X2.load(std::sync::atomic::Ordering::Relaxed);
             let allowed = bounds_ok && (!need_swap || c == 0);
-            if !allowed {
+            // Forced-inline mode (issue #221) with no inline 2×2: the
+            // panel may take the forced 1×1 at `col` itself only when
+            // that is provably the decision `scalar_pivot_step` (with
+            // `may_delay == false`, no rook) takes, so the blocked and
+            // scalar kernels stay bit-identical. With BK's argmax `r`
+            // not fully summed there is no swap-to-`r` 1×1, and the
+            // scalar step ends in the 1×1 at `col` with `gamma0` (via the
+            // LAPACK-extension test, which needs the stale row `r`, or
+            // after its 2×2 partner search) unless that partner search
+            // finds a 2×2 passing both gates. So:
+            // - no fully-summed entry in column `col`: no `k+1` or
+            //   `r_fs` partner exists, the 1×1 at `col` is certain;
+            // - `a[col, col+1] != 0`: the partner is `col+1`. Peek it and
+            //   run the scalar gates; if the 2×2 fails them the result is
+            //   the 1×1 at `col` either way, else bail (the LAPACK test
+            //   decides, and it needs row `r`);
+            // - otherwise (`r_fs` partner, whose gates read a stale
+            //   column) bail to the scalar step like the normal panel.
+            let r_not_fs = !allowed && force_inline && r >= ncol;
+            let mut forced_1x1 = r_not_fs
+                && a[col * nrow + col + 1..col * nrow + ncol]
+                    .iter()
+                    .all(|v| *v == 0.0);
+            if r_not_fs
+                && !forced_1x1
+                && c + 1 < cap
+                && a[col * nrow + col + 1] != 0.0
+                && params.static_pivot_floor <= 0.0
+                && !matches!(params.on_zero_pivot, ZeroPivotAction::Fail)
+            {
+                // `col + 1 < ncol` here (the entry is fully summed) and
+                // `c + 1 < cap`, so `col + 1` is the next panel column
+                // and `next_prepeeked` hands it to the next peek.
+                peek_ahead_replay(a, nrow, k, c, col + 1, d_panel, subdiag, params.fma);
+                // Same gates, same arithmetic as `scalar_pivot_step`'s
+                // partner branch (no static-pivot perturbation: the
+                // floor is off on this path).
+                let d11 = a[col * nrow + col];
+                let d21 = a[col * nrow + (col + 1)];
+                let d22 = a[(col + 1) * nrow + (col + 1)];
+                let det = d11 * d22 - d21 * d21;
+                let mut rmax = 0.0f64;
+                let mut tmax = 0.0f64;
+                for i in (col + 2)..nrow {
+                    let v0 = a[col * nrow + i].abs();
+                    if v0 > rmax {
+                        rmax = v0;
+                    }
+                    let v1 = a[(col + 1) * nrow + i].abs();
+                    if v1 > tmax {
+                        tmax = v1;
+                    }
+                }
+                let amax = d21.abs();
+                let absdet = det.abs();
+                let u = params.pivot_threshold;
+                let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
+                    || (d11.abs() * tmax + amax * rmax) * u > absdet;
+                let det_floor_fail = ssids_det_floor_fail(d11, d21, d22);
+                // The scalar step sets `needs_refinement` on a det-floor
+                // failure only when the LAPACK test fails (unknown here).
+                // A threshold-failing 1×1 sets it anyway, so the outcome
+                // is ambiguous only for a 1×1 that passes the threshold
+                // while the flag is still clear.
+                let thr = (params.pivot_threshold * gamma0).max(params.null_pivot_tol);
+                let ambiguous_refine = det_floor_fail && !*needs_refinement && d11.abs() > thr;
+                if !(growth_fail || det_floor_fail) || ambiguous_refine {
+                    diag_inc(&panel_diag::FALLBACK_2X2_NEED_SWAP_OR_BOUND);
+                    return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+                }
+                forced_1x1 = true;
+                next_prepeeked = true;
+            }
+            if !allowed && !forced_1x1 {
                 diag_inc(&panel_diag::FALLBACK_2X2_NEED_SWAP_OR_BOUND);
                 return Ok((c, PanelStatus::ScalarFallback));
             }
-
-            if need_swap {
-                // c == 0: state is scalar-equivalent; read arr/gamma_r
-                // at the original `r` row, then bail or commit swap.
-                // Bail returns `ScalarFallback` (no peek-ahead, no
-                // swap committed) — caller resumes at `j_start = k`
-                // and scalar redoes gamma0/r/swap identically.
-                let gamma_r_pre = symmetric_row_offdiag_max(a, nrow, col, r);
-                let arr_pre = a[r * nrow + r].abs();
-                if arr_pre >= alpha_bk * gamma_r_pre {
-                    diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
-                    return Ok((c, PanelStatus::ScalarFallback));
-                }
-                if akk * gamma_r_pre >= alpha_bk * gamma0 * gamma0 {
-                    diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
-                    return Ok((c, PanelStatus::ScalarFallback));
-                }
-                // Commit the symmetric swap. After this, the state at
-                // column `col` is identical to scalar's post-swap
-                // state: a[col, col+1] holds the old `gamma0`, the
-                // (col+1, col+1) diagonal holds the old `arr`, and
-                // perm records the col+1 ↔ r swap.
-                swap_rows_cols(a, nrow, col + 1, r, perm);
-                // Fall through to the no-swap accept path; growth/det
-                // bail below uses `ScalarFallback` (no peek-ahead) —
-                // scalar restarts at `col`, sees the swapped state
-                // (its r will now be col+1), redoes the same checks,
-                // and lands in may_delay/ForceAccept identically.
-            } else {
-                // No-swap path: peek-ahead col+1 with committed pivots
-                // 0..c-1. Scalar's eager updates have already mutated
-                // col+1 by this point (rank-1 from each prior pivot,
-                // rank-2 from any prior panel-internal 2×2). The
-                // deferred panel state has not. Replay onto col+1 so
-                // the upcoming reads of a[r_idx*..], gamma_r,
-                // growth-bound terms (rmax/tmax), and the L scaling
-                // step see the same state scalar would.
-                //
-                // CRITICAL: any bail-out in this branch MUST return
-                // `ScalarFallbackPeekedNext` (not `ScalarFallback`)
-                // so the caller knows to use `j_start = k + n_elim + 2`
-                // in `apply_blocked_schur` — col+1's deferred updates
-                // have already been applied here.
-                let r_idx = col + 1;
-                peek_ahead_replay(a, nrow, k, c, r_idx, d_panel, subdiag, params.fma);
-                let gamma_r = symmetric_row_offdiag_max(a, nrow, col, r_idx);
-                let arr = a[r_idx * nrow + r_idx].abs();
-                if arr >= alpha_bk * gamma_r {
-                    diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
-                    return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
-                }
-                if akk * gamma_r >= alpha_bk * gamma0 * gamma0 {
-                    diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
-                    return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
-                }
-            }
-
-            // 2×2 accepted at (col, col+1) with no swap. Apply the
-            // same growth + det-floor checks scalar applies.
-            let mut d11 = a[col * nrow + col];
-            let d21 = a[col * nrow + (col + 1)];
-            let mut d22 = a[(col + 1) * nrow + (col + 1)];
-
-            // Finding D2: mirror scalar_pivot_step's MA57-style
-            // static-pivot perturbation (factor.rs:3624-3633). Push the
-            // smaller |eigenvalue| up to `static_pivot_floor` *before*
-            // the growth/det gates and inertia count, so a sub-floor
-            // block is accepted at the floor (with the same
-            // `needs_refinement` / `n_tiny` / inertia the scalar path
-            // records) rather than accepted unperturbed. Without this
-            // the panel and scalar paths diverge in D, L, the refinement
-            // flag, and even inertia whenever the knob is on, breaking
-            // the documented panel/scalar bit-parity contract.
-            if let Some((new_d11, new_d22)) =
-                perturb_2x2_to_floor(d11, d21, d22, params.static_pivot_floor)
-            {
-                d11 = new_d11;
-                d22 = new_d22;
-                a[col * nrow + col] = d11;
-                a[(col + 1) * nrow + (col + 1)] = d22;
-                *needs_refinement = true;
-                *n_tiny += 1;
-            }
-
-            let det = d11 * d22 - d21 * d21;
-
-            // Duff-Reid 2×2 growth bound — same predicate as
-            // scalar_pivot_step:1755-1756.
-            let mut rmax = 0.0f64;
-            let mut tmax = 0.0f64;
-            for i in (col + 2)..nrow {
-                let v0 = a[col * nrow + i].abs();
-                if v0 > rmax {
-                    rmax = v0;
-                }
-                let v1 = a[(col + 1) * nrow + i].abs();
-                if v1 > tmax {
-                    tmax = v1;
-                }
-            }
-            let amax = d21.abs();
-            let absdet = det.abs();
-            let u = params.pivot_threshold;
-            let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
-                || (d11.abs() * tmax + amax * rmax) * u > absdet;
-
-            // SSIDS scale-invariant det floor — shared with the solve
-            // gate (`d_block_solve`) via `ssids_det_floor_fail`.
-            let det_floor_fail = ssids_det_floor_fail(d11, d21, d22);
-
-            if growth_fail || det_floor_fail {
-                // Rejection means scalar will run its
-                // may_delay/ForceAccept branches; the panel can't
-                // reproduce that here without duplicating bookkeeping.
-                diag_inc(&panel_diag::FALLBACK_2X2_GROWTH_OR_DET);
+            // `forced_1x1`: fall through to the forced 1×1 at `col`
+            // below. Nothing has been peeked or swapped yet, so the
+            // deferred state is intact.
+            if allowed {
                 if need_swap {
-                    // Swap branch: no peek-ahead was done. Scalar
-                    // restarts at `k + n_elim`; its own gamma0 search
-                    // on the post-swap state finds argmax at col+1
-                    // (so `r == col+1`, no second swap) and lands in
-                    // the same growth/det reject branch.
-                    return Ok((c, PanelStatus::ScalarFallback));
+                    // c == 0: state is scalar-equivalent; read arr/gamma_r
+                    // at the original `r` row, then bail or commit swap.
+                    // Bail returns `ScalarFallback` (no peek-ahead, no
+                    // swap committed) — caller resumes at `j_start = k`
+                    // and scalar redoes gamma0/r/swap identically.
+                    let gamma_r_pre = symmetric_row_offdiag_max(a, nrow, col, r);
+                    let arr_pre = a[r * nrow + r].abs();
+                    if arr_pre >= alpha_bk * gamma_r_pre {
+                        diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
+                        return Ok((c, PanelStatus::ScalarFallback));
+                    }
+                    if akk * gamma_r_pre >= alpha_bk * gamma0 * gamma0 {
+                        diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
+                        return Ok((c, PanelStatus::ScalarFallback));
+                    }
+                    // Commit the symmetric swap. After this, the state at
+                    // column `col` is identical to scalar's post-swap
+                    // state: a[col, col+1] holds the old `gamma0`, the
+                    // (col+1, col+1) diagonal holds the old `arr`, and
+                    // perm records the col+1 ↔ r swap.
+                    swap_rows_cols(a, nrow, col + 1, r, perm);
+                    // Fall through to the no-swap accept path; growth/det
+                    // bail below uses `ScalarFallback` (no peek-ahead) —
+                    // scalar restarts at `col`, sees the swapped state
+                    // (its r will now be col+1), redoes the same checks,
+                    // and lands in may_delay/ForceAccept identically.
+                } else {
+                    // No-swap path: peek-ahead col+1 with committed pivots
+                    // 0..c-1. Scalar's eager updates have already mutated
+                    // col+1 by this point (rank-1 from each prior pivot,
+                    // rank-2 from any prior panel-internal 2×2). The
+                    // deferred panel state has not. Replay onto col+1 so
+                    // the upcoming reads of a[r_idx*..], gamma_r,
+                    // growth-bound terms (rmax/tmax), and the L scaling
+                    // step see the same state scalar would.
+                    //
+                    // CRITICAL: any bail-out in this branch MUST return
+                    // `ScalarFallbackPeekedNext` (not `ScalarFallback`)
+                    // so the caller knows to use `j_start = k + n_elim + 2`
+                    // in `apply_blocked_schur` — col+1's deferred updates
+                    // have already been applied here.
+                    let r_idx = col + 1;
+                    peek_ahead_replay(a, nrow, k, c, r_idx, d_panel, subdiag, params.fma);
+                    let gamma_r = symmetric_row_offdiag_max(a, nrow, col, r_idx);
+                    let arr = a[r_idx * nrow + r_idx].abs();
+                    if arr >= alpha_bk * gamma_r {
+                        diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
+                        return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+                    }
+                    if akk * gamma_r >= alpha_bk * gamma0 * gamma0 {
+                        diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
+                        return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+                    }
                 }
-                // No-swap branch: col+1 was peek-ahead'd above —
-                // caller must skip it (`j_start = k + n_elim + 2`).
-                return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
-            }
 
-            // Inline accept: record D values, scale L block, update
-            // inertia, defer the rank-2 trailing update.
-            if need_swap {
-                diag_inc(&panel_diag::INLINE_2X2_SWAP_OK);
-            }
-            let pivot_inertia = count_2x2_inertia_val(d11, d21, d22)?;
-            *pos += pivot_inertia.positive;
-            *neg += pivot_inertia.negative;
-            *zero += pivot_inertia.zero;
+                // 2×2 accepted at (col, col+1) with no swap. Apply the
+                // same growth + det-floor checks scalar applies.
+                let mut d11 = a[col * nrow + col];
+                let d21 = a[col * nrow + (col + 1)];
+                let mut d22 = a[(col + 1) * nrow + (col + 1)];
 
-            d_panel[c] = d11;
-            d_panel[c + 1] = d22;
-            subdiag[k + c] = d21;
+                // Finding D2: mirror scalar_pivot_step's MA57-style
+                // static-pivot perturbation (factor.rs:3624-3633). Push the
+                // smaller |eigenvalue| up to `static_pivot_floor` *before*
+                // the growth/det gates and inertia count, so a sub-floor
+                // block is accepted at the floor (with the same
+                // `needs_refinement` / `n_tiny` / inertia the scalar path
+                // records) rather than accepted unperturbed. Without this
+                // the panel and scalar paths diverge in D, L, the refinement
+                // flag, and even inertia whenever the knob is on, breaking
+                // the documented panel/scalar bit-parity contract.
+                if let Some((new_d11, new_d22)) =
+                    perturb_2x2_to_floor(d11, d21, d22, params.static_pivot_floor)
+                {
+                    d11 = new_d11;
+                    d22 = new_d22;
+                    a[col * nrow + col] = d11;
+                    a[(col + 1) * nrow + (col + 1)] = d22;
+                    *needs_refinement = true;
+                    *n_tiny += 1;
+                }
 
-            // Scale the L block — same operation as do_2x2_update's
-            // first loop (factor.rs:2075-2080). The trailing rank-2
-            // update is deferred; replay happens via peek_ahead and
-            // apply_blocked_schur honoring `subdiag[k+c] != 0`.
-            if det.abs() != 0.0 {
-                let inv_det = 1.0 / det;
+                let det = d11 * d22 - d21 * d21;
+
+                // Duff-Reid 2×2 growth bound — same predicate as
+                // scalar_pivot_step:1755-1756.
+                let mut rmax = 0.0f64;
+                let mut tmax = 0.0f64;
                 for i in (col + 2)..nrow {
-                    let a_ik = a[col * nrow + i];
-                    let a_ik1 = a[(col + 1) * nrow + i];
-                    a[col * nrow + i] = (d22 * a_ik - d21 * a_ik1) * inv_det;
-                    a[(col + 1) * nrow + i] = (d11 * a_ik1 - d21 * a_ik) * inv_det;
+                    let v0 = a[col * nrow + i].abs();
+                    if v0 > rmax {
+                        rmax = v0;
+                    }
+                    let v1 = a[(col + 1) * nrow + i].abs();
+                    if v1 > tmax {
+                        tmax = v1;
+                    }
                 }
-            }
+                let amax = d21.abs();
+                let absdet = det.abs();
+                let u = params.pivot_threshold;
+                let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
+                    || (d11.abs() * tmax + amax * rmax) * u > absdet;
 
-            c += 2;
-            continue;
+                // SSIDS scale-invariant det floor — shared with the solve
+                // gate (`d_block_solve`) via `ssids_det_floor_fail`.
+                let det_floor_fail = ssids_det_floor_fail(d11, d21, d22);
+
+                if growth_fail || det_floor_fail {
+                    // Rejection means scalar will run its
+                    // may_delay/ForceAccept branches; the panel can't
+                    // reproduce that here without duplicating bookkeeping.
+                    diag_inc(&panel_diag::FALLBACK_2X2_GROWTH_OR_DET);
+                    if need_swap {
+                        // Swap branch: no peek-ahead was done. Scalar
+                        // restarts at `k + n_elim`; its own gamma0 search
+                        // on the post-swap state finds argmax at col+1
+                        // (so `r == col+1`, no second swap) and lands in
+                        // the same growth/det reject branch.
+                        return Ok((c, PanelStatus::ScalarFallback));
+                    }
+                    // No-swap branch: col+1 was peek-ahead'd above —
+                    // caller must skip it (`j_start = k + n_elim + 2`).
+                    return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+                }
+
+                // Inline accept: record D values, scale L block, update
+                // inertia, defer the rank-2 trailing update.
+                if need_swap {
+                    diag_inc(&panel_diag::INLINE_2X2_SWAP_OK);
+                }
+                let pivot_inertia = count_2x2_inertia_val(d11, d21, d22)?;
+                *pos += pivot_inertia.positive;
+                *neg += pivot_inertia.negative;
+                *zero += pivot_inertia.zero;
+
+                d_panel[c] = d11;
+                d_panel[c + 1] = d22;
+                subdiag[k + c] = d21;
+
+                // Scale the L block — same operation as do_2x2_update's
+                // first loop (factor.rs:2075-2080). The trailing rank-2
+                // update is deferred; replay happens via peek_ahead and
+                // apply_blocked_schur honoring `subdiag[k+c] != 0`.
+                if det.abs() != 0.0 {
+                    let inv_det = 1.0 / det;
+                    for i in (col + 2)..nrow {
+                        let a_ik = a[col * nrow + i];
+                        let a_ik1 = a[(col + 1) * nrow + i];
+                        a[col * nrow + i] = (d22 * a_ik - d21 * a_ik1) * inv_det;
+                        a[(col + 1) * nrow + i] = (d11 * a_ik1 - d21 * a_ik) * inv_det;
+                    }
+                }
+
+                c += 2;
+                continue;
+            }
         }
 
         // 1×1 pivot at col, no swap.
@@ -3146,7 +3303,7 @@ fn lblt_panel_frontal(
         // as the `Delayed` return below). When rook is disabled the panel keeps
         // its inline handling, so the default dense path is byte-unchanged.
         let threshold = (params.pivot_threshold * gamma0).max(params.null_pivot_tol);
-        if params.pivot_threshold > 0.0 && a[col * nrow + col].abs() <= threshold {
+        if params.pivot_threshold > 0.0 && !force_inline && a[col * nrow + col].abs() <= threshold {
             return Ok((c, PanelStatus::ScalarFallback));
         }
 
@@ -3244,8 +3401,37 @@ fn peek_ahead_replay(
     subdiag: &[f64],
     fma: bool,
 ) {
+    peek_ahead_replay_from(
+        a,
+        nrow,
+        k,
+        0,
+        n_committed,
+        target_col,
+        d_panel,
+        subdiag,
+        fma,
+    );
+}
+
+/// [`peek_ahead_replay`] restricted to pivots `q_start..n_committed`.
+/// `q_start` must be the first pivot not yet applied to `target_col`
+/// and must not split a 2×2 block (issue #221 forced-inline mode only
+/// resumes after a 1×1).
+#[allow(clippy::too_many_arguments)]
+fn peek_ahead_replay_from(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    q_start: usize,
+    n_committed: usize,
+    target_col: usize,
+    d_panel: &[f64],
+    subdiag: &[f64],
+    fma: bool,
+) {
     let col = target_col;
-    let mut q = 0usize;
+    let mut q = q_start;
     while q < n_committed {
         // Phase A 2×2 (dev/plans/dense-kernel-blas3.md): when pivot
         // q is the start of an inline 2×2 block, replay the rank-2
@@ -4210,6 +4396,12 @@ fn scalar_pivot_step(
     ncol: usize,
     k: usize,
     may_delay: bool,
+    // Issue #221: `false` in the forced pass of a front that cannot
+    // delay. A threshold-failing 1×1 is then force-accepted without a
+    // rook search, the same decision the blocked panel takes inline
+    // (`lblt_panel_frontal` with `force_inline`), so the scalar and
+    // blocked kernels stay bit-identical.
+    allow_rook: bool,
     params: &BunchKaufmanParams,
     perm: &mut [usize],
     subdiag: &mut [f64],
@@ -4257,6 +4449,7 @@ fn scalar_pivot_step(
             k,
             col_max,
             may_delay,
+            allow_rook,
             params,
             perm,
             pos,
@@ -4300,6 +4493,7 @@ fn scalar_pivot_step(
                     k,
                     mf,
                     may_delay,
+                    allow_rook,
                     params,
                     perm,
                     pos,
@@ -4330,7 +4524,7 @@ fn scalar_pivot_step(
     }
 
     // Find max |A[i,k]| for i in (k, ncol) — restricted to fully-summed rows
-    let (gamma0, r) = {
+    let (gamma0, r, gamma_fs, r_fs) = {
         let mut max_val = 0.0f64;
         let mut max_row = k + 1;
         // Search within fully-summed rows first
@@ -4341,6 +4535,8 @@ fn scalar_pivot_step(
                 max_row = i;
             }
         }
+        // Fully-summed argmax: the issue #221 2×2 partner fallback.
+        let (gamma_fs, r_fs) = (max_val, max_row);
         // Also check sub-diagonal rows (they contribute to gamma0 for
         // the BK pivot test, but are never swapped into pivot position)
         for i in ncol..nrow {
@@ -4350,7 +4546,7 @@ fn scalar_pivot_step(
                 max_row = i;
             }
         }
-        (max_val, max_row)
+        (max_val, max_row, gamma_fs, r_fs)
     };
 
     if gamma0 == 0.0 {
@@ -4370,6 +4566,7 @@ fn scalar_pivot_step(
             k,
             gamma0,
             may_delay,
+            allow_rook,
             params,
             perm,
             pos,
@@ -4415,6 +4612,7 @@ fn scalar_pivot_step(
             k,
             gamma_r,
             may_delay,
+            allow_rook,
             params,
             perm,
             pos,
@@ -4452,6 +4650,7 @@ fn scalar_pivot_step(
             k,
             gamma0,
             may_delay,
+            allow_rook,
             params,
             perm,
             pos,
@@ -4501,10 +4700,26 @@ fn scalar_pivot_step(
     // bit-identical to the pre-#46 kernel for every structurally
     // uncoupled neighbour. See
     // `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`.
+    //
+    // Issue #221: when `k+1` is uncoupled too, try the largest
+    // fully-summed entry of column `k` (`r_fs`), as SSIDS's TPP partner
+    // search does. Delayed columns land at the end of the fully-summed
+    // range, so a matched pair split across supernodes is rarely adjacent
+    // in the parent front. A zero-diagonal constraint column whose largest
+    // entry couples to a hub row that is not yet fully summed then delays
+    // at every front up the tree (brainpc3: about 2000 delays carried
+    // through 428 fronts, 9 s against 0.02 s). The candidate is taken only
+    // if it already passes both 2×2 gates, checked before any swap, so a
+    // rejected candidate leaves the old path (rook-wrapped 1×1) unchanged.
     let partner = if r_is_fully_summed && k + 1 < ncol {
         Some(r)
     } else if k + 1 < ncol && a[k * nrow + (k + 1)] != 0.0 {
         Some(k + 1)
+    } else if k + 1 < ncol
+        && gamma_fs != 0.0
+        && crate::dense::rook::passes_2x2_gates(a, nrow, k, k, r_fs, params.pivot_threshold)
+    {
+        Some(r_fs)
     } else {
         None
     };
@@ -4617,6 +4832,7 @@ fn scalar_pivot_step(
                 k,
                 gamma0,
                 may_delay,
+                allow_rook,
                 params,
                 perm,
                 pos,
@@ -4668,6 +4884,7 @@ fn scalar_pivot_step(
             k,
             gamma0,
             may_delay,
+            allow_rook,
             params,
             perm,
             pos,
@@ -4904,6 +5121,10 @@ fn try_reject_1x1_with_rook_rescue(
     k: usize,
     col_max: f64,
     may_delay: bool,
+    // Issue #221: `false` skips the rook search (forced pass of a front
+    // that cannot delay); the pivot goes straight to
+    // `try_reject_1x1_frontal`.
+    allow_rook: bool,
     params: &BunchKaufmanParams,
     perm: &mut [usize],
     pos: &mut usize,
@@ -4937,7 +5158,12 @@ fn try_reject_1x1_with_rook_rescue(
     }
 
     // Threshold failed — try rook rescue before delay/force-accept.
-    if let Some(pivot) = rook_rescue(a, nrow, ncol, k, params) {
+    let rescued = if allow_rook {
+        rook_rescue(a, nrow, ncol, k, params)
+    } else {
+        None
+    };
+    if let Some(pivot) = rescued {
         *n_rook_rescues += 1;
         for idx in 0..pivot.n_swaps {
             let (p, q) = pivot.swaps[idx];

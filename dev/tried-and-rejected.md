@@ -6163,3 +6163,143 @@ reuses memory: 16.2 MB of cache-cold lines per refactor. mimalloc (which
 reuses memory) was 1.7-1.8x *faster* than glibc. The #200 bump-allocator
 result ("0.6-7.7%, allocation ruled out") used the bump instrument and
 does not rule allocation out. See dev/journal/2026-10-16-01.org.
+
+## 2026-10-20 — #221 follow-up: fall back to `r_fs` when the `k+1` 2×2 fails the gates
+
+**Approach.** Extend the #221 partner fallback. When `a[k,k+1] != 0` but
+`{k, k+1}` fails the pre-swap 2×2 gates (`rook::passes_2x2_gates`), try
+the fully-summed argmax `r_fs` before delaying. The motivation was
+qcqp1000-2c late KKTs (pounce 68e438d0 dump iter 85), whose delays were
+dominated by #46 `k+1` partners coupled only by round-off (`a[k,k+1]` of
+1e-12 down to 1e-53) with `d11, d22 ~ -1e-9`.
+
+**Symptoms / why rejected.** No effect:
+
+| iter-85 KKT | before | with the change |
+|---|---|---|
+| 2×2 growth delays | 73,736 | 74,232 |
+| 1×1 delays | 32,984 | 32,066 |
+| Σ n_delayed_in | 53,393 | 53,201 |
+| nnz(L) | 12.27M | 12.25M |
+| floored pivots | 3259 | 3262 |
+| time | 4.15 s | 4.32 s |
+
+`r_fs` fails the gates as well. These columns have a ~-1e-9 diagonal,
+only round-off couplings inside the fully-summed set, and O(1) entries
+in non-fully-summed rows (|d| = 1e-9 < u·colmax = 1e-8). No fully-summed
+partner is stable, so SSIDS-style TPP would delay them too. The cost
+comes from #215's delay budget letting about 3000 of them ride a chain
+into a cascade-break front. It is not partner selection. feral 0.18 on
+the same matrix: 2.25 s, nnz(L) 7.69M, max 345 delays per front, n_tiny
+0, inertia (6007, 5107, 0) = expected, berr 5.9e-30.
+Journal: dev/journal/2026-10-19-01.org (2026-10-20 entries).
+
+## 2026-10-20 — #221: BK decisions inline in the blocked panel via lazy row replay
+
+**Approach.** Most scalar-path accepts in delay-heavy fronts (nql180 iter
+6 after pounce's quality escalation, u = 0.01) are hard BK cases the
+panel bails on:
+- 2×2 with partner `r` needing a mid-panel swap: 131k;
+- `k+1` fallback 2×2: 36k;
+- `r_fs` 2×2: 6.7k;
+- LAPACK-extension 1×1: 29k;
+- swap-1×1: 9.5k.
+Each is followed by an eager rank-1/rank-2 update of the whole trailing
+matrix (`do_1x1_update` 17,280 samples).
+
+The panel was taught to mirror `scalar_pivot_step`'s decision chain on
+deferred state:
+- `lazy_sym_row` computes a row's current values from the pending
+  pivots, bit-identical to the column replay (unit-tested against
+  `peek_ahead_replay` and a per-element `replay_entry`, FMA and non-FMA);
+- `rook::gates_from_parts` shares the 2×2 gate arithmetic.
+
+**Symptoms / why rejected.**
+
+1. Mid-panel swaps break blocked/scalar bit-parity
+   (`tests/blocked_ldlt.rs::test_indefinite_bk77_parity`: `l[549]`
+   differs by 1 ulp; `golden_bits_nofma_2x2_heavy_96`). The lazy row
+   itself is exact (0 mismatches against a full replay). The swap moves
+   entries of deferred column `col+1` into other deferred columns, whose
+   later replay rounds `(d·L_i)·L_j` where eager rounds `(d·L_j)·L_i`.
+   So swaps were limited to `c == 0`, which made the tests green again.
+2. Even so it is slower. Interleaved A/B against the committed kernel
+   on the same machine:
+
+   | case                | committed | lazy    |
+   |---------------------|-----------|---------|
+   | nql180 i6, u = 0.01 | 10.30 s   | 14.34 s |
+   | qcqp1000-2c i85     | 1.86 s    | 2.74 s  |
+   | qcqp1500-1c i76     | 5.49 s    | 7.22 s  |
+
+   Scalar rank-1 work fell (`axpy_minus_unroll4` 17.5k to 2.7k samples),
+   but bails stayed about as frequent (partial panels 738k to 685k; 456k
+   are `k+1` 2×2 candidates that fail the growth bound after the lazy
+   work). Each bail now flushes 1-2 pending pivots through the packing
+   Schur kernel (`packed_schur_tiles` 13.6k to 19.6k), which costs more
+   than the rank-1 axpys it replaced.
+
+**Lesson.** In these fronts the cost is the bail frequency, not the
+eager update. Speeding up a bail-heavy panel would need a-posteriori
+blocking, with failed-column backtracking as in SSIDS APP, so failures
+do not force a flush. That is a larger redesign. Code kept out of tree
+(scratch `factor.rs.lazy2`). Journal: 2026-10-19-01.org.
+
+## 2026-10-20 — #221: lowering the delay-chain backstop K for speed after quality escalation
+
+**Approach.** nql180 after pounce's quality escalation (u = 0.01) spends
+most of its factor time carrying delays (phase timers over two
+factorizations: dense 40.2 s, of which 28.0 s is scalar steps after
+panel bails). A lower backstop K engages cascade-break sooner. With
+default solver settings, iter 6 at u = 0.01:
+| K  | nql180 i6 | inertia | refined berr | qc85   |
+|----+-----------+---------+--------------+--------|
+| 10 | 10-14.8 s | 130079  | 1.3e-16      | 1.97 s |
+| 3  | 6.5 s     | 130079  | 4.3e-17      | -      |
+| 1  | 4.7 s     | 130079  | 2.4e-17      | 1.63 s |
+qc85 stays at 5107 throughout.
+
+**Symptoms / why rejected.** With default settings column25 also looked
+exact at K = 1, but only because pivot growth triggered the #102
+ordering escalation, which re-analysed with LdltCompress (twice the
+time; the final factor has cb = 0). With escalation disabled
+(`with_ordering_escalation(None)`) the CB fronts stand, and the #215
+guard (column25 δx-rung KKTs, iters 10-25, congruence seeds 0/1/4/8,
+expected 75597 on every seed) fails:
+- K = 3: 2 CB nodes, 115-148 floored pivots, counts 75597-75602 (wrong
+  on 27 of 28);
+- K = 1: 7-8 CB nodes, 446-554 floored, counts 75603-75612 (wrong on
+  28 of 28).
+Even after the TPP tail and the 1e-14 floor, cascade-break floors pivots
+whose sign is round-off. Wherever it fires on such a matrix it is
+inertia-unsafe; at K = 10 it does not fire on column25. Faster-but-wrong
+is not acceptable, so K stays at 10. The remaining lever is cheaper
+delayed-pivot handling (an a-posteriori blocked kernel). Journal:
+2026-10-19-01.org.
+
+## 2026-10-21 — #221: rung-judgement variants rejected on pounce evidence
+
+Four variants of the `increase_quality` rung check were tried and
+rejected before the shipped rule (decisions.md 2026-10-21: undo to the
+ladder start, record judged once, count n_tiny + n_zero + n_forced).
+
+- **Undo one rung, not to the ladder start.** nql180 stopped at
+  u = 3.2e-5 (rungs 1e-8 → 1e-6 → 3.2e-5 → 4.2e-4, the last worse with
+  5548 violations). It kept ~70k delays per factor: 224 s, 33 iterations.
+  The earlier rungs had never cured the one-short count.
+- **A persistent rung record.** pooling_rt2stp compared a later iterate
+  (2 floored pivots) with the factor that prompted a rung three calls
+  earlier. A clean factor in between had declined the next rung, so the
+  stale comparison undid the whole ladder.
+- **Lexicographic (violations, then max|L|).** It judged brainpc1's first
+  rung worse on max|L| alone and undid a rung that was not the problem.
+- **Floored pivots only (n_tiny), forced accepts ignored.** After the
+  parity fix 1f16980, brainpc1's first rung forced 2 pivots where it had
+  floored 1. The rule kept the ladder, which climbed three more rungs to
+  2.9e-3 with the inertia count unchanged: 165 s against 74 s with the
+  shipped rule. pounce confirmed it is deterministic and bisected it.
+
+An a-posteriori-pivoting (APP) blocked kernel for cheaper delays was also
+considered and set aside, not tried: it would break the blocked/scalar
+bit-parity contract (`tests/blocked_ldlt.rs`, `tests/golden_bits.rs`),
+which the maintainer chose to keep.

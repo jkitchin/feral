@@ -4,6 +4,70 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — delayed-pivot cascade on KKTs with hub couplings (issue #221)
+
+A zero-diagonal constraint column whose largest entry couples to a row
+that is not yet fully summed (for example a parameter shared by every
+time step) now pairs with its largest fully-summed entry as a 2×2 pivot,
+as SSIDS does. Before, it was delayed whenever its partner was not at the
+adjacent column. The candidate must pass the usual growth and determinant
+gates.
+
+On pounce's brainpc3 KKTs, feral 0.19/0.20 carried about 2000 delayed
+columns through a 428-front chain:
+
+| brainpc3 KKT | before | after |
+|---|---|---|
+| iter 37 | 9.4 s, nnz(L) 12.9M | 0.022 s, nnz(L) 402K |
+| iter 35 | 43.8 s, 277 floored pivots | 0.022 s, none |
+
+Inertia is unchanged on all 370 kkt-pounce corpus matrices.
+
+### Changed — fronts that cannot delay factor in two phases (issue #221)
+
+A root or cascade-break front with threshold pivoting on first runs a
+delay pass, which moves every column no pivot can take to the end of the
+fully-summed range, then factors those columns with `may_delay = false`
+and no rook search. The blocked kernel keeps their updates deferred, so
+such fronts no longer run at level-2 speed. `factor_frontal` (the scalar
+reference, also used for fronts under 8 columns and 32×32 fronts) runs
+the same two phases, and stays bit-identical to `factor_frontal_blocked`
+(`tests/issue_221_forced_front_parity.rs`).
+
+### Changed — `increase_quality` declines rungs that cannot help (issue #221)
+
+`Solver::increase_quality` now checks the stored factor before raising the
+pivot threshold, and returns `false` in two cases:
+
+- **The factor already meets the next threshold.** Nothing was floored,
+  force-accepted or zeroed (a `ForceAccept` zero pivot, as on a singular
+  matrix, counts), and every multiplier satisfies `|L| <= 1/u_next`.
+  Nothing changes.
+- **The previous raise made the factor worse.** It gave up on more pivots
+  (floored, zeroed or force-accepted), or its growth broke the raised bound
+  and exceeded the growth before. In a multifrontal factor, a higher
+  threshold means more delays, and fronts that cannot delay floor or
+  force-accept pivots. The threshold returns to where
+  the ladder started, and the ladder is exhausted.
+
+Before a factor exists, and in the stage-1 scaling flip, the ladder behaves
+as before; a raise not yet judged waits for the next stored factor.
+`SparseFactors::n_zero_pivots` reports the zero part of the inertia. `FactorStats::max_abs_l` reports the realized `max |L_ij|`, so
+`1 / max_abs_l` is the threshold the factor actually meets.
+
+On pounce 68e438d0 (default options, 300 s cap):
+
+| model | before | after | `feral_increase_quality=no` |
+|---|---|---|---|
+| nql180 | timeout (threshold up to 0.086) | Optimal, 69 s | 76 s |
+| brainpc1 | 150 s | 74 s | 17 s |
+| brainpc2 | timeout | 68–97 s | 58 s |
+| deb7 (exact) | Optimal/180 | Optimal/180, both rungs kept | — |
+
+`tests/pounce_interface.rs` I8 now escalates before its first factor:
+the diagonal matrix it factors has no multipliers, so a rung after it is
+declined.
+
 ## [0.20.0] - 2026-10-17
 
 **Breaking.** `FactorScratch` (`feral::dense::factor`) is an exhaustive

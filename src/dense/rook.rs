@@ -196,7 +196,14 @@ fn sym_row_argmax(a: &[f64], nrow: usize, k: usize, r: usize) -> (f64, usize) {
 /// RMAX and TMAX are computed over `i ∈ [k, nrow) \ {p, q}` — i.e.
 /// the rows that will become the trailing `k+2..nrow` slab after
 /// swapping `(p, q)` into `(k, k+1)`.
-fn passes_2x2_gates(a: &[f64], nrow: usize, k: usize, p: usize, q: usize, u: f64) -> bool {
+pub(crate) fn passes_2x2_gates(
+    a: &[f64],
+    nrow: usize,
+    k: usize,
+    p: usize,
+    q: usize,
+    u: f64,
+) -> bool {
     debug_assert!(p < q);
     let d11 = sym_elem(a, nrow, p, p);
     let d22 = sym_elem(a, nrow, q, q);

@@ -7931,3 +7931,171 @@ other changed matrices are within ±3 % or faster.
   of delays rather than fixing their sign handling.
 
 Research: `dev/research/issue-215-delay-budget-exact-inertia.md`.
+
+## 2026-10-19 — 2×2 partner falls back to the fully-summed argmax (issue #221)
+
+**Decision.** In `scalar_pivot_step`, the 2×2 partner candidates are now
+tried in this order:
+1. BK's argmax `r`, if fully summed;
+2. `k+1`, if coupled (#46);
+3. the largest entry among the fully-summed rows (`r_fs`), only if
+   `{k, r_fs}` passes the Duff-Reid growth bound and the SSIDS det floor,
+   checked before any swap.
+
+A rejected candidate leaves the old path unchanged.
+
+**Why.** A ghost-row argmax (a hub coupling) plus an uncoupled `k+1`
+made a zero-diagonal constraint delay even when its matched partner was
+fully summed in the same front. On brainpc3 this carried about 2000
+delays through 428 fronts once #215's budget allowed it: 9.4 s against
+0.02 s. SSIDS's TPP kernel restricts the partner search to fully-summed
+columns (`ldlt_tpp.cxx:207`), so this aligns feral with SSIDS.
+
+**Cost.** None measured. The kkt-pounce corpus has identical inertia on
+370/370 and nnz(L) within −0.9 %/+0.03 % on the 141 that changed.
+
+**Alternatives rejected.**
+- Cheaper rook scans: rook is about half the time, and the Schur work on
+  the delay-swollen fronts remains.
+- Tightening the #215 delay budget back toward 0.18: reintroduces
+  cascade-break floored pivots (brainpc3 i35 HEAD: 277 floored, cb 1).
+
+Research: `dev/research/issue-221-fully-summed-2x2-partner.md`.
+
+## 2026-10-20 — Delay-chain backstop and a round-off CB floor (issue #221)
+
+**Decision.**
+1. Delay-chain backstop. A front engages cascade-break when the extra
+   frontal area its in-flight delay chain has cost exceeds
+   `max(DELAY_CHAIN_FLOOR = 2^20, DELAY_CHAIN_GROWTH = 10 × subtree
+   symbolic area)`. The excess is summed over still-delaying children
+   and resets at a front that delays nothing. It is carried on
+   `ContribBlock`; no public struct changes.
+2. `cascade_break_eps` defaults to `DEFAULT_CASCADE_BREAK_EPS = 1e-14`
+   (relative to ‖D·A·D‖∞), down from 1e-10. This changes the convention
+   frozen in the 2026-05-27 Phase B entry.
+3. Fronts that cannot delay factor their stuck columns blocked (the
+   two-phase kernel in `factor_frontal_blocked_in_place_with_scratch`).
+
+**Why.**
+- The #215 budget bounds one front's size, not the cost of carrying the
+  same delays through a chain. Chain ratios:
+  - qcqp1000-2c iter 85: 224 (4.2 s, 3259 floored, wrong inertia);
+  - nql180 after pounce's quality escalation (u = 0.01): 36 (49 s);
+  - the column25 congruence set #215 protects: 3.7; brainpc3: ≤ 2.8.
+- With the backstop, a 1e-10 floor rewrote thousands of forced pivots
+  whose signs matter:
+  - qc85: 5104 vs the expected 5107;
+  - qcqp1500-1c iter 76: 10500 vs 10508.
+  A 1e-14 floor gives 5107 and 10508 on congruence seeds 1/4/8. It
+  still floors #213's 2.3e-16 pivots.
+- Without (3), forced fronts ran at level-2 speed, so exactness cost the
+  speed back.
+
+**Evidence (pounce params).**
+| case        | before (#221 partner fix only) | after                  | 0.18                 |
+|-------------+--------------------------------+------------------------+----------------------|
+| qc85        | 4.2 s, wrong                   | 1.93 s, exact          | 2.25 s               |
+| q15c76      | 12.7 s, wrong                  | 5.6 s, exact           | 8.4 s                |
+| nql180 i6, u = 0.01 | 49 s                   | 10.6 s, neg 130079     | 5.7 s, neg 131049 (wrong) |
+Unchanged: kkt-pounce 370 (inertia, n_tiny, nnz(L)); column25 guard
+28/28 = 75597, tiny 0.
+
+**Phase B acceptance.** The kkt-mittelmann corpus that froze the 1e-10
+convention is not on this machine. The rerun uses pounce-dumped KKTs of
+the same Mittelmann models (session 2026-10-19-01 journal).
+
+**Alternatives rejected.** Backstop with the 1e-10 floor (fast, wrong
+inertia). The r_fs fallback after a failed k+1 2×2 (no effect;
+tried-and-rejected 2026-10-20). An SSIDS-style eager TPP tail: the stuck
+block is most of the front (3312 of 4221 rows), so eager updates would
+stay level-2.
+
+## 2026-10-20 — `increase_quality` judges each rung against the stored factor (issue #221)
+
+**Context.** PR #222 comment 6294656538. After the #221 kernel fixes, the
+remaining pounce failures (nql180 and brainpc2 time out, brainpc1 takes
+150 s) all disappear with `feral_increase_quality=no`. pounce found no rule
+of its own that separates them from deb7, pooling_rt2stp and a watchdog
+model that need the ladder. pounce sees only symptoms; feral sees the
+factor.
+
+**Decision.** A stage-2 rung asks for a factor whose multipliers satisfy
+`|L| <= 1/u_next`. `increase_quality` now measures the stored factor
+(`n_tiny`, `n_threshold_fail_accepts`, realized `max |L|` via the new
+`SparseFactors::max_abs_l`) and declines (`false`) when:
+1. the factor already meets `u_next` (nothing floored or forced and
+   `max |L| · u_next <= 1`): the rung cannot strengthen stability. No state
+   changes. Or:
+2. the previous rung made the factor worse. It is judged once, at the next
+   call: more floored pivots, or growth that breaks the raised bound and
+   exceeds the growth before. The threshold returns to where the ladder
+   started and the level becomes `Exhausted`.
+
+**Why these measures.** Floored pivots perturb the matrix, and `max |L|` is
+the growth that the threshold exists to bound. Both are independent of the
+threshold. A count of forced accepts is not: it is relative to the current
+`u`, and comparing it across thresholds judged brainpc1's first rung worse
+even though its growth improved 100×. The undo goes to the ladder start, not
+one rung back: a one-rung undo left nql180 at 3.2e-5 (70k delays, 224 s).
+The rung record is single-use: a persistent record let pooling_rt2stp
+compare a later iterate with a stale factor and undo the ladder.
+
+**Evidence.** pounce 68e438d0, sequential, 300 s: nql180 timeout →
+Optimal 69 s / 42 it (escalation-off 76 s); brainpc1 150 s → 74 s; brainpc2
+timeout → 68–97 s (both brainpc through pounce's re-solve); deb7 exact
+Optimal/180 with both rungs kept; pooling_rt2stp and square_flowsheet_resto
+keep their verdicts. Research note:
+`dev/research/issue-221-quality-rung-admissibility.md`.
+
+**Supersedes nothing.** The ladder's rungs, exponent and `pivtol_max` are
+unchanged. U1–U5 hold because they call without a stored factor.
+`tests/pounce_interface.rs` I8 changed premise: its clean diagonal factor
+now declines a rung, so it escalates before factoring and asserts the
+decline.
+
+## 2026-10-21 — Zero pivots count against rung admissibility (issue #221)
+
+**Decision.** `FactorStability` gains `n_zero` (the zero part of the
+stored factor's inertia, `SparseFactors::n_zero_pivots`).
+`admissible_at` requires `n_zero == 0`. `worse_than` compares pivots given
+up, `n_tiny + n_zero`, against the factor that prompted the raise. A call
+without a stored factor leaves the unjudged rung record in place (it was
+consumed and lost before).
+
+**Why.** `ForceAccept` (the default for root fronts) zeroes a pivot it
+cannot take and counts it only in the inertia, not in `n_tiny` or
+`n_threshold_fail_accepts`, so a factor with exact-zero pivots read as
+admissible and the rung was declined (review of PR #222). The sum in
+`worse_than` treats a pivot moving between floored and zeroed as no
+change; a genuinely singular matrix keeps its zero count at every rung, so
+it is not judged worse. Admissibility is stricter: such a factor never
+declines a rung, which is the pre-#221 behaviour for it.
+
+**Evidence.** tests/issue_221_quality_rung.rs: `[[1,1],[1,1]]` (inertia
+(1,0,1), max |L| = 1, by hand) and `diag(1,0,1)` now proceed; more zero
+pivots at the raised rung undo the ladder; same count climbs; a rung
+survives an `invalidate_factors` call and is judged by the next factor.
+All four fail on ed292fc.
+
+## 2026-10-21 — a rung that forces more pivots is a failed rung (issue #221)
+
+**Decision.** `FactorStability::worse_than` counts every pivot the factor
+gave up on: floored (`n_tiny`), zeroed (`n_zero`) and force-accepted below
+the threshold (`n_forced`). If the factor at the raised threshold gave up
+on more of them than the factor that prompted the raise, the rung is
+undone. This replaces the 2026-10-20 choice of floored pivots only.
+
+**Why.** That choice dropped forced accepts as "relative to the
+threshold". Relative to the *raised* threshold, a forced accept is a
+pivot the rung could not place within its own bound, which is what the
+rung exists to do. After the parity fix (1f16980), brainpc1's first rung
+forced 2 pivots where it had floored 1. The floored-only test kept the
+ladder, which climbed three more rungs to 2.9e-3 with the count unchanged
+(165 s against 74 s; pounce verified this is deterministic and bisected
+it). Summing the three counts also means a pivot that moves between them
+is not a change.
+
+**Evidence.** pounce sweep-fixtures.sh, 220 runs: identical to the
+previous rule on every line. brainpc1 74.5 s, 1 escalation; nql180
+54.9 s; brainpc2 67.2 s. Unit test Q1 in `src/numeric/solver.rs`.

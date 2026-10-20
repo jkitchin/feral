@@ -133,7 +133,9 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
 
         let mut solver = Solver::with_params(np, SupernodeParams::default());
         if cb_on {
-            solver = solver.with_cascade_break(0.5).with_cascade_break_eps(1e-10);
+            solver = solver
+                .with_cascade_break(0.5)
+                .with_cascade_break_eps(crate::numeric::factorize::DEFAULT_CASCADE_BREAK_EPS);
         } else {
             // Warm-CB auto-arm. Default β=0.05 ≈ "5% of n got delayed
             // at some supernode last call ⇒ arm CB for this call only."

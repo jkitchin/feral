@@ -41,6 +41,38 @@ fn supernode_trace_enabled() -> bool {
 /// `dev/research/issue-15-cascade-break-symbolic-arm.md`.
 pub const CASCADE_BREAK_MIN_N: usize = 4096;
 
+/// Default relative floor for forced pivots in fronts that cannot delay
+/// (`NumericParams::cascade_break_eps`; the absolute floor is this times
+/// `‖D·A·D‖∞`). Issue #221 lowered it from `1e-10` to `1e-14`, a few
+/// hundred ulps of the matrix scale. It still floors the round-off pivots
+/// of issue #213 (2.3e-16, which gave |L| ~ 1e16) and bounds growth by
+/// `col_max / 1e-14`. It no longer rewrites pivots whose sign is
+/// meaningful. With 1e-10, thousands of forced pivots in (1e-14, 1e-10)
+/// were floored, and the inertia went wrong:
+/// - qcqp1000-2c iter 85: 5104 vs 5107;
+/// - qcqp1500-1c iter 76: 10500 vs 10508.
+///
+/// At 1e-14 both are exact and agree across congruence seeds 1/4/8.
+pub const DEFAULT_CASCADE_BREAK_EPS: f64 = 1e-14;
+
+/// Issue #221: chain-cost backstop for delayed pivots. A front engages
+/// cascade-break when the extra frontal area its in-flight delay chain
+/// has cost exceeds this multiple of its subtree's symbolic area (and
+/// [`DELAY_CHAIN_FLOOR`]). The chain excess is
+/// `expanded_ncol * actual_nrow - ncol * nrow` summed over this front and
+/// every descendant that is still passing delays up; it resets at a front
+/// that delays nothing. The per-front budget (`delayed_capacity`, #215)
+/// bounds one front's size. It does not bound the cost of carrying the
+/// same delays through a long chain of fronts. That carry cost made
+/// qcqp1000-2c (ratio 224) and nql180 after quality escalation (36)
+/// several times slower than 0.18, while the column25 congruence set that
+/// #215 protects peaks at 3.7.
+pub const DELAY_CHAIN_GROWTH: f64 = 10.0;
+
+/// Issue #221: minimum chain excess (frontal entries) before
+/// [`DELAY_CHAIN_GROWTH`] can fire, so small subtrees never engage it.
+pub const DELAY_CHAIN_FLOOR: usize = 1 << 20;
+
 /// Numeric-phase parameters bundle.
 ///
 /// Groups the dense Bunch-Kaufman pivot configuration with the
@@ -675,7 +707,7 @@ impl Default for NumericParams {
             // matching MUMPS's invariant. See issue #55 and
             // `dev/research/symbolic-delay-budget-2026-05-27.md`.
             cascade_break_ratio: Some(0.5),
-            cascade_break_eps: Some(1e-10),
+            cascade_break_eps: Some(DEFAULT_CASCADE_BREAK_EPS),
             min_parallel_flops: None,
             // SQD fast-path off by default. Opt in via
             // `Solver::with_sqd_mode(true)`; see `sqd_mode` doc and
@@ -725,7 +757,7 @@ impl NumericParams {
             // path for delay-budget exhaustion. See the comment there
             // for rationale.
             cascade_break_ratio: Some(0.5),
-            cascade_break_eps: Some(1e-10),
+            cascade_break_eps: Some(DEFAULT_CASCADE_BREAK_EPS),
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
@@ -1305,6 +1337,44 @@ impl SparseFactors {
             .iter()
             .map(|nf| nf.frontal_factors.n_tiny)
             .sum()
+    }
+
+    /// Number of pivots counted as zero eigenvalues (the `zero` part of
+    /// the factor's inertia, summed over supernodes). Under
+    /// `ZeroPivotAction::ForceAccept` a pivot with `|d| <= zero_tol` that a
+    /// front cannot delay is accepted as an exact zero (L column and `D`
+    /// entry zeroed) and counted here, not in [`n_tiny`](Self::n_tiny) or
+    /// [`n_threshold_fail_accepts`](Self::n_threshold_fail_accepts).
+    pub fn n_zero_pivots(&self) -> usize {
+        self.node_factors.iter().map(|nf| nf.inertia.zero).sum()
+    }
+
+    /// Largest realized multiplier `max |L_ij|` (`i > j`) over every
+    /// eliminated column, excluding the unit diagonal and the in-block
+    /// coupling of 2×2 pivots (that entry lives in `D`). `0.0` when no
+    /// column has a multiplier.
+    ///
+    /// Threshold pivoting with parameter `u` accepts a pivot only when its
+    /// multipliers satisfy `|L| <= 1/u`, so `1 / max_abs_l()` is the largest
+    /// threshold the computed factor already meets (pivots counted by
+    /// `n_tiny` or `n_threshold_fail_accepts` aside). One pass over `L`.
+    pub fn max_abs_l(&self) -> f64 {
+        let mut max = 0.0f64;
+        for nf in &self.node_factors {
+            let ff = &nf.frontal_factors;
+            for j in 0..ff.nelim {
+                let first = if j + 1 < ff.nelim && ff.d_subdiag[j] != 0.0 {
+                    j + 2
+                } else {
+                    j + 1
+                };
+                let col = &ff.l[j * ff.nrow..(j + 1) * ff.nrow];
+                for v in &col[first.min(ff.nrow)..] {
+                    max = max.max(v.abs());
+                }
+            }
+        }
+        max
     }
 
     /// Number of non-root supernodes factored under the cascade-break
@@ -2580,6 +2650,17 @@ fn factor_one_supernode(
         .map(|c| c.n_delayed)
         .sum();
     let expanded_ncol = own_ncol + n_delayed_in;
+    // Issue #221 chain-cost backstop: subtree symbolic area from every
+    // child, chain excess only from children still passing delays up.
+    let (mut child_sym_area, mut child_chain_excess) = (0usize, 0usize);
+    for &c in &snode.children {
+        if let Some(cb) = contrib_blocks[c].as_ref() {
+            child_sym_area = child_sym_area.saturating_add(cb.sub_sym_area);
+            if cb.n_delayed > 0 {
+                child_chain_excess = child_chain_excess.saturating_add(cb.chain_excess);
+            }
+        }
+    }
 
     // Phase B3+B5 (issue #55): symbolic-analysis-time delay budget.
     // When the supernode received more delayed pivots from its children
@@ -2763,10 +2844,16 @@ fn factor_one_supernode(
     // trigger removes the perf-tax on cascade-victim problems while
     // ensuring CB never perturbs a pivot that MUMPS would delay
     // (issue #55 Phase 0 evidence: marine_1600_0017, nuffield2_trap).
+    let own_sym_area = own_ncol * nrow;
+    let sub_sym_area = child_sym_area.saturating_add(own_sym_area);
+    let chain_excess = child_chain_excess
+        .saturating_add((expanded_ncol * actual_nrow).saturating_sub(own_sym_area));
+    let chain_exceeded = chain_excess > DELAY_CHAIN_FLOOR
+        && chain_excess as f64 > DELAY_CHAIN_GROWTH * sub_sym_area as f64;
     let cascade_break = match params.cascade_break_ratio {
         Some(r) if !is_root[snode_idx] && params.allow_delayed_pivots && expanded_ncol > 0 => {
             if snode.delayed_capacity != usize::MAX {
-                budget_exceeded
+                budget_exceeded || chain_exceeded
             } else {
                 symbolic.n >= CASCADE_BREAK_MIN_N
                     && (n_delayed_in as f64) / (expanded_ncol as f64) >= r
@@ -2855,6 +2942,8 @@ fn factor_one_supernode(
             data: contrib_data,
             dim: cdim,
             n_delayed: node_n_delayed,
+            sub_sym_area,
+            chain_excess,
         });
     }
 
@@ -3019,6 +3108,9 @@ fn factor_one_small_leaf(
             data: contrib_data,
             dim: cdim,
             n_delayed: node_n_delayed,
+            // Leaf: no children, no delays in, so no chain excess.
+            sub_sym_area: own_ncol * nrow,
+            chain_excess: 0,
         });
     }
 
@@ -4615,6 +4707,12 @@ struct ContribBlock {
     /// by the parent's `build_row_indices` and the Step 5 assembly
     /// which places these columns in the parent's fully-summed region.
     n_delayed: usize,
+    /// Symbolic frontal area (`ncol * nrow`) summed over this node's
+    /// subtree (issue #221 chain-cost backstop).
+    sub_sym_area: usize,
+    /// Extra frontal area spent by the delay chain ending at this node
+    /// (issue #221). Only meaningful when `n_delayed > 0`.
+    chain_excess: usize,
 }
 
 /// Extend-add: assemble a child's contribution block into the parent frontal.
