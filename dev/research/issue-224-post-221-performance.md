@@ -175,6 +175,21 @@ while 0.18's moves with the seed, floors 113–563 pivots, and has an
 unrefined residual of 84. 0.18's `Singular`/6902 is what pushed pounce
 onto the δ_c path. Nothing here is a feral 0.21 defect.
 
+**Step 0a verdict (scaled oracle, read 2026-10-22).** `i224/res/eig_scaled.txt`
+(D·A·D, D = 1/√(row inf-norm), two sweeps; Sylvester keeps the inertia):
+
+| matrix | scaled neg (strict) | neg(< −tol) | band (\|w\| ≤ n·eps·‖DAD‖) | smallest \|w\| | tol |
+|---|---|---|---|---|---|
+| brainpc1 i41/s1 | 6902 | 6902 | 0 | 5.7e-10, 7.6e-9 | 8.4e-11 |
+| brainpc0 i95/s1 | 6901 | 6901 | 2 (both positive) | 2.4e-10, 2.7e-10 | 3.0e-10 |
+
+brainpc1: decisive, 6902 = feral 0.21 on every seed; the 6903 that 0.18
+reported inside pounce v0.12 is wrong. brainpc0: the oracle's count is
+6901 = feral 0.21; 0.18's 6902 disagrees. Two eigenvalues sit in the
+scaled-eps band, so the matrix is also relatively singular to working
+precision, but the plan's stop condition (oracle 6902) is not met. Both
+verdicts: no 0.21 defect.
+
 ### 3.4 pounce's per-factorization time vs the harness (qcqp)
 
 pounce 0.13 reports 100.5 s of `LinearSystemFactorization` for 163
@@ -194,6 +209,32 @@ escalation, so unlikely). pounce's `--json-output` report carries
 total_n_tiny }`, which separates (a)/(b) in one run. This gap is the
 single largest recoverable item for qcqp and it is on the integration
 side, not in the kernel.
+
+**Step 0b verdict (2026-10-22): the gap is the symbolic analysis being
+taken on pounce's least-squares-multiplier init matrix.** Not timer scope,
+not thread dispatch.
+
+| run (crates.io feral 0.21.0, sequential) | factor total | Σ delayed | Σ tiny |
+|---|---|---|---|
+| harness `--reuse`, 164 dumps (parallel) | 56.3 s | 1 606 093 | 39 386 |
+| harness `--reuse --serial`, 164 dumps | 75.9 s | — | — |
+| pounce 0.13 `total_factor_secs`, 165 factors | 100.8 s | 2 947 819 | 30 379 |
+| harness `--reuse`, init matrix + 164 dumps | 98.98 s | 2 948 051 | 30 378 |
+| same, `invalidate_symbolic_cache()` after the init factor | 56.39 s | 1 606 314 | — |
+
+pounce times only `Solver::factor` (`pounce-feral/src/lib.rs:1319`), so
+`total_factor_secs` is feral's own factor time. The extra (165th) factor is
+Ipopt's `LeastSquareMults` init solve (W = 0, D_x = D_s = I, D_c = D_d = 0;
+not dumped), the first matrix the `Solver` sees. With `OrderingPreprocess::Auto`
+→ `LdltCompress`, the analysis (MC64 matching → compressed ordering) depends
+on the values, and the cached symbolic is reused for all 164 IPM KKTs.
+Reconstructing that matrix from the iter_000 dump reproduces pounce's
+summary (last nnz_l 2 899 772 exactly; last-factor delays 16 628 exactly);
+re-analysing once after it recovers the harness time with inertia
+(6007, 5107, 0) on 165/165. The remedy is pounce-side (call order, or one
+`invalidate_symbolic_cache()` after the init solve) with an existing feral
+API; Step 4 (dispatch) does not apply. Draft comment for pounce in
+`dev/journal/2026-10-22-01.org`.
 
 ## 4. Where the time goes on a hard qcqp KKT (feral 0.21)
 
