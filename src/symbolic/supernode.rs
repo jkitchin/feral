@@ -721,7 +721,7 @@ pub(crate) fn find_fundamental_supernodes(
 /// where the absolute scale is irrelevant — only differences between
 /// candidate merges matter. `u128` because `S(x)` is cubic and `nrow`
 /// reaches the thousands on wide Schur complements.
-fn front_flops(ncol: usize, nrow: usize) -> u128 {
+pub(crate) fn front_flops(ncol: usize, nrow: usize) -> u128 {
     // `nrow >= ncol` holds for every front the caller constructs
     // (`nrow` is built with `.max(ncol)`), but clamp rather than
     // underflow if that ever stops being true.

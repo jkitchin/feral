@@ -1,0 +1,140 @@
+#+TITLE: Journal 2026-10-23 session 01 — #227 ReanalysisPolicy
+#+STARTUP: showall
+
+* 2026-10-23 :issue-227:setup:
+Branch feat/227-reanalysis-policy from main 95ba43b. First commit
+14f8341 carries only the research note and plan. Executing
+dev/plans/issue-227-reanalysis-policy.md in order. Scratch root $J =
+/private/tmp/claude-501/-Users-jkitchin-projects-feral/a1458847-2377-4832-a0c1-096910fb944e/scratchpad/i227.
+
+* 2026-10-23 :issue-227:golden:fixture:determinism:
+Golden `Never` test written before any source change
+(tests/issue227_never_golden.rs + tests/common227/mod.rs): synthetic
+8-iterate KKT [[D_k, Jᵀ],[J, −1e-8 I]], n_x = 300, m = 100, D_k spread
+from 1 to 1e±6; Sylvester/Haynsworth inertia (300, 100, 0) asserted via
+check_inertia on every factor (all Success). Plus all 61 parity .mtx
+factored twice (122 digests folded).
+First generator used `10f64.powf(e·t)`: release and debug builds
+produced *different matrices* on iterates 1,3,5,6 (values hash
+0xfb41… vs 0xad65…) — LLVM rewrites pow(10,x) in release. Not a feral
+issue; replaced by exact integer powers of ten (pow10 by repeated
+multiplication). After that release and debug digests agree on every
+iterate and parallel == sequential. Digests hardcoded from main.
+
+* 2026-10-23 :issue-227:step0:flops:
+Step 0: `front_flops` pub(crate); `symbolic::predicted_front_flops`,
+`SparseFactors::actual_front_flops`, `FactorStats.{predicted,actual}_flops`
+(u128). Hand-sum oracles (tests/issue227_flops.rs): tridiag(5) at nemin 1
+has fundamental supernodes (1,2)×3 + (2,2) — not one per column as the
+plan guessed — so 3·4 + 5 = 17 (same as 4·4+1, no fill). Arrow-apex
+(delayed_pivoting.rs fixture): predicted F(1,2)+F(3,3) = 18, actual
+F(0,2)+F(4,4) = 30 (the delayed column moves work into the root).
+61 parity matrices: counters identical par/seq/run-to-run; some
+matrices delay (actual ≠ predicted). cargo test --release: all green;
+golden digests unchanged.
+
+* 2026-10-23 :issue-227:step1:refactor:
+Step 1: the #154 pool-or-sequential block (initial factor and #65
+retry) moved into `Solver::dispatch_numeric` — an associated fn taking
+`use_parallel, pool, &mut workspace` because `symbolic` is borrowed from
+`self.last_symbolic`. Golden digests pass after the move (kill
+criterion 1 not tripped); cargo test --release 1001 passed, 0 failed.
+
+* 2026-10-23 :issue-227:step2:api:
+Step 2: src/numeric/reanalysis.rs (ReanalysisPolicy {Never (default),
+OnStale(OnStaleParams), Always}, OnStaleParams defaults 2.0 / 0.25 / 8 /
+2 / probes 2·4^j ≤ 2048 / 100 flops per nnz, AnalysisOrigin,
+ReanalysisEvent, TrialOutcome, DeclineReason (+NoCandidate for an
+escalation with an empty store), ReanalysisReport) and the pure decision
+functions with table tests. Solver: `reanalysis`, `reanalysis_state`,
+`with_reanalysis`, `reanalysis_policy`, `last_reanalysis`;
+FactorStats.reanalysed / reanalysis_count; state reset in the
+!cache_valid block; factor_index counted per outer call (escalation
+re-entry excluded). Race probes do not inherit the policy (a probe
+factors once). Decision functions carry a module-level allow(dead_code)
+until Step 3 wires them. Golden digests unchanged; 1010 passed.
+Also: `cargo clippy --all-targets` flagged `c % 3 != 0` in the test
+fixture (is_multiple_of) — the pre-commit hook only lints the lib, so
+the earlier fixture commit slipped it; semantics unchanged.
+
+* 2026-10-23 :issue-227:step3:policy:tests:fixture:
+Step 3: `Solver::reanalysis_events` hooked after the factor is stored and
+after the escalation block, skipped under Never (one matches!) and on
+the escalation re-entry. Cost > probe precedence on the same factor; no
+event on factor 1 of a pattern (analysed on its own matrix — the plan's
+"cost fires on factor 2" needs this). Trials: same effective params minus
+profiler, pattern_reused_hint = false (keeps the incumbent's permute
+cache), no begin_recycle, no #65 retry; cached_mc64 cleared after every
+trial; trial errors discarded.
+Fixture finding: the synthetic KKT path resolves `LdltCompress` under
+Auto (its constraint columns are degree ≤ 2), so the plan's
+"pattern-only → Identical" test pins `preprocess = None` explicitly and
+compares with Never under the same params.
+New qcqp-like fixture (tests/common227::qcqp_like; pounce StdAugSystem
+layout, n = 750; Sylvester oracle (450, 300, 0) from H ≻ 0 by
+Gershgorin and A full row rank): init (W = 0) and iterate 0 resolve
+LdltCompress (pred 3.90e6 / 4.50e6), iterate ≥ ~6 resolves None (pred
+1.96e6). OnStale defaults (guard 0): k = 2 probe stores (NotCheaper, no
+trial); k = 8 trial: None actual 2.41e6 vs incumbent 3.93e6, same
+inertia → adopted, in both call orders. Adopted factors bit-equal a
+fresh Never solver's on the following iterates. Cost event at k = 9
+(trigger 0.5) trials the two stored analyses (Fresh{2}, Initial),
+declines NotCheaper, latches. Ladder: Always policy on #221's
+diag fixture → Ladder decline on the rung, #221 still undoes the worse
+rung, events resume after. Reports identical across 2 solvers and
+par/seq. cargo test --release: 1018 passed (before the cost-trial test).
+
+* 2026-10-23 :issue-227:step4:escalation:
+Step 4: the hook now also runs on the #102 re-entry (escalation = true):
+candidates are the stored analyses only, trialled against the fresh
+escalated one; Never path untouched (escalation block unchanged; the
+outer call still returns the re-entry's status). Escalated analysis
+carries origin Escalation{k} and is stored if displaced.
+Fixture: cont5_late_kkt.mtx is absent here (tests/data/large has only
+sawpath, twirism1), and a D_s spike does not reach growth 1e24 on the
+qcqp-like path (InfNorm scaling absorbs it: growth stayed 7e13–1.6e16
+for spikes 1e18–1e22). Tests use the public ceiling
+with_ordering_escalation(Some(1e12)): the None factors (growth ~1e16)
+escalate at k = 9, right after the k = 8 probe adopted None. Fresh
+escalated actual 4.44e6; stored 3.93e6 and 4.50e6, inertia (450,300,0)
+on all. Default margin 0.25 → declined NotCheaper (13 % cheaper); margin
+0.1 → the cheaper stored one adopted. Empty store → NoCandidate.
+Reports par == seq. cargo test --release 1022 passed.
+
+* 2026-10-23 :issue-227:step5:replay:acceptance:
+Harness $J/r227: `--policy onstale` now = Solver::with_reanalysis(
+OnStale(default)) (old review emulation renamed `review`; `proto` kept);
+prints per-factor digest, exp_neg, R227 report. Main reference: harness
+copy $J/r227main against a worktree at 95ba43b (res227/main.*.txt).
+Gate ($J/gate227.py, res227/s5.*.txt, sequential, nothing else running):
+| seq | flops On/Never | time On/Never | analyses/trials/adopt | inertia≠Never |
+| 2c init  | 0.7512 (≤0.80 ✓) | 0.451 (≤0.65 ✓) | 7/2/1 | 0 |
+| 2c kkt   | 0.9795 (≤1.00 ✓) | 0.778 (≤0.75 ✗) | 7/5/2 | 0 |
+| 2nc init | 1.0000 (=1 ✓)    | 1.066 (≤1.15 ✓) | 6/1/0 | 0 |
+| 2nc kkt  | 0.5462 (≤0.60 ✓) | 0.573 (≤0.60 ✓) | 6/3/1 | 0 |
+| pooling  | 1.0000 ✓          | 1.077 (≤1.05 ✗?) | 2/1/0 | 0 |
+| clnlbeam | 1.0000 ✓          | 0.983 ✓          | 1/0/0 | 0 |
+| NARX_CFy | 1.0000 ✓          | 1.029 ✓          | 6/0/0 | 0 |
+Never digests == main on every factor of all 7 sequences (4 947 factors).
+No exp_neg regressions. Trials ≤ 8, analyses ≤ 12 everywhere.
+Mechanism on 2c init-first is the prototype's: k=2 probe stores the
+first-KKT LdltCompress analysis (pred 6.98e8 > 3.53e8), escalation at
+iter_076 trials it (1.35e9 vs fresh 2.22e9, same inertia) and adopts it;
+cost event at iter_077 declines; kill criterion 3 not tripped.
+Timing caveats (recorded, not tuned): 2c kkt-first repeated twice more:
+Never 51.3 / 43.1 s, OnStale 42.4 / 42.9 s → ratios 0.83 / 0.99; Never
+alone drifts 43–59 s, so the 0.75 time line is not resolvable on this
+machine; flops (the gate) 0.98 stable. Pooling: 3 more paired runs
++11 % / +2 % / +4.5 % on a ~46 ms sequence (Never itself 44–49 ms);
+the overhead is one cost event (k=149, ratio 2.49: one analysis + one
+declined trial, ~2–3 ms), not probes (guard keeps probes off at 90
+flops/nnz), so the plan's remedy (probe_first/probe_last) does not
+apply. Left as reported; a possible follow-up is to apply the
+flops-per-nnz guard to the cost event too — not done (not in the plan).
+Column25 Sylvester guard (fx/c25b, 7 iterates × seeds 0/1/4/8): 28/28
+neg 75597, tiny 0. kkt-pounce corpus (370 .mtx, diag_221_rook_cost
+COMPACT): HEAD vs main worktree identical on every non-timing field,
+total 63.85 → 62.16 s. Bench: identical to 2026-10-22-01.
+pounce end-to-end: not run (needs a pounce FeralConfig option in a
+clone; skipped for time). dev/context.md not regenerated (user's
+uncommitted edits in the working tree).

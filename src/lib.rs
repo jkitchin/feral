@@ -49,6 +49,10 @@ pub use numeric::condition::{
 pub use numeric::factorize::{
     factorize_multifrontal_with_schur, LdltExport, NumericParams, ProfileReport, SchurBlock,
 };
+pub use numeric::reanalysis::{
+    AnalysisOrigin, DeclineReason, OnStaleParams, ReanalysisEvent, ReanalysisPolicy,
+    ReanalysisReport, TrialOutcome,
+};
 pub use numeric::solve::{
     solve_sparse, solve_sparse_into, solve_sparse_refined, solve_sparse_refined_auto,
     solve_sparse_refined_auto_into, solve_sparse_refined_auto_opts, solve_sparse_refined_cb,

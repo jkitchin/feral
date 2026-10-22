@@ -8099,3 +8099,31 @@ is not a change.
 **Evidence.** pounce sweep-fixtures.sh, 220 runs: identical to the
 previous rule on every line. brainpc1 74.5 s, 1 escalation; nql180
 54.9 s; brainpc2 67.2 s. Unit test Q1 in `src/numeric/solver.rs`.
+
+## 2026-10-23 — re-analysis is judged by a trial factorization of the same matrix (issue #227)
+
+**Decision.** `ReanalysisPolicy::OnStale` adopts a different symbolic
+analysis only after it factors the *current* matrix and beats the
+incumbent's factor of that matrix in actual dense-front flops by the margin
+(25 %), with the same inertia and no more floored or zeroed pivots. Predicted
+flops never rank candidates. They only decide whether a fresh analysis is
+worth a trial. There is no rollback. Displaced and probed value-dependent
+analyses are kept in a 2-slot store and become candidates at the next event.
+`Never` stays the default.
+
+**Why.** Delays, not fill, decide the cost of a value-dependent analysis.
+On qcqp1000-2c iter_120 the `None` analysis predicts 3.5e8 and costs
+1.0e10 actual, and it reports a different inertia on 48/165 factors. A
+`LdltCompress` analysis is only as good as the matrix it was built on
+(research note §4.4: the same matrix under analyses built on iter 0/1/2/
+5/10/30/75 needs 20k/23k/24k/34k/41k/39k/36k delays), so "fresh" is not
+"better". The review's rollback compared two different matrices and
+misfired (adopt at iter_078, roll back at iter_079 on the sequence's own
+1.66× drift).
+
+**Evidence.** `dev/research/issue-227-stale-analysis-reanalysis.md` §4.4
+and §7. Implementation replays (journal 2026-10-23-01): qcqp1000-2c
+init-first 0.751× `Never` flops, kkt-first 0.980×; qcqp1000-2nc 1.000× /
+0.546×; clnlbeam, NARX_CFy, pooling 1.000×. Inertia is identical to `Never`
+on every factor of all seven sequences. `Never` digests match main on
+every factor.

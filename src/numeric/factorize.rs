@@ -1203,6 +1203,25 @@ impl SparseFactors {
         )
     }
 
+    /// Dense-front work this factor actually did (issue #227):
+    /// `Σ_fronts F(nelim, nrow)` with `F(c, r) = Σ_{k<c} (r − k)²`,
+    /// where `nrow` includes the delayed columns the front received and
+    /// `nelim` is what it eliminated. Compare with
+    /// [`crate::symbolic::predicted_front_flops`] of the analysis it was
+    /// computed under: the ratio measures how far delayed pivots moved
+    /// work away from the analysis's prediction.
+    ///
+    /// `nelim` and `nrow` are part of the factor's bit-exact contract
+    /// (`tests/parallel_parity.rs`), so this is an exact integer,
+    /// identical across runs and thread counts. Does not count the
+    /// per-rejected-pivot search overhead. `O(n_supernodes)`.
+    pub fn actual_front_flops(&self) -> u128 {
+        self.node_factors
+            .iter()
+            .map(|nf| crate::symbolic::supernode::front_flops(nf.nelim, nf.nrow))
+            .sum()
+    }
+
     /// Total real entries used in the L factor across all supernodes.
     ///
     /// Per supernode the L block is `nrow × nelim` column-major with

@@ -17,6 +17,11 @@ use crate::numeric::factorize::{
     factorize_multifrontal_parallel_with_workspace, factorize_multifrontal_with_workspace,
     FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
 };
+use crate::numeric::reanalysis::{
+    cheaper_by_margin, cost_ratio_fires, effective, is_probe_index, pick, probes_allowed,
+    AnalysisOrigin, DeclineReason, Measure, ReanalysisEvent, ReanalysisPolicy, ReanalysisReport,
+    ReanalysisState, StoredAnalysis, TrialOutcome,
+};
 use crate::numeric::solve::{
     solve_sparse, solve_sparse_into, solve_sparse_many, solve_sparse_many_into,
     solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions,
@@ -161,6 +166,26 @@ pub struct FactorStats {
     /// it was computed with. Mirrors
     /// [`SparseFactors::max_abs_l`](crate::numeric::factorize::SparseFactors::max_abs_l).
     pub max_abs_l: f64,
+    /// Dense-front work the cached analysis predicts,
+    /// [`crate::symbolic::predicted_front_flops`]: `Σ F(ncol, nrow)` over
+    /// supernodes with `F(c, r) = Σ_{k<c} (r − k)²`. Exact integer.
+    /// Issue #227.
+    pub predicted_flops: u128,
+    /// Dense-front work this factor actually did,
+    /// [`SparseFactors::actual_front_flops`]: the same sum over the
+    /// stored fronts' `(nelim, nrow)`, so delayed pivots count where they
+    /// were eliminated. `actual_flops / predicted_flops` is how stale the
+    /// analysis is for these values. Exact integer, identical across
+    /// thread counts. Issue #227.
+    pub actual_flops: u128,
+    /// `true` iff this `factor()` adopted a different symbolic analysis
+    /// under [`ReanalysisPolicy`] (issue #227). `pattern_reused` stays
+    /// `true` on such a call: the pattern was reused, the analysis was
+    /// replaced. Always `false` under the default `Never`.
+    pub reanalysed: bool,
+    /// Analyses adopted by the re-analysis policy on this pattern so far
+    /// (issue #227). Always `0` under `Never`.
+    pub reanalysis_count: u32,
 }
 
 impl FactorStats {
@@ -682,6 +707,12 @@ pub struct Solver {
     /// "symbolic phase skipped" from "symbolic phase ran but produced
     /// no data" — pinned by test `b3_symbolic_profile_report_only_on_cache_miss_factor`.
     last_symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
+    /// Issue #227: when a cached value-dependent analysis may be replaced
+    /// on the same pattern. Default [`ReanalysisPolicy::Never`].
+    reanalysis: ReanalysisPolicy,
+    /// Issue #227: per-pattern policy state (store of candidate analyses,
+    /// trial budget, latches, last report). Reset on a pattern change.
+    reanalysis_state: ReanalysisState,
 }
 
 impl Solver {
@@ -731,6 +762,8 @@ impl Solver {
             profiling_enabled: false,
             last_profiler: None,
             last_symbolic_profiler: None,
+            reanalysis: ReanalysisPolicy::Never,
+            reanalysis_state: ReanalysisState::default(),
         }
     }
 
@@ -1279,6 +1312,28 @@ impl Solver {
     /// across refactorizations with new values and costs nothing to
     /// read. See [`crate::symbolic::WorkEstimate`] for what each field
     /// means and why there is no predicted runtime.
+    /// Issue #227: let this `Solver` replace a cached value-dependent
+    /// symbolic analysis on the same pattern when a trial factorization of
+    /// the current matrix under another analysis is cheaper with the same
+    /// inertia. See [`crate::numeric::reanalysis`]. Default
+    /// [`ReanalysisPolicy::Never`], which is bit-identical to feral
+    /// without the policy.
+    pub fn with_reanalysis(mut self, policy: ReanalysisPolicy) -> Self {
+        self.reanalysis = policy;
+        self
+    }
+
+    /// The configured [`ReanalysisPolicy`] (issue #227).
+    pub fn reanalysis_policy(&self) -> &ReanalysisPolicy {
+        &self.reanalysis
+    }
+
+    /// What the re-analysis policy did on the most recent `factor()` call:
+    /// `None` when no event fired (always, under `Never`). Issue #227.
+    pub fn last_reanalysis(&self) -> Option<&ReanalysisReport> {
+        self.reanalysis_state.last_report.as_ref()
+    }
+
     pub fn work_estimate(&self) -> Option<crate::symbolic::WorkEstimate> {
         self.last_symbolic.as_ref().map(|s| s.work_estimate())
     }
@@ -1409,6 +1464,277 @@ impl Solver {
         }
     }
 
+    /// The numeric phase's pool-or-sequential dispatch (issue #154): run
+    /// the parallel driver inside `pool.install` when `use_parallel` is on
+    /// and a pool exists, otherwise the sequential driver — never the
+    /// parallel driver bare on the global rayon pool. The two drivers are
+    /// bit-exact, so this choice is scheduling only. An associated
+    /// function (not `&mut self`) so callers can pass a `symbolic`
+    /// borrowed from `self` next to `&mut self.workspace`.
+    fn dispatch_numeric(
+        use_parallel: bool,
+        pool: Option<&Arc<rayon::ThreadPool>>,
+        workspace: &mut FactorWorkspace,
+        matrix: &CscMatrix,
+        symbolic: &SymbolicFactorization,
+        params: &NumericParams,
+    ) -> Result<(SparseFactors, Inertia), FeralError> {
+        if let (true, Some(p)) = (use_parallel, pool) {
+            p.install(|| {
+                factorize_multifrontal_parallel_with_workspace(matrix, symbolic, params, workspace)
+            })
+        } else {
+            factorize_multifrontal_with_workspace(matrix, symbolic, params, workspace)
+        }
+    }
+
+    /// Issue #227: evaluate the re-analysis events on the factor just
+    /// stored and, when a candidate analysis wins its trial, swap it in.
+    ///
+    /// Called from `factor_impl` after the factor is stored, only when the
+    /// policy is not `Never`. `params` are the numeric parameters the
+    /// stored factor was computed with; every trial uses the same ones
+    /// (minus the profiler and the permute-cache hint), so a trial differs
+    /// from the incumbent only in its analysis. Trials neither recycle
+    /// output buffers nor run the #65 MC64 retry, and a trial or candidate
+    /// analysis that errors is discarded — the incumbent is never put at
+    /// risk.
+    fn reanalysis_events(
+        &mut self,
+        matrix: &CscMatrix,
+        params: &NumericParams,
+        pool: Option<&Arc<rayon::ThreadPool>>,
+        escalation: bool,
+    ) {
+        use crate::symbolic::{predicted_front_flops, OrderingPreprocess};
+        let Some((p, every)) = effective(&self.reanalysis) else {
+            return;
+        };
+        let k = self.reanalysis_state.factor_index;
+        let (inc_pred, inc, inc_value_dependent) =
+            match (&self.last_symbolic, &self.last_factors, &self.last_inertia) {
+                (Some(s), Some(f), Some(i)) => (
+                    predicted_front_flops(s),
+                    Measure {
+                        actual: f.actual_front_flops(),
+                        inertia: i.clone(),
+                        n_tiny: f.n_tiny(),
+                        n_zero: f.n_zero_pivots(),
+                    },
+                    s.resolved_preprocess == OrderingPreprocess::LdltCompress,
+                ),
+                _ => return,
+            };
+
+        // The first factor of a pattern was analysed on its own matrix:
+        // nothing is stale yet.
+        let event = if escalation {
+            Some(ReanalysisEvent::Escalation)
+        } else if k < 2 {
+            None
+        } else if let Some(ratio) = cost_ratio_fires(
+            inc.actual,
+            inc_pred,
+            p.trigger_ratio,
+            self.reanalysis_state.cost_latched,
+        ) {
+            Some(ReanalysisEvent::Cost { ratio })
+        } else if every {
+            Some(ReanalysisEvent::Always)
+        } else if is_probe_index(k, p.probe_first, p.probe_step, p.probe_last)
+            && probes_allowed(inc_pred, matrix.nnz(), p.min_flops_per_nnz_for_probes)
+        {
+            Some(ReanalysisEvent::Probe { k })
+        } else {
+            None
+        };
+        let Some(event) = event else {
+            return;
+        };
+        let is_cost = matches!(event, ReanalysisEvent::Cost { .. });
+        let mut report = ReanalysisReport {
+            event,
+            factor_index: k,
+            incumbent_predicted: inc_pred,
+            incumbent_actual: inc.actual,
+            fresh_predicted: None,
+            trials: Vec::new(),
+            declined: None,
+        };
+        // Issue #221: a rung is judged against the factor that prompted
+        // it; a different analysis in between would break that.
+        if self.ladder_start.is_some() || self.rung_before.is_some() {
+            report.declined = Some(DeclineReason::Ladder);
+            self.reanalysis_state.last_report = Some(report);
+            return;
+        }
+        if self.reanalysis_state.trials_used >= p.max_trials_per_pattern {
+            report.declined = Some(DeclineReason::CapReached);
+            self.reanalysis_state.last_report = Some(report);
+            return;
+        }
+
+        // Fresh candidate (cost and probe events): the solver's own
+        // configuration, with `LdltCompress` forced after an escalation.
+        let mut fresh: Option<StoredAnalysis> = None;
+        let mut fresh_trial = false;
+        let mut identical = false;
+        if !escalation {
+            let mut sp = self.snode_params.clone();
+            sp.symbolic_profiler = None;
+            if self.ordering_escalated {
+                sp.preprocess = OrderingPreprocess::LdltCompress;
+            }
+            if let Ok(sym) = symbolic_factorize_with_method(matrix, &sp, self.ordering.clone()) {
+                self.symbolic_call_count += 1;
+                let fp = predicted_front_flops(&sym);
+                report.fresh_predicted = Some(fp);
+                // A pattern-only analysis next to a pattern-only incumbent
+                // is the same analysis.
+                identical =
+                    sym.resolved_preprocess == OrderingPreprocess::None && !inc_value_dependent;
+                if !identical {
+                    let reference = if is_cost { inc.actual } else { inc_pred };
+                    fresh_trial = cheaper_by_margin(fp, reference, p.margin);
+                    fresh = Some(StoredAnalysis {
+                        sym,
+                        origin: AnalysisOrigin::Fresh { k },
+                        predicted: fp,
+                    });
+                }
+            }
+        }
+
+        // Candidates in trial order: the fresh analysis, then (cost and
+        // escalation events) every stored one.
+        let mut stored = std::mem::take(&mut self.reanalysis_state.stored);
+        let mut order: Vec<Option<usize>> = Vec::new();
+        if fresh_trial {
+            order.push(None);
+        }
+        if is_cost || escalation {
+            order.extend((0..stored.len()).map(Some));
+        }
+        let mut trial_params = params.clone();
+        trial_params.profiler = None;
+        trial_params.pattern_reused_hint = false;
+        let mut measures: Vec<Measure> = Vec::new();
+        let mut tried: Vec<Option<usize>> = Vec::new();
+        let mut best: Option<(usize, SparseFactors, Inertia)> = None;
+        for c in order {
+            if self.reanalysis_state.trials_used >= p.max_trials_per_pattern {
+                break;
+            }
+            let (sym, origin, predicted, from_store) = match c {
+                None => match fresh.as_mut() {
+                    Some(f) => (&mut f.sym, f.origin, f.predicted, false),
+                    None => continue,
+                },
+                Some(i) => match stored.get_mut(i) {
+                    Some(sa) => (&mut sa.sym, sa.origin, sa.predicted, true),
+                    None => continue,
+                },
+            };
+            self.reanalysis_state.trials_used += 1;
+            let out = Self::dispatch_numeric(
+                self.use_parallel,
+                pool,
+                &mut self.workspace,
+                matrix,
+                sym,
+                &trial_params,
+            );
+            // Issue #38 invariant: the one-shot MC64 cache never outlives
+            // the factor it was built for.
+            sym.cached_mc64 = None;
+            let Ok((f, i)) = out else {
+                continue;
+            };
+            let m = Measure {
+                actual: f.actual_front_flops(),
+                inertia: i.clone(),
+                n_tiny: f.n_tiny(),
+                n_zero: f.n_zero_pivots(),
+            };
+            report.trials.push(TrialOutcome {
+                origin,
+                from_store,
+                predicted,
+                actual: m.actual,
+                inertia: i.clone(),
+                n_tiny: m.n_tiny,
+                n_zero: m.n_zero,
+                adopted: false,
+            });
+            let admissible = crate::numeric::reanalysis::judge(&m, &inc, p.margin).is_ok();
+            let improves = match &best {
+                Some((b, _, _)) => m.actual < measures[*b].actual,
+                None => true,
+            };
+            measures.push(m);
+            tried.push(c);
+            if admissible && improves {
+                best = Some((measures.len() - 1, f, i));
+            }
+        }
+
+        match (pick(&measures, &inc, p.margin), best) {
+            (Ok(j), Some((b, f, i))) if j == b => {
+                let adopted = match tried[j] {
+                    None => fresh.take(),
+                    Some(si) => (si < stored.len()).then(|| stored.remove(si)),
+                };
+                if let Some(new) = adopted {
+                    report.trials[j].adopted = true;
+                    let old_origin =
+                        std::mem::replace(&mut self.reanalysis_state.incumbent_origin, new.origin);
+                    if let Some(mut old) = self.last_symbolic.replace(new.sym) {
+                        if old.resolved_preprocess == OrderingPreprocess::LdltCompress {
+                            old.cached_mc64 = None;
+                            stored.push(StoredAnalysis {
+                                sym: old,
+                                origin: old_origin,
+                                predicted: inc_pred,
+                            });
+                        }
+                    }
+                    self.last_factors = Some(f);
+                    self.last_inertia = Some(i);
+                    // Observations of the displaced analysis's factors.
+                    self.prev_max_n_delayed_in = None;
+                    self.auto_arm_latched = false;
+                    let st = &mut self.reanalysis_state;
+                    st.adoptions += 1;
+                    st.reanalysed_now = true;
+                    st.cost_latched = false;
+                }
+            }
+            (verdict, _) => {
+                report.declined = Some(match verdict {
+                    Err(Some(r)) => r,
+                    _ if identical && measures.is_empty() => DeclineReason::Identical,
+                    _ if escalation && measures.is_empty() => DeclineReason::NoCandidate,
+                    _ => DeclineReason::NotCheaper,
+                });
+                if is_cost {
+                    self.reanalysis_state.cost_latched = true;
+                }
+            }
+        }
+        // A value-dependent fresh analysis that was not adopted is kept as
+        // a candidate for a later event.
+        if let Some(f) = fresh {
+            if f.sym.resolved_preprocess == OrderingPreprocess::LdltCompress {
+                stored.push(f);
+            }
+        }
+        while stored.len() > p.max_stored {
+            stored.remove(0);
+        }
+        self.reanalysis_state.stored = stored;
+        self.reanalysis_state.last_report = Some(report);
+    }
+
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
         self.factor_impl(matrix, check_inertia, None)
     }
@@ -1506,6 +1832,18 @@ impl Solver {
             self.mc64_retry_not_adopted = false;
             // The race is pattern-bound: a new pattern re-races.
             self.race_result = None;
+            // Issue #227: the store, trial budget and latches are
+            // per pattern.
+            self.reanalysis_state = ReanalysisState::default();
+        }
+        // Issue #227: per-call bookkeeping (the escalation re-entry is
+        // part of its outer call). Diagnostic only; nothing numeric reads
+        // it.
+        if reentry_pattern_reused.is_none() {
+            let st = &mut self.reanalysis_state;
+            st.factor_index = st.factor_index.saturating_add(1);
+            st.reanalysed_now = false;
+            st.last_report = None;
         }
 
         // Step 2.5: the measured ordering race (issue #203). Runs at
@@ -1552,6 +1890,15 @@ impl Solver {
                 Ok(sym) => {
                     self.symbolic_call_count += 1;
                     self.last_symbolic = Some(sym);
+                    // Issue #227: where the cached analysis came from (the
+                    // escalation re-entry computes the #102 analysis).
+                    self.reanalysis_state.incumbent_origin = if reentry_pattern_reused.is_some() {
+                        AnalysisOrigin::Escalation {
+                            k: self.reanalysis_state.factor_index,
+                        }
+                    } else {
+                        AnalysisOrigin::Initial
+                    };
                     self.last_pattern_fingerprint = Some(fp);
                     // Store the exact pattern (issue #121) so a future
                     // fingerprint hit is confirmed by an exact compare, never
@@ -1767,23 +2114,14 @@ impl Solver {
         // reads `last_factors`. Memory only — the reused buffers are
         // fully re-initialized (tests/factor_output_recycling.rs).
         self.workspace.begin_recycle(self.last_factors.take());
-        let result = if let (true, Some(p)) = (self.use_parallel, pool.as_ref()) {
-            p.install(|| {
-                factorize_multifrontal_parallel_with_workspace(
-                    matrix,
-                    symbolic,
-                    &effective_params,
-                    &mut self.workspace,
-                )
-            })
-        } else {
-            factorize_multifrontal_with_workspace(
-                matrix,
-                symbolic,
-                &effective_params,
-                &mut self.workspace,
-            )
-        };
+        let result = Self::dispatch_numeric(
+            self.use_parallel,
+            pool.as_ref(),
+            &mut self.workspace,
+            matrix,
+            symbolic,
+            &effective_params,
+        );
 
         // Issue #65: inertia-guided MC64 scaling fallback. When the user
         // configured `Auto`, the resolved scaling was NOT MC64, and the
@@ -1828,23 +2166,14 @@ impl Solver {
                 }
                 // Same #154 pool-or-sequential dispatch as the initial
                 // factor above — never the parallel driver bare.
-                let retry = if let (true, Some(p)) = (self.use_parallel, pool.as_ref()) {
-                    p.install(|| {
-                        factorize_multifrontal_parallel_with_workspace(
-                            matrix,
-                            symbolic,
-                            &retry_params,
-                            &mut self.workspace,
-                        )
-                    })
-                } else {
-                    factorize_multifrontal_with_workspace(
-                        matrix,
-                        symbolic,
-                        &retry_params,
-                        &mut self.workspace,
-                    )
-                };
+                let retry = Self::dispatch_numeric(
+                    self.use_parallel,
+                    pool.as_ref(),
+                    &mut self.workspace,
+                    matrix,
+                    symbolic,
+                    &retry_params,
+                );
                 match retry {
                     Ok((rf, ri)) if ri.zero < first_zero => {
                         effective_params.scaling = ScalingStrategy::Mc64Symmetric;
@@ -2066,6 +2395,36 @@ impl Solver {
                         }
                     }
                 }
+                // Issue #227: re-analysis events on the stored factor. Under
+                // `Never` (the default) this is the only line that reads
+                // the policy, and the factor and status are untouched. On
+                // the #102 escalation re-entry (the outer call returns this
+                // call's status) the event is the escalation itself: the
+                // stored value-dependent analyses are trialled against the
+                // fresh escalated one.
+                let (partial_singular, inertia) =
+                    if matches!(self.reanalysis, ReanalysisPolicy::Never) {
+                        (partial_singular, inertia)
+                    } else {
+                        self.reanalysis_events(
+                            matrix,
+                            &effective_params,
+                            pool.as_ref(),
+                            reentry_pattern_reused.is_some(),
+                        );
+                        // An adoption replaced the stored factor; the status
+                        // follows the factor handed to the caller.
+                        match (&self.last_factors, &self.last_inertia) {
+                            (Some(f), Some(i)) => (
+                                matches!(
+                                    f.scaling_info,
+                                    crate::scaling::ScalingInfo::PartialSingular { .. }
+                                ),
+                                i.clone(),
+                            ),
+                            _ => (partial_singular, inertia),
+                        }
+                    };
                 if partial_singular {
                     FactorStatus::Singular
                 } else if let Some(expected) = check_inertia {
@@ -2721,7 +3080,9 @@ impl Solver {
         let n_cascade_break_nodes = factors.n_cascade_break_nodes();
         let n_threshold_fail_accepts = factors.n_threshold_fail_accepts();
         let max_abs_l = factors.max_abs_l();
+        let actual_flops = factors.actual_front_flops();
         let sym = self.last_symbolic.as_ref()?;
+        let predicted_flops = crate::symbolic::predicted_front_flops(sym);
         let mut n_supernodes = 0usize;
         let mut max_front_rows = 0usize;
         for sn in &sym.supernodes {
@@ -2751,6 +3112,10 @@ impl Solver {
             n_cascade_break_nodes,
             n_threshold_fail_accepts,
             max_abs_l,
+            predicted_flops,
+            actual_flops,
+            reanalysed: self.reanalysis_state.reanalysed_now,
+            reanalysis_count: self.reanalysis_state.adoptions,
         })
     }
 
@@ -5316,6 +5681,7 @@ mod tests {
             .with_partial_singular_warning(true)
             .with_sqd_mode(true)
             .with_ordering_escalation(Some(12.0))
+            .with_reanalysis(ReanalysisPolicy::Always)
             .with_ordering_race(vec![OrderingMethod::Amd, OrderingMethod::Amf]);
         let p = s.race_probe();
 
@@ -5352,6 +5718,9 @@ mod tests {
             "a probe that inherited race_arms would recurse"
         );
         assert!(!p.profiling_enabled, "a probe must not collect profiles");
+        // A probe factors once per pattern, so re-analysis could never
+        // fire in it; it keeps the default rather than paying for state.
+        assert_eq!(p.reanalysis, ReanalysisPolicy::Never);
     }
 
     /// Issue #153: a warm, pattern-reused `factor()` recycles the previous
