@@ -161,6 +161,18 @@ pub struct FactorStats {
     /// it was computed with. Mirrors
     /// [`SparseFactors::max_abs_l`](crate::numeric::factorize::SparseFactors::max_abs_l).
     pub max_abs_l: f64,
+    /// Dense-front work the cached analysis predicts,
+    /// [`crate::symbolic::predicted_front_flops`]: `Σ F(ncol, nrow)` over
+    /// supernodes with `F(c, r) = Σ_{k<c} (r − k)²`. Exact integer.
+    /// Issue #227.
+    pub predicted_flops: u128,
+    /// Dense-front work this factor actually did,
+    /// [`SparseFactors::actual_front_flops`]: the same sum over the
+    /// stored fronts' `(nelim, nrow)`, so delayed pivots count where they
+    /// were eliminated. `actual_flops / predicted_flops` is how stale the
+    /// analysis is for these values. Exact integer, identical across
+    /// thread counts. Issue #227.
+    pub actual_flops: u128,
 }
 
 impl FactorStats {
@@ -2721,7 +2733,9 @@ impl Solver {
         let n_cascade_break_nodes = factors.n_cascade_break_nodes();
         let n_threshold_fail_accepts = factors.n_threshold_fail_accepts();
         let max_abs_l = factors.max_abs_l();
+        let actual_flops = factors.actual_front_flops();
         let sym = self.last_symbolic.as_ref()?;
+        let predicted_flops = crate::symbolic::predicted_front_flops(sym);
         let mut n_supernodes = 0usize;
         let mut max_front_rows = 0usize;
         for sn in &sym.supernodes {
@@ -2751,6 +2765,8 @@ impl Solver {
             n_cascade_break_nodes,
             n_threshold_fail_accepts,
             max_abs_l,
+            predicted_flops,
+            actual_flops,
         })
     }
 

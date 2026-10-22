@@ -20,3 +20,15 @@ produced *different matrices* on iterates 1,3,5,6 (values hash
 issue; replaced by exact integer powers of ten (pow10 by repeated
 multiplication). After that release and debug digests agree on every
 iterate and parallel == sequential. Digests hardcoded from main.
+
+* 2026-10-23 :issue-227:step0:flops:
+Step 0: `front_flops` pub(crate); `symbolic::predicted_front_flops`,
+`SparseFactors::actual_front_flops`, `FactorStats.{predicted,actual}_flops`
+(u128). Hand-sum oracles (tests/issue227_flops.rs): tridiag(5) at nemin 1
+has fundamental supernodes (1,2)×3 + (2,2) — not one per column as the
+plan guessed — so 3·4 + 5 = 17 (same as 4·4+1, no fill). Arrow-apex
+(delayed_pivoting.rs fixture): predicted F(1,2)+F(3,3) = 18, actual
+F(0,2)+F(4,4) = 30 (the delayed column moves work into the root).
+61 parity matrices: counters identical par/seq/run-to-run; some
+matrices delay (actual ≠ predicted). cargo test --release: all green;
+golden digests unchanged.
