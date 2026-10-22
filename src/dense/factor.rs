@@ -1,4 +1,4 @@
-use crate::dense::rook::{rook_rescue, RookKind};
+use crate::dense::rook::{rook_rescue_with_hints, sym_row_argmax, RookKind, RowMaxHint};
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 
@@ -3528,6 +3528,15 @@ fn apply_blocked_schur(
         return;
     }
 
+    // Issue #224 Step 2: a panel that bails after one or two pivots
+    // leaves a rank-1/2 flush over the whole trailing block; packing it
+    // into tiles buys nothing at that rank, so apply it directly with
+    // the packed kernel's exact per-element sequence.
+    if n_elim <= 2 && packed_schur_enabled() {
+        apply_small_flush_direct(a, nrow, k, n_elim, j_start, d_panel, subdiag, fma);
+        return;
+    }
+
     // Issue #99 Phase B-2: the packed trailing update
     // (`apply_schur_panel_range_packed`) handles a **mixed** 1×1 / 2×2 /
     // zero-d pivot stream byte-exactly — each element walks the pivot
@@ -3638,6 +3647,88 @@ fn apply_blocked_schur(
                 }
             }
             q += 1;
+        }
+    }
+}
+
+/// Issue #224 Step 2: deferred-Schur flush of a rank-1 or rank-2 panel
+/// (`n_elim <= 2`) as a direct column loop, no packing or tile dispatch.
+///
+/// Bit-exactness contract: identical, element by element, to the packed
+/// tile walk (`apply_schur_panel_range_packed_impl` and
+/// `schur_kernel::packed_schur_tiles_*`), whose per-element result
+/// depends only on the order of operations applied to that element:
+/// - 1×1 at `q` with `d_q != 0` (the packed walk skips `d_q == 0` and
+///   nothing else): `b = L[j,q]·d_q`, then `a[i,j] = a[i,j] − b·L[i,q]`
+///   (nofma), or one fused `(−b)·L[i,q] + a[i,j]` (fma);
+/// - 2×2 at `(0, 1)`: `b0 = d11·L[j,0] + d21·L[j,1]`,
+///   `b1 = d21·L[j,0] + d22·L[j,1]`, then
+///   `a[i,j] = a[i,j] − (b0·L[i,0] + b1·L[i,1])` (nofma), or two chained
+///   fused ops, `b0` first (fma);
+/// - pivots applied in ascending `q`; every row `i ≥ j` of every column
+///   `j ∈ [j_start, nrow)`.
+///
+/// Pinned by `tests/blocked_ldlt.rs::test_issue224_small_bail_flush_parity`
+/// and the golden digests.
+#[allow(clippy::too_many_arguments)]
+fn apply_small_flush_direct(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    j_start: usize,
+    d_panel: &[f64],
+    subdiag: &[f64],
+    fma: bool,
+) {
+    debug_assert!((1..=2).contains(&n_elim) && k + n_elim <= j_start);
+    // Pivot columns `k, k+1` precede `j_start` in column-major order.
+    let (head, tail) = a.split_at_mut(j_start * nrow);
+    let col0 = &head[k * nrow..(k + 1) * nrow];
+    let col1 = if n_elim == 2 {
+        &head[(k + 1) * nrow..(k + 2) * nrow]
+    } else {
+        &head[0..0]
+    };
+    let pair = n_elim == 2 && subdiag[k] != 0.0;
+    for j in j_start..nrow {
+        let off = (j - j_start) * nrow;
+        let dst = &mut tail[off + j..off + nrow];
+        if pair {
+            let (d11, d22, d21) = (d_panel[0], d_panel[1], subdiag[k]);
+            let (l0, l1) = (col0[j], col1[j]);
+            let b0 = d11 * l0 + d21 * l1;
+            let b1 = d21 * l0 + d22 * l1;
+            let (s0, s1) = (&col0[j..nrow], &col1[j..nrow]);
+            if fma {
+                let (n0, n1) = (-b0, -b1);
+                for ((x, &p), &q) in dst.iter_mut().zip(s0).zip(s1) {
+                    *x = n1.mul_add(q, n0.mul_add(p, *x));
+                }
+            } else {
+                for ((x, &p), &q) in dst.iter_mut().zip(s0).zip(s1) {
+                    *x -= b0 * p + b1 * q;
+                }
+            }
+        } else {
+            for (q, col) in [col0, col1].into_iter().take(n_elim).enumerate() {
+                let dq = d_panel[q];
+                if dq == 0.0 {
+                    continue;
+                }
+                let b = col[j] * dq;
+                let src = &col[j..nrow];
+                if fma {
+                    let nb = -b;
+                    for (x, &p) in dst.iter_mut().zip(src) {
+                        *x = nb.mul_add(p, *x);
+                    }
+                } else {
+                    for (x, &p) in dst.iter_mut().zip(src) {
+                        *x -= b * p;
+                    }
+                }
+            }
         }
     }
 }
@@ -4459,6 +4550,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &[],
         )?;
         return finish_1x1_outcome(
             outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma, None,
@@ -4503,6 +4595,7 @@ fn scalar_pivot_step(
                     n_rook_rescues,
                     n_tiny,
                     n_threshold_fail_accepts,
+                    &[],
                 )?;
                 return finish_1x1_outcome(
                     outcome,
@@ -4576,6 +4669,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &[],
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4596,7 +4690,13 @@ fn scalar_pivot_step(
     }
 
     // gamma_r: max off-diagonal in symmetric row r
-    let gamma_r = symmetric_row_offdiag_max(a, nrow, k, r);
+    // Same max as `symmetric_row_offdiag_max` (a max over the same set is
+    // order-independent); the argmax, in rook's scan order, lets the rook
+    // walk below start from these two scans instead of repeating them
+    // (issue #224 Step 1).
+    let (gamma_r, r_argmax) = sym_row_argmax(a, nrow, k, r);
+    // Valid only while `a` is untouched since the scans above.
+    let bk_hints: [RowMaxHint; 2] = [(k, gamma0, r), (r, gamma_r, r_argmax)];
     let arr = a[r * nrow + r].abs();
 
     // Can we swap r into pivot position? Only if r < ncol (fully summed)
@@ -4622,6 +4722,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &[],
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4660,6 +4761,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &bk_hints,
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4842,6 +4944,7 @@ fn scalar_pivot_step(
                 n_rook_rescues,
                 n_tiny,
                 n_threshold_fail_accepts,
+                &[],
             )?;
             return finish_1x1_outcome(
                 outcome,
@@ -4894,6 +4997,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &bk_hints,
         )?;
         finish_1x1_outcome(
             outcome,
@@ -5134,6 +5238,9 @@ fn try_reject_1x1_with_rook_rescue(
     n_rook_rescues: &mut usize,
     n_tiny: &mut usize,
     n_threshold_fail_accepts: &mut usize,
+    // Issue #224: row maxima the caller scanned on this unmodified front
+    // (see `rook_rescue_with_hints`); empty when `a` changed since.
+    rook_hints: &[RowMaxHint],
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
     let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
@@ -5159,7 +5266,7 @@ fn try_reject_1x1_with_rook_rescue(
 
     // Threshold failed — try rook rescue before delay/force-accept.
     let rescued = if allow_rook {
-        rook_rescue(a, nrow, ncol, k, params)
+        rook_rescue_with_hints(a, nrow, ncol, k, params, rook_hints)
     } else {
         None
     };
@@ -6595,6 +6702,82 @@ mod row_offdiag_tests {
     /// equal that value; if (r, k) were excluded the window would be empty
     /// and the result 0.0. Oracle: LAPACK dsytf2 ROWMAX semantics — A(r, k)
     /// is part of the row-r off-diagonal max.
+    /// Issue #224 Step 1: `scalar_pivot_step` now takes `gamma_r` from
+    /// `rook::sym_row_argmax` (to seed the rook walk) instead of
+    /// `symmetric_row_offdiag_max`. The two scan the same entries in a
+    /// different order; the max of a set is order-independent, so the
+    /// values must agree bit-for-bit — including exact ties, signed zeros,
+    /// an inf and a NaN (skipped by `>` in either order). Also pins that row
+    /// `k`'s `sym_row_argmax` equals BK's `gamma0` scan (value and argmax)
+    /// whenever `gamma0 > 0`, which is what the `(k, gamma0, r)` hint
+    /// relies on.
+    #[test]
+    fn rook_row_argmax_matches_bk_row_scans() {
+        let mut x: u64 = 0x0224_0224_0224_0001;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for case in 0..300 {
+            let n = 2 + (next() * 70.0) as usize;
+            let mut a = vec![0.0f64; n * n];
+            for j in 0..n {
+                for i in j..n {
+                    let t = next();
+                    a[j * n + i] = if t < 0.3 {
+                        0.0
+                    } else if t < 0.35 {
+                        -0.0
+                    } else if t < 0.6 {
+                        if next() < 0.5 {
+                            -3.0
+                        } else {
+                            3.0
+                        }
+                    } else {
+                        (next() - 0.5) * 8.0
+                    };
+                }
+            }
+            if case % 7 == 0 {
+                a[n * n - 1 - n] = f64::INFINITY;
+            }
+            if case % 11 == 0 {
+                a[n / 2] = f64::NAN;
+            }
+            let ncol = 1 + (next() * n as f64) as usize % n;
+            for k in 0..n.min(ncol) {
+                for r in (k + 1)..n {
+                    let old = symmetric_row_offdiag_max(&a, n, k, r);
+                    let (new, _) = sym_row_argmax(&a, n, k, r);
+                    assert_eq!(old.to_bits(), new.to_bits(), "case {case} k {k} r {r}");
+                }
+                // BK's gamma0 scan, as written in `scalar_pivot_step`.
+                let (mut g0, mut r0) = (0.0f64, k + 1);
+                for i in (k + 1)..ncol {
+                    let v = a[k * n + i].abs();
+                    if v > g0 {
+                        g0 = v;
+                        r0 = i;
+                    }
+                }
+                for i in ncol.max(k + 1)..n {
+                    let v = a[k * n + i].abs();
+                    if v > g0 {
+                        g0 = v;
+                        r0 = i;
+                    }
+                }
+                if g0 > 0.0 {
+                    let (gk, rk) = sym_row_argmax(&a, n, k, k);
+                    assert_eq!((g0.to_bits(), r0), (gk.to_bits(), rk), "case {case} k {k}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn row_offdiag_max_includes_position_r_k() {
         let n = 4;

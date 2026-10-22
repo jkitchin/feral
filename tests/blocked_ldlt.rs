@@ -861,3 +861,56 @@ fn test_d2_panel_inline_2x2_static_pivot_floor_parity() {
 
     assert_frontals_byte_identical(&scalar, &blocked, "d2_static_pivot_floor");
 }
+
+/// Issue #224 Step 2 — blocked/scalar parity on fronts whose panels bail
+/// after 0, 1 or 2 pivots, so the deferred-Schur flush runs at rank 0..2
+/// over the whole trailing block. "Trap" columns (diagonal 1e-14 against
+/// O(1) off-diagonals) fail the `u = 0.01` threshold and send the panel to
+/// the scalar path; spacing them 1, 2 or 3 apart fixes how many pivots the
+/// panel commits before each bail. A leading antidiagonal pair puts a 2×2
+/// pivot into the flushed panel. Oracle: the scalar `factor_frontal`
+/// (every pivot applied eagerly), byte-for-byte, for `may_delay` on/off
+/// and the FMA rounding contract on/off.
+#[test]
+fn test_issue224_small_bail_flush_parity() {
+    for &fma in &[false, true] {
+        let params = BunchKaufmanParams {
+            fma,
+            ..default_params()
+        };
+        for &n in &[70usize, 100, 160] {
+            for &spacing in &[1usize, 2, 3] {
+                for &lead_2x2 in &[false, true] {
+                    let mut state = 0x0224_5EED ^ ((n * 31 + spacing * 7) as u64);
+                    let mut data = vec![0.0f64; n * n];
+                    for j in 0..n {
+                        for i in (j + 1)..n {
+                            data[j * n + i] = rng_scalar(&mut state, i * n + j);
+                        }
+                        data[j * n + j] = if j % spacing == spacing - 1 {
+                            1e-14
+                        } else {
+                            (n as f64) * rng_scalar(&mut state, j).signum()
+                        };
+                    }
+                    if lead_2x2 {
+                        data[0] = 0.0;
+                        data[n + 1] = 0.0;
+                        data[1] = 4.0 * n as f64;
+                    }
+                    let mat = SymmetricMatrix { n, data };
+                    for &may_delay in &[true, false] {
+                        let tag = format!(
+                            "issue224 fma={fma} n={n} spacing={spacing} 2x2={lead_2x2} \
+                             may_delay={may_delay}"
+                        );
+                        let scalar = factor_frontal(&mat, n, may_delay, &params).unwrap();
+                        let blocked = factor_frontal_blocked(&mat, n, may_delay, &params).unwrap();
+                        assert_frontals_byte_identical(&scalar, &blocked, &tag);
+                        assert!(scalar.nelim > 0, "{tag}: nothing eliminated");
+                    }
+                }
+            }
+        }
+    }
+}

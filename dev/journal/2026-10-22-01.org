@@ -1,0 +1,174 @@
+#+TITLE: Journal 2026-10-22 session 01 — #224 post-#221 recovery
+#+STARTUP: showall
+
+* 2026-10-22 :issue-224:setup:
+Branch perf/224-post-221-recovery from main f3b32e7 (= origin/main).
+First commit a2901f8 carries only the research note and plan. Executing
+dev/plans/issue-224-recovery.md in order (Step 0 → 1 → 2 → 3, Step 4
+only if 0b says dispatch). Scratch root $I =
+/private/tmp/claude-501/-Users-jkitchin-projects-feral/a1458847-2377-4832-a0c1-096910fb944e/scratchpad/i224.
+
+* 2026-10-22 :issue-224:step0a:oracle:brainpc:eigvalsh:
+Scaled Sylvester oracle ($I/res/eig_scaled.txt, eig224s.py: D·A·D with
+D = 1/sqrt(row inf-norm), two sweeps; same inertia as A) on the f018
+dumps at the split solves:
+- brainpc1 i41/s1: neg 6902, band 0 (tol 8.4e-11), smallest |w|
+  5.7e-10, 7.6e-9. Decisive: 6902. feral 0.21 counts 6902 on all seeds;
+  0.18 harness 6902 but 6903 in pounce v0.12's own run — the 6903 that
+  0.18 reported in pounce is wrong.
+- brainpc0 i95/s1: neg(strict) 6901 = neg(<-tol) 6901, band 2
+  (|w| 2.4e-10, 2.7e-10 vs tol 3.0e-10, both positive). The count 6901
+  agrees with 0.21 (6901 all seeds); 0.18's 6902 (pounce run, seeds 1/8)
+  disagrees with the oracle's strict count. The two band eigenvalues
+  sit at the scaled-eps level, so the matrix is relatively singular to
+  working precision and also falls under the singular exemption, but
+  the plan's stop condition (oracle says 6902) is NOT met.
+Verdict: no 0.21 defect at either split; 0.21's counts are the oracle's.
+
+* 2026-10-22 :issue-224:step0b:pounce:integration:symbolic-cache:ldlt-compress:
+Question: why pounce's qcqp1000-2c LinearSystemFactorization (100.5 s,
+163 it) is 1.8x the harness's 56.3 s on the same 164 dumped KKTs.
+Measurements (sequential, crates.io feral 0.21.0, same machine):
+- harness --reuse --serial on the 164 dumps: factor 75.9 s (parallel
+  56.3 s). So feral's own parallelism gives 1.35x here; serial is NOT
+  ~100 s, so it is not a dispatch/pool problem (plan Step 4 is moot).
+- pounce 0.13 (9958a24e) --json-output: linear_solver.total_factor_secs
+  100.81 s over n_factors 165 (n_pattern_changes 1), wall
+  LinearSystemFactorization 105.5 s, total_delayed_cols 2 947 819,
+  total_n_tiny 30 379, last_nnz_l 2 899 772. The harness on the same
+  matrices: Σdelays 1 606 093, Σtiny 39 386, iter_163 nnz_l 1 969 680.
+  pounce times only `self.solver.factor(matrix, None)` (pounce-feral
+  lib.rs:1319), so the 100.8 s IS feral's factor — not timer scope.
+  Same iteration log as the dump run (itdiff: identical over 164 lines).
+- The 165th factor is the least-squares multiplier init solve before
+  iter 0 (Ipopt LeastSquareMults: W = 0, D_x = D_s = 1, D_c = D_d = 0),
+  which is not dumped. It is the first matrix the Solver sees, so its
+  symbolic (Auto preprocess -> LdltCompress, whose MC64 matching is
+  value-dependent) is cached and reused for all 164 IPM KKTs.
+- Reconstructed that init matrix from iter_000's dump (W triplets -> 0,
+  x/s diagonals -> 1, c/d diagonals -> 0) and prepended it:
+  harness factor 98.98 s, Σdelays 2 948 051, Σtiny 30 378, iter_163
+  nnz_l 2 899 772, del 16 628 — matches pounce's summary to the digit on
+  nnz_l/last delays and within 0.01 % on totals. Reproduced.
+- Same sequence with `Solver::invalidate_symbolic_cache()` after the
+  init factor (harness --inval1): factor 56.39 s, Σdelays 1 606 314,
+  inertia (6007,5107,0) on 165/165 in both runs.
+Conclusion: the 44 s "integration gap" is the symbolic analysis being
+taken on the LS-multiplier init matrix, a pounce-side call-order effect
+with an existing feral API remedy (re-analyse once after the init
+solve, or analyse on the first IPM KKT). Not a feral kernel cost and
+not thread dispatch. No pounce source modified. Draft comment for the
+pounce side (#224 thread / pounce issue):
+
+  pounce's qcqp1000-2c LinearSystemFactorization gap (100.8 s in
+  `total_factor_secs` vs 56.3 s for the same 164 KKTs in a fixed-matrix
+  harness) is the symbolic analysis, not feral's kernel or the timer.
+  The first `factor()` pounce issues is the least-squares multiplier
+  init system (W = 0, D_x = D_s = I). feral caches the symbolic per
+  pattern, and its default `OrderingPreprocess::Auto` picks
+  `LdltCompress`, whose MC64 matching depends on the values; every
+  later IPM KKT reuses the ordering chosen for that init matrix.
+  Reproduction with crates.io feral 0.21.0: prepending the
+  reconstructed init matrix to the 164 dumps gives 98.98 s, Σdelayed
+  2 948 051, last nnz_l 2 899 772 (pounce: 100.8 s, 2 947 819,
+  2 899 772); calling `Solver::invalidate_symbolic_cache()` once after
+  the init factor gives 56.39 s, Σdelayed 1 606 314, inertia
+  (6007,5107,0) on all 165 either way. Suggested pounce-side change:
+  invalidate the symbolic once after the multiplier-init solve (or skip
+  feral for it). The factors differ from what pounce computes today, so
+  the trajectory may move at round-off level.
+
+* 2026-10-22 :issue-224:step1:rook:perf:bit-parity:
+Profile first (macOS `sample`, ab224 harness against local feral,
+--serial, iter_000 then iter_120 x40): packed_schur_tiles_nofma 5054
+samples, rook_rescue 2459 (~22 % of the process), solve 891,
+axpy_minus 777, scalar_pivot_step 548. rook_rescue runs on every
+threshold-failing 1×1 (the last-resort branch where BK's argmax r is a
+ghost row and k is uncoupled from k+1), including the ~20k per matrix
+that then delay; the walk oscillates between two rows and rescanned
+them up to 9 times, plus repeated BK's own row-k and row-r scans.
+Change: (1) per-call RowMaxMemo in rook_rescue (exact: a is read-only,
+range [k,nrow) fixed); (2) scalar_pivot_step takes gamma_r from
+rook::sym_row_argmax (same max: order-independent over the same set)
+and seeds the walk with (k, gamma0, r) and (r, gamma_r, argmax) at the
+two call sites where a is untouched since the scans (LAPACK-extension
+1×1 and last-resort 1×1). A third idea — memoising the failed 2×2 gate
+pair — measured no gain (iter_120 0.477 → 0.483 s) and was dropped.
+Oracles: new unit tests rook_rescue_matches_uncached_walk (frozen copy
+of the old walk; 200 random fronts × 4 u × every k, plain and hinted;
+>100 each of 1×1/2×2/None) and rook_row_argmax_matches_bk_row_scans
+(bit-equal max incl. ±0/inf/NaN; row-k argmax = BK gamma0 scan).
+Harness A/B (iter_000 sets the symbolic, then 5 reps; median t_fac):
+| iter | 0.21.0 | memo only | memo + hints |
+| 083 | 0.5946 | 0.4791 | 0.4461 (-25 %) |
+| 120 | 0.5966 | 0.4768 | 0.4415 (-26 %) |
+| 135 | 0.6025 | 0.4929 | 0.4540 (-25 %) |
+| 000 | 0.0763 | 0.0764 | 0.0777 (noise; no rook) |
+Full 164-KKT sequence (--reuse): factor 56.32 → 44.74 s (-20.6 %);
+every non-timing field identical on 164/164 (inertia, nnz_l, tiny,
+del_sum, n2x2, rook, residual, tfa, cb, maxL). brainpc0 i95/s1: 0.0135
+→ 0.0137 s, identical fields (rook 7 — nothing to gain there).
+cargo test --release: 994 passed, 0 failed (blocked_ldlt 22,
+golden_bits 3, issue_221_forced_front_parity 5). Accept (≥ 5 %).
+
+* 2026-10-22 :issue-224:step2:schur:flush:perf:bit-parity:
+Measured first with temporary (uncommitted) per-bucket flush timers,
+serial, iter_000 then iter_120: bails with n_elim=0: 20 060 (no work);
+n_elim=1: 150 flushes, 0.063 s; n_elim=2: 26, 0.007 s; n_elim>=3: 165,
+0.393 s; full panels 50, 0.023 s; dense total 0.758 s. Expected a
+rank-1 flush to be memory-bound either way, so predicted < 3 %; wrong —
+the direct loop took the n_elim=1 bucket 0.063 → 0.016 s and n_elim=2
+0.007 → 0.003 s (packing + tile setup dominate at rank 1-2).
+Change: apply_blocked_schur routes n_elim <= 2 (packed path enabled) to
+apply_small_flush_direct, a column loop with the packed tile walk's
+exact per-element sequence (skip only d_q == 0, b = L[j,q]·d_q, x - b·L
+or fused (-b)·L + x; 2×2: x - (b0·L0 + b1·L1) or two chained fused
+ops). Strided (FERAL_PACKED_SCHUR=0) path untouched.
+Test first: tests/blocked_ldlt.rs test_issue224_small_bail_flush_parity
+(trap columns spaced 1/2/3, leading 2×2, n 70/100/160, may_delay on/off,
+fma on/off) vs scalar factor_frontal byte-for-byte; passed before the
+change and after. Temporary counters showed it drives 724 rank-1 and
+792 rank-2 flushes.
+Harness A/B (median of 5, after Step 1):
+| iter | Step 1 | Step 1+2 |
+| 083 | 0.4461 | 0.4001 (-10.3 %; -11.3 % in the instrumented build) |
+| 120 | 0.4415 | 0.3918 (-11.3 %) |
+| 135 | 0.4540 | 0.4030 (-11.2 %) |
+| 000 | 0.0777 | 0.0707 (-9 %, not a regression) |
+Full 164-KKT sequence: 44.74 → 38.74 s (0.21.0: 56.32 s, -31 % for
+Steps 1+2), non-timing fields identical on 164/164.
+cargo test --release 995 passed, 0 failed. Accept (≥ 10 % on the hard
+matrices). Follow-up not in the plan: the n_elim >= 3 bail bucket is
+0.39 s of 0.71 s serial dense time on iter_120; whether a direct loop
+pays at rank 3-4 is unmeasured.
+
+* 2026-10-22 :issue-224:step3:refinement:measurement:
+Instrumented with solve_sparse_refined_with_diagnostics (harness
+AB_REFDIAG) over the 164 qcqp KKTs after Steps 1+2. Step histogram:
+0 steps 45, 1 step 79, 2: 3, 5: 2, 7: 3, 9: 1, 10 (cap): 31. The 31
+capped solves: 310/310 steps strictly improve the residual; final/initial
+relative residual 0.06-0.89 (iter_120: 7.6e-13 → 3.7e-13 at ~7 %/step,
+target eps·sqrt(n) ≈ 2.3e-14 never reached). tiny>0 matrices: 77, 3.40 s
+of 3.71 s t_sol, mean 4.7 steps, 0 non-improving steps. tiny=0: 87,
+0.31 s. Verdict per the plan's kill rule: steps are productive (slow
+contraction, not stall); an earlier exit would raise the returned
+backward error, which the oracle forbids. No change.
+
+* 2026-10-22 :issue-224:acceptance:corpus:e2e:
+- kkt-pounce corpus (diag_221_rook_cost FERAL_221_COMPACT, 370 .mtx):
+  0.21.0 (worktree at f3b32e7) vs HEAD — every non-timing field
+  (inertia, nnz_l, tiny, res, tfa, cb) identical on 370/370; total
+  59.18 s → 58.68 s (laptime 16.11 → 15.77, corkscrw 26.89 → 27.00,
+  clnlbeam 12.79 → 12.59).
+- column25 guard: fixtures absent on this machine (tests SKIP), not run.
+- Fixed-matrix: 164/164 inertia identical, factor total 38.74 s (≤ 50 s).
+- End-to-end, pounce 9958a24e cloned to scratch with [patch.crates-io]
+  feral = this tree (pounce tree itself untouched), sequential, 300 s:
+  qcqp1000-2c 163 it, iteration log identical to 0.21.0 (itdiff 164/164),
+  LinearSystemFactorization 105.5 → 68.9 s, total_factor_secs 100.8 →
+  64.4 s, Σdelayed/Σtiny/last nnz_l identical. brainpc1 1073 it,
+  brainpc0 2117 it, logs identical to 0.21.0 (1179 / 2264 lines), LSF
+  3.63 → 3.43 s and 11.86 → 11.60 s.
+- bench: same 2 synthetic fixtures, identical numbers to 2026-10-19.
+- dev/context.md NOT regenerated: the working tree carries the user's
+  uncommitted edits to it and the task forbids touching them.

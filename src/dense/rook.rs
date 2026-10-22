@@ -165,7 +165,7 @@ fn sym_elem(a: &[f64], nrow: usize, i: usize, j: usize) -> f64 {
 /// Maximum absolute off-diagonal in symmetric row `r`, scanning
 /// indices `i ∈ [k, nrow)` with `i != r`. Returns `(max_val, argmax)`.
 /// If the row is all-zero off-diagonal, returns `(0.0, r)`.
-fn sym_row_argmax(a: &[f64], nrow: usize, k: usize, r: usize) -> (f64, usize) {
+pub(crate) fn sym_row_argmax(a: &[f64], nrow: usize, k: usize, r: usize) -> (f64, usize) {
     let mut max_val = 0.0f64;
     let mut max_idx = r;
     for i in k..r {
@@ -249,6 +249,65 @@ pub(crate) fn passes_2x2_gates(
     (d22.abs() * rmax + amax * tmax) * u <= absdet && (d11.abs() * tmax + amax * rmax) * u <= absdet
 }
 
+/// A row maximum the caller already computed on the unchanged front:
+/// `(row, max, argmax)` exactly as [`sym_row_argmax`] returns it for that
+/// row and the same `k`.
+pub(crate) type RowMaxHint = (usize, f64, usize);
+
+/// Most hints a caller passes (`scalar_pivot_step` hands over row `k` and
+/// BK's argmax row `r`).
+const MAX_ROW_HINTS: usize = 2;
+
+/// Per-call memo of symmetric row maxima for one `rook_rescue` search.
+///
+/// Issue #224 Step 1: the walk often oscillates between two rows (`r`'s
+/// argmax is `s` and `s`'s is `r`), and each iteration used to rescan the
+/// full symmetric row, so a search that ends in a delay did up to
+/// `MAX_ROOK_ITER + 1` scans of length `nrow` over two distinct rows. `a`
+/// is read-only for the whole search and the scan range `[k, nrow)` is
+/// fixed, so a row's `(max, argmax)` is a pure function of the row index
+/// within one call: returning the remembered pair is exactly what the
+/// rescan would compute (max and argmax involve no rounding). Capacity
+/// covers every scan a search can make plus the caller's hints, so
+/// nothing is ever evicted.
+struct RowMaxMemo {
+    rows: [usize; MAX_ROOK_ITER + 1 + MAX_ROW_HINTS],
+    vals: [(f64, usize); MAX_ROOK_ITER + 1 + MAX_ROW_HINTS],
+    len: usize,
+}
+
+impl RowMaxMemo {
+    fn new(hints: &[RowMaxHint]) -> Self {
+        let mut m = RowMaxMemo {
+            rows: [0; MAX_ROOK_ITER + 1 + MAX_ROW_HINTS],
+            vals: [(0.0, 0); MAX_ROOK_ITER + 1 + MAX_ROW_HINTS],
+            len: 0,
+        };
+        for &(row, gamma, arg) in hints.iter().take(MAX_ROW_HINTS) {
+            m.rows[m.len] = row;
+            m.vals[m.len] = (gamma, arg);
+            m.len += 1;
+        }
+        m
+    }
+
+    #[inline]
+    fn row_argmax(&mut self, a: &[f64], nrow: usize, k: usize, r: usize) -> (f64, usize) {
+        for idx in 0..self.len {
+            if self.rows[idx] == r {
+                return self.vals[idx];
+            }
+        }
+        let v = sym_row_argmax(a, nrow, k, r);
+        if self.len < self.rows.len() {
+            self.rows[self.len] = r;
+            self.vals[self.len] = v;
+            self.len += 1;
+        }
+        v
+    }
+}
+
 /// Rook-pivoting rescue search over the trailing submatrix starting
 /// at pivot `k`. Reads `a` in column-major lower-triangle layout;
 /// `nrow` is the full frontal height and `ncol` the count of fully-
@@ -268,6 +327,22 @@ pub(crate) fn rook_rescue(
     k: usize,
     params: &BunchKaufmanParams,
 ) -> Option<RookPivot> {
+    rook_rescue_with_hints(a, nrow, ncol, k, params, &[])
+}
+
+/// [`rook_rescue`] seeded with row maxima the caller already scanned on the
+/// same, unmodified `a` and the same `k` (issue #224 Step 1). Each hint
+/// must equal what [`sym_row_argmax`] returns for its row — including the
+/// argmax tie-break — or the walk may diverge; at most `MAX_ROW_HINTS` are
+/// used.
+pub(crate) fn rook_rescue_with_hints(
+    a: &[f64],
+    nrow: usize,
+    ncol: usize,
+    k: usize,
+    params: &BunchKaufmanParams,
+    hints: &[RowMaxHint],
+) -> Option<RookPivot> {
     let u = params.pivot_threshold;
     if u <= 0.0 {
         return None;
@@ -276,9 +351,13 @@ pub(crate) fn rook_rescue(
         return None;
     }
 
+    // Row maxima are memoised for the duration of this search (issue
+    // #224); see `RowMaxMemo` for why this is exact.
+    let mut memo = RowMaxMemo::new(hints);
+
     // Initialize anchor at r = k.
     let mut r = k;
-    let (mut gamma_r, mut s) = sym_row_argmax(a, nrow, k, r);
+    let (mut gamma_r, mut s) = memo.row_argmax(a, nrow, k, r);
     if gamma_r == 0.0 {
         return None;
     }
@@ -293,7 +372,7 @@ pub(crate) fn rook_rescue(
         }
 
         // Step 2: compute row-max for s.
-        let (gamma_s, t) = sym_row_argmax(a, nrow, k, s);
+        let (gamma_s, t) = memo.row_argmax(a, nrow, k, s);
         if gamma_s == 0.0 {
             return None;
         }
@@ -334,6 +413,126 @@ mod tests {
             pivot_threshold: u,
             ..BunchKaufmanParams::default()
         }
+    }
+
+    /// Frozen copy of the pre-#224 `rook_rescue` walk (every row-max is
+    /// rescanned). The oracle for `rook_rescue_matches_uncached_walk`: the
+    /// row-max cache must reproduce this function's result exactly, since
+    /// a max/argmax over unchanged data is exact arithmetic.
+    fn rook_rescue_reference(
+        a: &[f64],
+        nrow: usize,
+        ncol: usize,
+        k: usize,
+        params: &BunchKaufmanParams,
+    ) -> Option<RookPivot> {
+        let u = params.pivot_threshold;
+        if u <= 0.0 || k >= ncol {
+            return None;
+        }
+        let mut r = k;
+        let (mut gamma_r, mut s) = sym_row_argmax(a, nrow, k, r);
+        if gamma_r == 0.0 {
+            return None;
+        }
+        for _ in 0..MAX_ROOK_ITER {
+            if r < ncol && a[r * nrow + r].abs() >= u * gamma_r {
+                return Some(RookPivot::single(k, r));
+            }
+            let (gamma_s, t) = sym_row_argmax(a, nrow, k, s);
+            if gamma_s == 0.0 {
+                return None;
+            }
+            if s < ncol && a[s * nrow + s].abs() >= u * gamma_s {
+                return Some(RookPivot::single(k, s));
+            }
+            if r < ncol && s < ncol && gamma_s <= gamma_r {
+                let (p, q) = if r < s { (r, s) } else { (s, r) };
+                if passes_2x2_gates(a, nrow, k, p, q, u) {
+                    return Some(RookPivot::pair(k, r, s));
+                }
+            }
+            r = s;
+            gamma_r = gamma_s;
+            s = t;
+        }
+        None
+    }
+
+    /// Issue #224 Step 1: the per-call row-max cache in `rook_rescue` must
+    /// not change any decision. 200 random symmetric fronts (sizes 8..=96,
+    /// ghost rows, tiny diagonals so the walk runs long, repeated
+    /// magnitudes so argmax ties occur) at four thresholds; every result
+    /// (kind and swaps, or `None`) must equal the uncached walk's.
+    #[test]
+    fn rook_rescue_matches_uncached_walk() {
+        let mut x: u64 = 0x2245_A11C_E000_0001;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut n_1x1, mut n_2x2, mut n_none) = (0usize, 0usize, 0usize);
+        for case in 0..200 {
+            let nrow = 8 + (next() * 89.0) as usize; // 8..=96
+            let ncol = 1 + (next() * nrow as f64) as usize % nrow; // 1..=nrow
+            let mut a = vec![0.0f64; nrow * nrow];
+            let density = 0.1 + 0.8 * next();
+            for j in 0..nrow {
+                // Tiny or zero diagonals keep the threshold failing.
+                let dj = next();
+                a[j * nrow + j] = if dj < 0.3 {
+                    0.0
+                } else if dj < 0.8 {
+                    (next() - 0.5) * 1e-6
+                } else {
+                    (next() - 0.5) * 10.0
+                };
+                for i in (j + 1)..nrow {
+                    if next() < density {
+                        // Quantised magnitudes produce exact ties.
+                        let mag = if next() < 0.3 {
+                            1.0
+                        } else {
+                            (next() * 8.0).floor() + 1.0
+                        };
+                        a[j * nrow + i] = if next() < 0.5 { -mag } else { mag };
+                    }
+                }
+            }
+            for &u in &[1e-8, 0.01, 0.1, 0.5] {
+                let params = default_params_u(u);
+                for k in 0..ncol {
+                    let want = rook_rescue_reference(&a, nrow, ncol, k, &params);
+                    let got = rook_rescue(&a, nrow, ncol, k, &params);
+                    assert_eq!(got, want, "case {case} nrow {nrow} ncol {ncol} k {k} u {u}");
+                    // Seeded the way `scalar_pivot_step` seeds it: row `k`
+                    // and its argmax row, both scanned up front.
+                    let (gk, rk) = sym_row_argmax(&a, nrow, k, k);
+                    let (gr, rr) = sym_row_argmax(&a, nrow, k, rk);
+                    let hinted = rook_rescue_with_hints(
+                        &a,
+                        nrow,
+                        ncol,
+                        k,
+                        &params,
+                        &[(k, gk, rk), (rk, gr, rr)],
+                    );
+                    assert_eq!(hinted, want, "hinted: case {case} k {k} u {u}");
+                    match want {
+                        Some(p) if p.kind == RookKind::Pivot1x1 => n_1x1 += 1,
+                        Some(_) => n_2x2 += 1,
+                        None => n_none += 1,
+                    }
+                }
+            }
+        }
+        // The sample must exercise every outcome, or it proves nothing.
+        assert!(
+            n_1x1 > 100 && n_2x2 > 100 && n_none > 100,
+            "{n_1x1} {n_2x2} {n_none}"
+        );
     }
 
     /// Test 2 matrix from `tests/rook_rescue.rs`: rook walks

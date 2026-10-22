@@ -6303,3 +6303,15 @@ An a-posteriori-pivoting (APP) blocked kernel for cheaper delays was also
 considered and set aside, not tried: it would break the blocked/scalar
 bit-parity contract (`tests/blocked_ldlt.rs`, `tests/golden_bits.rs`),
 which the maintainer chose to keep.
+
+## 2026-10-22 — #224 Step 1: memoising the failed 2×2 gate pair in the rook walk
+
+Tried on top of the per-call row-max memo (`src/dense/rook.rs`): remember
+the last `(p, q)` whose `passes_2x2_gates` failed and skip re-testing it
+when an oscillating walk proposes the same pair again. Bit-safe (the gate
+is a pure function of the pair within one search) but no gain: harness
+medians (iter_000 symbolic, 5 reps, qcqp1000-2c 0.21 trajectory) went
+iter_083 0.479 → 0.485 s, iter_120 0.477 → 0.483 s, iter_135 0.493 →
+0.493 s, i.e. noise to slightly slower. The walk reaches the 2×2 test
+less often than it rescans rows. Dropped; the shipped Step 1 is the row
+memo plus BK-scan hints. Journal: 2026-10-22-01.org.
