@@ -1,4 +1,4 @@
-use crate::dense::rook::{rook_rescue, RookKind};
+use crate::dense::rook::{rook_rescue_with_hints, sym_row_argmax, RookKind, RowMaxHint};
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 
@@ -4459,6 +4459,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &[],
         )?;
         return finish_1x1_outcome(
             outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma, None,
@@ -4503,6 +4504,7 @@ fn scalar_pivot_step(
                     n_rook_rescues,
                     n_tiny,
                     n_threshold_fail_accepts,
+                    &[],
                 )?;
                 return finish_1x1_outcome(
                     outcome,
@@ -4576,6 +4578,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &[],
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4596,7 +4599,13 @@ fn scalar_pivot_step(
     }
 
     // gamma_r: max off-diagonal in symmetric row r
-    let gamma_r = symmetric_row_offdiag_max(a, nrow, k, r);
+    // Same max as `symmetric_row_offdiag_max` (a max over the same set is
+    // order-independent); the argmax, in rook's scan order, lets the rook
+    // walk below start from these two scans instead of repeating them
+    // (issue #224 Step 1).
+    let (gamma_r, r_argmax) = sym_row_argmax(a, nrow, k, r);
+    // Valid only while `a` is untouched since the scans above.
+    let bk_hints: [RowMaxHint; 2] = [(k, gamma0, r), (r, gamma_r, r_argmax)];
     let arr = a[r * nrow + r].abs();
 
     // Can we swap r into pivot position? Only if r < ncol (fully summed)
@@ -4622,6 +4631,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &[],
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4660,6 +4670,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &bk_hints,
         )?;
         return finish_1x1_outcome(
             outcome,
@@ -4842,6 +4853,7 @@ fn scalar_pivot_step(
                 n_rook_rescues,
                 n_tiny,
                 n_threshold_fail_accepts,
+                &[],
             )?;
             return finish_1x1_outcome(
                 outcome,
@@ -4894,6 +4906,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
             n_threshold_fail_accepts,
+            &bk_hints,
         )?;
         finish_1x1_outcome(
             outcome,
@@ -5134,6 +5147,9 @@ fn try_reject_1x1_with_rook_rescue(
     n_rook_rescues: &mut usize,
     n_tiny: &mut usize,
     n_threshold_fail_accepts: &mut usize,
+    // Issue #224: row maxima the caller scanned on this unmodified front
+    // (see `rook_rescue_with_hints`); empty when `a` changed since.
+    rook_hints: &[RowMaxHint],
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
     let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
@@ -5159,7 +5175,7 @@ fn try_reject_1x1_with_rook_rescue(
 
     // Threshold failed — try rook rescue before delay/force-accept.
     let rescued = if allow_rook {
-        rook_rescue(a, nrow, ncol, k, params)
+        rook_rescue_with_hints(a, nrow, ncol, k, params, rook_hints)
     } else {
         None
     };
@@ -6595,6 +6611,82 @@ mod row_offdiag_tests {
     /// equal that value; if (r, k) were excluded the window would be empty
     /// and the result 0.0. Oracle: LAPACK dsytf2 ROWMAX semantics — A(r, k)
     /// is part of the row-r off-diagonal max.
+    /// Issue #224 Step 1: `scalar_pivot_step` now takes `gamma_r` from
+    /// `rook::sym_row_argmax` (to seed the rook walk) instead of
+    /// `symmetric_row_offdiag_max`. The two scan the same entries in a
+    /// different order; the max of a set is order-independent, so the
+    /// values must agree bit-for-bit — including exact ties, signed zeros,
+    /// an inf and a NaN (skipped by `>` in either order). Also pins that row
+    /// `k`'s `sym_row_argmax` equals BK's `gamma0` scan (value and argmax)
+    /// whenever `gamma0 > 0`, which is what the `(k, gamma0, r)` hint
+    /// relies on.
+    #[test]
+    fn rook_row_argmax_matches_bk_row_scans() {
+        let mut x: u64 = 0x0224_0224_0224_0001;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for case in 0..300 {
+            let n = 2 + (next() * 70.0) as usize;
+            let mut a = vec![0.0f64; n * n];
+            for j in 0..n {
+                for i in j..n {
+                    let t = next();
+                    a[j * n + i] = if t < 0.3 {
+                        0.0
+                    } else if t < 0.35 {
+                        -0.0
+                    } else if t < 0.6 {
+                        if next() < 0.5 {
+                            -3.0
+                        } else {
+                            3.0
+                        }
+                    } else {
+                        (next() - 0.5) * 8.0
+                    };
+                }
+            }
+            if case % 7 == 0 {
+                a[n * n - 1 - n] = f64::INFINITY;
+            }
+            if case % 11 == 0 {
+                a[n / 2] = f64::NAN;
+            }
+            let ncol = 1 + (next() * n as f64) as usize % n;
+            for k in 0..n.min(ncol) {
+                for r in (k + 1)..n {
+                    let old = symmetric_row_offdiag_max(&a, n, k, r);
+                    let (new, _) = sym_row_argmax(&a, n, k, r);
+                    assert_eq!(old.to_bits(), new.to_bits(), "case {case} k {k} r {r}");
+                }
+                // BK's gamma0 scan, as written in `scalar_pivot_step`.
+                let (mut g0, mut r0) = (0.0f64, k + 1);
+                for i in (k + 1)..ncol {
+                    let v = a[k * n + i].abs();
+                    if v > g0 {
+                        g0 = v;
+                        r0 = i;
+                    }
+                }
+                for i in ncol.max(k + 1)..n {
+                    let v = a[k * n + i].abs();
+                    if v > g0 {
+                        g0 = v;
+                        r0 = i;
+                    }
+                }
+                if g0 > 0.0 {
+                    let (gk, rk) = sym_row_argmax(&a, n, k, k);
+                    assert_eq!((g0.to_bits(), r0), (gk.to_bits(), rk), "case {case} k {k}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn row_offdiag_max_includes_position_r_k() {
         let n = 4;

@@ -77,3 +77,36 @@ pounce side (#224 thread / pounce issue):
   invalidate the symbolic once after the multiplier-init solve (or skip
   feral for it). The factors differ from what pounce computes today, so
   the trajectory may move at round-off level.
+
+* 2026-10-22 :issue-224:step1:rook:perf:bit-parity:
+Profile first (macOS `sample`, ab224 harness against local feral,
+--serial, iter_000 then iter_120 x40): packed_schur_tiles_nofma 5054
+samples, rook_rescue 2459 (~22 % of the process), solve 891,
+axpy_minus 777, scalar_pivot_step 548. rook_rescue runs on every
+threshold-failing 1×1 (the last-resort branch where BK's argmax r is a
+ghost row and k is uncoupled from k+1), including the ~20k per matrix
+that then delay; the walk oscillates between two rows and rescanned
+them up to 9 times, plus repeated BK's own row-k and row-r scans.
+Change: (1) per-call RowMaxMemo in rook_rescue (exact: a is read-only,
+range [k,nrow) fixed); (2) scalar_pivot_step takes gamma_r from
+rook::sym_row_argmax (same max: order-independent over the same set)
+and seeds the walk with (k, gamma0, r) and (r, gamma_r, argmax) at the
+two call sites where a is untouched since the scans (LAPACK-extension
+1×1 and last-resort 1×1). A third idea — memoising the failed 2×2 gate
+pair — measured no gain (iter_120 0.477 → 0.483 s) and was dropped.
+Oracles: new unit tests rook_rescue_matches_uncached_walk (frozen copy
+of the old walk; 200 random fronts × 4 u × every k, plain and hinted;
+>100 each of 1×1/2×2/None) and rook_row_argmax_matches_bk_row_scans
+(bit-equal max incl. ±0/inf/NaN; row-k argmax = BK gamma0 scan).
+Harness A/B (iter_000 sets the symbolic, then 5 reps; median t_fac):
+| iter | 0.21.0 | memo only | memo + hints |
+| 083 | 0.5946 | 0.4791 | 0.4461 (-25 %) |
+| 120 | 0.5966 | 0.4768 | 0.4415 (-26 %) |
+| 135 | 0.6025 | 0.4929 | 0.4540 (-25 %) |
+| 000 | 0.0763 | 0.0764 | 0.0777 (noise; no rook) |
+Full 164-KKT sequence (--reuse): factor 56.32 → 44.74 s (-20.6 %);
+every non-timing field identical on 164/164 (inertia, nnz_l, tiny,
+del_sum, n2x2, rook, residual, tfa, cb, maxL). brainpc0 i95/s1: 0.0135
+→ 0.0137 s, identical fields (rook 7 — nothing to gain there).
+cargo test --release: 994 passed, 0 failed (blocked_ldlt 22,
+golden_bits 3, issue_221_forced_front_parity 5). Accept (≥ 5 %).
