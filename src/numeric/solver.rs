@@ -17,6 +17,7 @@ use crate::numeric::factorize::{
     factorize_multifrontal_parallel_with_workspace, factorize_multifrontal_with_workspace,
     FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
 };
+use crate::numeric::reanalysis::{ReanalysisPolicy, ReanalysisReport, ReanalysisState};
 use crate::numeric::solve::{
     solve_sparse, solve_sparse_into, solve_sparse_many, solve_sparse_many_into,
     solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions,
@@ -173,6 +174,14 @@ pub struct FactorStats {
     /// analysis is for these values. Exact integer, identical across
     /// thread counts. Issue #227.
     pub actual_flops: u128,
+    /// `true` iff this `factor()` adopted a different symbolic analysis
+    /// under [`ReanalysisPolicy`] (issue #227). `pattern_reused` stays
+    /// `true` on such a call: the pattern was reused, the analysis was
+    /// replaced. Always `false` under the default `Never`.
+    pub reanalysed: bool,
+    /// Analyses adopted by the re-analysis policy on this pattern so far
+    /// (issue #227). Always `0` under `Never`.
+    pub reanalysis_count: u32,
 }
 
 impl FactorStats {
@@ -694,6 +703,12 @@ pub struct Solver {
     /// "symbolic phase skipped" from "symbolic phase ran but produced
     /// no data" — pinned by test `b3_symbolic_profile_report_only_on_cache_miss_factor`.
     last_symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
+    /// Issue #227: when a cached value-dependent analysis may be replaced
+    /// on the same pattern. Default [`ReanalysisPolicy::Never`].
+    reanalysis: ReanalysisPolicy,
+    /// Issue #227: per-pattern policy state (store of candidate analyses,
+    /// trial budget, latches, last report). Reset on a pattern change.
+    reanalysis_state: ReanalysisState,
 }
 
 impl Solver {
@@ -743,6 +758,8 @@ impl Solver {
             profiling_enabled: false,
             last_profiler: None,
             last_symbolic_profiler: None,
+            reanalysis: ReanalysisPolicy::Never,
+            reanalysis_state: ReanalysisState::default(),
         }
     }
 
@@ -1291,6 +1308,28 @@ impl Solver {
     /// across refactorizations with new values and costs nothing to
     /// read. See [`crate::symbolic::WorkEstimate`] for what each field
     /// means and why there is no predicted runtime.
+    /// Issue #227: let this `Solver` replace a cached value-dependent
+    /// symbolic analysis on the same pattern when a trial factorization of
+    /// the current matrix under another analysis is cheaper with the same
+    /// inertia. See [`crate::numeric::reanalysis`]. Default
+    /// [`ReanalysisPolicy::Never`], which is bit-identical to feral
+    /// without the policy.
+    pub fn with_reanalysis(mut self, policy: ReanalysisPolicy) -> Self {
+        self.reanalysis = policy;
+        self
+    }
+
+    /// The configured [`ReanalysisPolicy`] (issue #227).
+    pub fn reanalysis_policy(&self) -> &ReanalysisPolicy {
+        &self.reanalysis
+    }
+
+    /// What the re-analysis policy did on the most recent `factor()` call:
+    /// `None` when no event fired (always, under `Never`). Issue #227.
+    pub fn last_reanalysis(&self) -> Option<&ReanalysisReport> {
+        self.reanalysis_state.last_report.as_ref()
+    }
+
     pub fn work_estimate(&self) -> Option<crate::symbolic::WorkEstimate> {
         self.last_symbolic.as_ref().map(|s| s.work_estimate())
     }
@@ -1542,6 +1581,18 @@ impl Solver {
             self.mc64_retry_not_adopted = false;
             // The race is pattern-bound: a new pattern re-races.
             self.race_result = None;
+            // Issue #227: the store, trial budget and latches are
+            // per pattern.
+            self.reanalysis_state = ReanalysisState::default();
+        }
+        // Issue #227: per-call bookkeeping (the escalation re-entry is
+        // part of its outer call). Diagnostic only; nothing numeric reads
+        // it.
+        if reentry_pattern_reused.is_none() {
+            let st = &mut self.reanalysis_state;
+            st.factor_index = st.factor_index.saturating_add(1);
+            st.reanalysed_now = false;
+            st.last_report = None;
         }
 
         // Step 2.5: the measured ordering race (issue #203). Runs at
@@ -2773,6 +2824,8 @@ impl Solver {
             max_abs_l,
             predicted_flops,
             actual_flops,
+            reanalysed: self.reanalysis_state.reanalysed_now,
+            reanalysis_count: self.reanalysis_state.adoptions,
         })
     }
 
@@ -5338,6 +5391,7 @@ mod tests {
             .with_partial_singular_warning(true)
             .with_sqd_mode(true)
             .with_ordering_escalation(Some(12.0))
+            .with_reanalysis(ReanalysisPolicy::Always)
             .with_ordering_race(vec![OrderingMethod::Amd, OrderingMethod::Amf]);
         let p = s.race_probe();
 
@@ -5374,6 +5428,9 @@ mod tests {
             "a probe that inherited race_arms would recurse"
         );
         assert!(!p.profiling_enabled, "a probe must not collect profiles");
+        // A probe factors once per pattern, so re-analysis could never
+        // fire in it; it keeps the default rather than paying for state.
+        assert_eq!(p.reanalysis, ReanalysisPolicy::Never);
     }
 
     /// Issue #153: a warm, pattern-reused `factor()` recycles the previous

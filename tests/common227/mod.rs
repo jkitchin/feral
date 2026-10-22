@@ -48,7 +48,7 @@ fn jacobian(seed: u64) -> Vec<(usize, usize, f64)> {
         let mut extra = Vec::new();
         while extra.len() < 2 {
             let c = rng.below(N_X);
-            if c % 3 != 0 && !extra.contains(&c) {
+            if !c.is_multiple_of(3) && !extra.contains(&c) {
                 extra.push(c);
             }
         }

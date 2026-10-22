@@ -39,3 +39,20 @@ retry) moved into `Solver::dispatch_numeric` — an associated fn taking
 `use_parallel, pool, &mut workspace` because `symbolic` is borrowed from
 `self.last_symbolic`. Golden digests pass after the move (kill
 criterion 1 not tripped); cargo test --release 1001 passed, 0 failed.
+
+* 2026-10-23 :issue-227:step2:api:
+Step 2: src/numeric/reanalysis.rs (ReanalysisPolicy {Never (default),
+OnStale(OnStaleParams), Always}, OnStaleParams defaults 2.0 / 0.25 / 8 /
+2 / probes 2·4^j ≤ 2048 / 100 flops per nnz, AnalysisOrigin,
+ReanalysisEvent, TrialOutcome, DeclineReason (+NoCandidate for an
+escalation with an empty store), ReanalysisReport) and the pure decision
+functions with table tests. Solver: `reanalysis`, `reanalysis_state`,
+`with_reanalysis`, `reanalysis_policy`, `last_reanalysis`;
+FactorStats.reanalysed / reanalysis_count; state reset in the
+!cache_valid block; factor_index counted per outer call (escalation
+re-entry excluded). Race probes do not inherit the policy (a probe
+factors once). Decision functions carry a module-level allow(dead_code)
+until Step 3 wires them. Golden digests unchanged; 1010 passed.
+Also: `cargo clippy --all-targets` flagged `c % 3 != 0` in the test
+fixture (is_multiple_of) — the pre-commit hook only lints the lib, so
+the earlier fixture commit slipped it; semantics unchanged.
