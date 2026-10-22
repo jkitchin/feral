@@ -302,3 +302,46 @@ plus the §3.4 integration gap unless it proves to be feral's).
 - Dumps (3.9 GB): `i224/dump/{f018,f021}-{qcqp1000-2c,brainpc0,brainpc1}/`.
 - Scratchpad root:
   `/private/tmp/claude-501/-Users-jkitchin-projects-feral/a1458847-2377-4832-a0c1-096910fb944e/scratchpad/`.
+
+## 6. Results of the recovery plan (2026-10-22)
+
+All timings sequential on the same machine; fixed-matrix numbers from the
+`ab224` harness pointed at the local tree (iter_000 sets the symbolic, as
+in the dump run), medians of 5.
+
+| | 0.21.0 | Step 1 (rook row memo + BK hints) | Steps 1+2 (+ direct rank-1/2 flush) |
+|---|---|---|---|
+| iter_083 | 0.595 s | 0.446 s | 0.400 s (−33 %) |
+| iter_120 | 0.597 s | 0.442 s | 0.392 s (−34 %) |
+| iter_135 | 0.603 s | 0.454 s | 0.403 s (−33 %) |
+| iter_000 | 0.076 s | 0.078 s | 0.071 s |
+| 164-KKT sequence (factor total) | 56.32 s | 44.74 s | 38.74 s (−31 %) |
+
+Every non-timing field (inertia, nnz(L), floored pivots, delays, 2×2
+count, rook count, residual, tfa, cb, max|L|) is identical on 164/164.
+§4's attribution, measured: on iter_120 `rook_rescue` was ~22 % of the
+profile (it runs on every threshold-failing 1×1, including the ~20k that
+then delay, and rescanned two rows up to nine times); rank-1 and rank-2
+flushes after early panel bails cost 0.070 s of 0.758 s serial dense
+time, dominated by packing/tile setup, and the direct loop cut that to
+0.019 s. Panels that bail after ≥ 3 pivots still cost 0.39 s of the
+remaining 0.71 s serial dense time on iter_120 (unmeasured lever).
+
+**Step 3 (refined solves): no change.** Over the 164 solves, the 31 that
+take the 10-step cap all improve the residual on every step (310/310
+steps strictly improving; final/initial relative residual 0.06–0.89), so
+there is no stall for the step logic to cut. Any earlier exit would
+return a larger backward error, which the plan's oracle forbids. Matrices
+with floored pivots account for 3.40 s of the 3.71 s refined-solve total;
+that cost is the price of the exact factor's floored pivots.
+
+**End-to-end (pounce 0.13 @ 9958a24e rebuilt against this tree in a
+scratch clone, 300 s cap):** qcqp1000-2c takes the same 163-iteration path
+(iteration log identical), `LinearSystemFactorization` 105.5 s → 68.9 s,
+`total_factor_secs` 100.8 s → 64.4 s with identical Σdelayed (2 947 819),
+Σtiny (30 379) and last nnz(L). brainpc1 and brainpc0 logs are identical
+to 0.21.0's (LSF 3.63 → 3.43 s, 11.86 → 11.60 s); their wall time is
+pounce's trajectory (§3). The remaining ~44 s of qcqp factor time that
+§3.4 attributes to the LS-multiplier symbolic is pounce's to recover
+(one `invalidate_symbolic_cache()` after the init solve); on the harness
+that takes the sequence from 98.98 s to 56.39 s on 0.21.0 kernels.

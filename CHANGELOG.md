@@ -4,6 +4,27 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — delayed-pivot fronts (issue #224)
+
+Two changes cut the time feral spends on fronts where many pivots fail the
+threshold test and are delayed. Both are exact: factors, inertia and
+solutions are bit-identical to 0.21.0.
+
+- The rook search that runs on every rejected 1×1 pivot remembers the row
+  maxima it has already scanned (and reuses the two that Bunch-Kaufman
+  just computed). Previously a search that ended in a delay rescanned the
+  same two rows up to nine times.
+- When a blocked panel stops after one or two pivots, their update to the
+  trailing block is applied directly instead of through the packed tile
+  kernel.
+
+On the 164 KKTs of pounce's qcqp1000-2c solve, total factor time drops
+from 56.3 s to 38.7 s, with identical output on all 164. The pounce
+end-to-end run takes the same 163 iterations, and its
+`LinearSystemFactorization` time drops from 105.5 s to 68.9 s. The
+kkt-pounce corpus (370 matrices) is unchanged in inertia, nnz(L), floored
+pivots and residuals.
+
 ## [0.21.0] - 2026-10-20
 
 **Breaking.** `FactorStats` (`feral::FactorStats`) is an exhaustive

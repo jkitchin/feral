@@ -141,3 +141,34 @@ cargo test --release 995 passed, 0 failed. Accept (≥ 10 % on the hard
 matrices). Follow-up not in the plan: the n_elim >= 3 bail bucket is
 0.39 s of 0.71 s serial dense time on iter_120; whether a direct loop
 pays at rank 3-4 is unmeasured.
+
+* 2026-10-22 :issue-224:step3:refinement:measurement:
+Instrumented with solve_sparse_refined_with_diagnostics (harness
+AB_REFDIAG) over the 164 qcqp KKTs after Steps 1+2. Step histogram:
+0 steps 45, 1 step 79, 2: 3, 5: 2, 7: 3, 9: 1, 10 (cap): 31. The 31
+capped solves: 310/310 steps strictly improve the residual; final/initial
+relative residual 0.06-0.89 (iter_120: 7.6e-13 → 3.7e-13 at ~7 %/step,
+target eps·sqrt(n) ≈ 2.3e-14 never reached). tiny>0 matrices: 77, 3.40 s
+of 3.71 s t_sol, mean 4.7 steps, 0 non-improving steps. tiny=0: 87,
+0.31 s. Verdict per the plan's kill rule: steps are productive (slow
+contraction, not stall); an earlier exit would raise the returned
+backward error, which the oracle forbids. No change.
+
+* 2026-10-22 :issue-224:acceptance:corpus:e2e:
+- kkt-pounce corpus (diag_221_rook_cost FERAL_221_COMPACT, 370 .mtx):
+  0.21.0 (worktree at f3b32e7) vs HEAD — every non-timing field
+  (inertia, nnz_l, tiny, res, tfa, cb) identical on 370/370; total
+  59.18 s → 58.68 s (laptime 16.11 → 15.77, corkscrw 26.89 → 27.00,
+  clnlbeam 12.79 → 12.59).
+- column25 guard: fixtures absent on this machine (tests SKIP), not run.
+- Fixed-matrix: 164/164 inertia identical, factor total 38.74 s (≤ 50 s).
+- End-to-end, pounce 9958a24e cloned to scratch with [patch.crates-io]
+  feral = this tree (pounce tree itself untouched), sequential, 300 s:
+  qcqp1000-2c 163 it, iteration log identical to 0.21.0 (itdiff 164/164),
+  LinearSystemFactorization 105.5 → 68.9 s, total_factor_secs 100.8 →
+  64.4 s, Σdelayed/Σtiny/last nnz_l identical. brainpc1 1073 it,
+  brainpc0 2117 it, logs identical to 0.21.0 (1179 / 2264 lines), LSF
+  3.63 → 3.43 s and 11.86 → 11.60 s.
+- bench: same 2 synthetic fixtures, identical numbers to 2026-10-19.
+- dev/context.md NOT regenerated: the working tree carries the user's
+  uncommitted edits to it and the task forbids touching them.
