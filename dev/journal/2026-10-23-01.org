@@ -83,3 +83,20 @@ declines NotCheaper, latches. Ladder: Always policy on #221's
 diag fixture → Ladder decline on the rung, #221 still undoes the worse
 rung, events resume after. Reports identical across 2 solvers and
 par/seq. cargo test --release: 1018 passed (before the cost-trial test).
+
+* 2026-10-23 :issue-227:step4:escalation:
+Step 4: the hook now also runs on the #102 re-entry (escalation = true):
+candidates are the stored analyses only, trialled against the fresh
+escalated one; Never path untouched (escalation block unchanged; the
+outer call still returns the re-entry's status). Escalated analysis
+carries origin Escalation{k} and is stored if displaced.
+Fixture: cont5_late_kkt.mtx is absent here (tests/data/large has only
+sawpath, twirism1), and a D_s spike does not reach growth 1e24 on the
+qcqp-like path (InfNorm scaling absorbs it: growth stayed 7e13–1.6e16
+for spikes 1e18–1e22). Tests use the public ceiling
+with_ordering_escalation(Some(1e12)): the None factors (growth ~1e16)
+escalate at k = 9, right after the k = 8 probe adopted None. Fresh
+escalated actual 4.44e6; stored 3.93e6 and 4.50e6, inertia (450,300,0)
+on all. Default margin 0.25 → declined NotCheaper (13 % cheaper); margin
+0.1 → the cheaper stored one adopted. Empty store → NoCandidate.
+Reports par == seq. cargo test --release 1022 passed.

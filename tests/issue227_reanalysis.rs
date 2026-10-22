@@ -366,3 +366,120 @@ fn cost_event_trials_the_stored_analyses_and_latches_on_decline() {
     assert!(got[9].2.is_none() && got[10].2.is_none(), "latched");
     assert!(!got[8].1);
 }
+
+// ---------------------------------------------------------------------
+// Step 4: the #102 ordering escalation as an event.
+//
+// `tests/issue102_ordering_escalation.rs`'s cont5 fixture is gitignored,
+// so these tests make the escalation fire on the qcqp-like path through
+// the public growth ceiling: its `None` factors have pivot growth ~1e16,
+// so a ceiling of 1e12 escalates the first `None` factor after the k = 8
+// probe adopted the `None` analysis (an `LdltCompress` analysis is never
+// escalated). The fresh escalated `LdltCompress` analysis of iterate 7
+// costs 4.44e6 actual; the two stored ones 3.93e6 and 4.50e6.
+
+fn escalating(p: OnStaleParams, parallel: bool) -> Solver {
+    Solver::new()
+        .with_parallel(parallel)
+        .with_ordering_escalation(Some(1e12))
+        .with_reanalysis(on_stale(p))
+}
+
+#[test]
+fn escalation_trials_the_stored_analyses_and_adopts_a_cheaper_one() {
+    for init_first in [true, false] {
+        let seq = qcqp_sequence(init_first);
+        let p = OnStaleParams {
+            margin: 0.1,
+            ..probes_everywhere()
+        };
+        let (s, got) = run(escalating(p.clone(), true), &seq, &qcqp_like_inertia());
+        let ctx = if init_first {
+            "init-first"
+        } else {
+            "iterate-first"
+        };
+        let r = got[8].2.as_ref().expect("escalation at k = 9");
+        assert_eq!(r.event, ReanalysisEvent::Escalation, "{ctx}");
+        assert_eq!(r.factor_index, 9);
+        assert_eq!(r.trials.len(), 2, "{ctx}: both stored analyses");
+        assert!(r.trials.iter().all(|t| t.from_store));
+        assert!(r.trials.iter().all(|t| t.inertia == qcqp_like_inertia()));
+        // The cheaper stored analysis wins by more than 10 %.
+        let best = r.trials.iter().min_by_key(|t| t.actual).expect("trials");
+        assert!(best.adopted, "{ctx}: {r:?}");
+        assert!((best.actual as f64) * 1.1 < r.incumbent_actual as f64);
+        assert_eq!(r.trials.iter().filter(|t| t.adopted).count(), 1);
+        assert_eq!(r.declined, None);
+        assert!(got[8].1, "{ctx}: reanalysed on the escalation call");
+        let st = s.last_factor_stats().expect("stats");
+        assert!(st.ordering_info.escalated);
+        assert_eq!(
+            st.ordering_info.preprocess,
+            OrderingPreprocess::LdltCompress
+        );
+        // One count per adopting call (iterate-first also adopts the
+        // init analysis at k = 2 under the 10 % margin).
+        let adopting = got.iter().filter(|g| g.1).count() as u32;
+        assert_eq!(st.reanalysis_count, adopting, "{ctx}");
+        assert_eq!(adopting, if init_first { 2 } else { 3 }, "{ctx}");
+        // Deterministic across thread counts.
+        let (_, seq_run) = run(escalating(p, false), &seq, &qcqp_like_inertia());
+        assert_eq!(format!("{got:?}"), format!("{seq_run:?}"), "{ctx}");
+    }
+}
+
+#[test]
+fn escalation_keeps_the_fresh_analysis_when_no_stored_one_wins() {
+    // Default margin 0.25: 3.93e6 · 1.25 > 4.44e6 — the escalated analysis
+    // stays, as it does without the policy.
+    let seq = qcqp_sequence(true);
+    let (_, got) = run(
+        escalating(probes_everywhere(), true),
+        &seq,
+        &qcqp_like_inertia(),
+    );
+    let r = got[8].2.as_ref().expect("escalation at k = 9");
+    assert_eq!(r.event, ReanalysisEvent::Escalation);
+    assert_eq!(r.trials.len(), 2);
+    assert!(r.trials.iter().all(|t| !t.adopted));
+    assert_eq!(r.declined, Some(DeclineReason::NotCheaper));
+    assert!(!got[8].1);
+}
+
+#[test]
+fn escalation_with_an_empty_store_has_no_candidate() {
+    // A late iterate first: `None` analysis, growth ~1e16 > 1e12, so the
+    // very first factor escalates before anything was stored.
+    let seq: Vec<CscMatrix> = (8..11).map(|k| qcqp_like(Some(k))).collect();
+    let (s, got) = run(
+        escalating(probes_everywhere(), true),
+        &seq,
+        &qcqp_like_inertia(),
+    );
+    let r = got[0].2.as_ref().expect("escalation at k = 1");
+    assert_eq!(r.event, ReanalysisEvent::Escalation);
+    assert_eq!(r.factor_index, 1);
+    assert!(r.trials.is_empty());
+    assert_eq!(r.declined, Some(DeclineReason::NoCandidate));
+    assert!(!got[0].1);
+    // The escalation's pattern_reused contract (#215) is untouched.
+    let st0 = s.last_factor_stats().expect("stats");
+    assert!(st0.ordering_info.escalated);
+}
+
+#[test]
+fn escalation_under_never_is_unchanged() {
+    // Same escalating sequence without the policy: no report, and the
+    // factors are those of a Solver that never had a policy field.
+    let seq: Vec<CscMatrix> = (8..11).map(|k| qcqp_like(Some(k))).collect();
+    let s = Solver::new().with_ordering_escalation(Some(1e12));
+    let (s, got) = run(s, &seq, &qcqp_like_inertia());
+    assert!(got.iter().all(|g| g.2.is_none() && !g.1));
+    assert!(
+        s.last_factor_stats()
+            .expect("stats")
+            .ordering_info
+            .escalated
+    );
+}

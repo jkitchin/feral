@@ -2397,14 +2397,21 @@ impl Solver {
                 }
                 // Issue #227: re-analysis events on the stored factor. Under
                 // `Never` (the default) this is the only line that reads
-                // the policy, and the factor and status are untouched.
+                // the policy, and the factor and status are untouched. On
+                // the #102 escalation re-entry (the outer call returns this
+                // call's status) the event is the escalation itself: the
+                // stored value-dependent analyses are trialled against the
+                // fresh escalated one.
                 let (partial_singular, inertia) =
-                    if matches!(self.reanalysis, ReanalysisPolicy::Never)
-                        || reentry_pattern_reused.is_some()
-                    {
+                    if matches!(self.reanalysis, ReanalysisPolicy::Never) {
                         (partial_singular, inertia)
                     } else {
-                        self.reanalysis_events(matrix, &effective_params, pool.as_ref(), false);
+                        self.reanalysis_events(
+                            matrix,
+                            &effective_params,
+                            pool.as_ref(),
+                            reentry_pattern_reused.is_some(),
+                        );
                         // An adoption replaced the stored factor; the status
                         // follows the factor handed to the caller.
                         match (&self.last_factors, &self.last_inertia) {
