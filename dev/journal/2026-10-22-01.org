@@ -110,3 +110,34 @@ del_sum, n2x2, rook, residual, tfa, cb, maxL). brainpc0 i95/s1: 0.0135
 → 0.0137 s, identical fields (rook 7 — nothing to gain there).
 cargo test --release: 994 passed, 0 failed (blocked_ldlt 22,
 golden_bits 3, issue_221_forced_front_parity 5). Accept (≥ 5 %).
+
+* 2026-10-22 :issue-224:step2:schur:flush:perf:bit-parity:
+Measured first with temporary (uncommitted) per-bucket flush timers,
+serial, iter_000 then iter_120: bails with n_elim=0: 20 060 (no work);
+n_elim=1: 150 flushes, 0.063 s; n_elim=2: 26, 0.007 s; n_elim>=3: 165,
+0.393 s; full panels 50, 0.023 s; dense total 0.758 s. Expected a
+rank-1 flush to be memory-bound either way, so predicted < 3 %; wrong —
+the direct loop took the n_elim=1 bucket 0.063 → 0.016 s and n_elim=2
+0.007 → 0.003 s (packing + tile setup dominate at rank 1-2).
+Change: apply_blocked_schur routes n_elim <= 2 (packed path enabled) to
+apply_small_flush_direct, a column loop with the packed tile walk's
+exact per-element sequence (skip only d_q == 0, b = L[j,q]·d_q, x - b·L
+or fused (-b)·L + x; 2×2: x - (b0·L0 + b1·L1) or two chained fused
+ops). Strided (FERAL_PACKED_SCHUR=0) path untouched.
+Test first: tests/blocked_ldlt.rs test_issue224_small_bail_flush_parity
+(trap columns spaced 1/2/3, leading 2×2, n 70/100/160, may_delay on/off,
+fma on/off) vs scalar factor_frontal byte-for-byte; passed before the
+change and after. Temporary counters showed it drives 724 rank-1 and
+792 rank-2 flushes.
+Harness A/B (median of 5, after Step 1):
+| iter | Step 1 | Step 1+2 |
+| 083 | 0.4461 | 0.4001 (-10.3 %; -11.3 % in the instrumented build) |
+| 120 | 0.4415 | 0.3918 (-11.3 %) |
+| 135 | 0.4540 | 0.4030 (-11.2 %) |
+| 000 | 0.0777 | 0.0707 (-9 %, not a regression) |
+Full 164-KKT sequence: 44.74 → 38.74 s (0.21.0: 56.32 s, -31 % for
+Steps 1+2), non-timing fields identical on 164/164.
+cargo test --release 995 passed, 0 failed. Accept (≥ 10 % on the hard
+matrices). Follow-up not in the plan: the n_elim >= 3 bail bucket is
+0.39 s of 0.71 s serial dense time on iter_120; whether a direct loop
+pays at rank 3-4 is unmeasured.

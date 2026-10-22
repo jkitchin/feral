@@ -3528,6 +3528,15 @@ fn apply_blocked_schur(
         return;
     }
 
+    // Issue #224 Step 2: a panel that bails after one or two pivots
+    // leaves a rank-1/2 flush over the whole trailing block; packing it
+    // into tiles buys nothing at that rank, so apply it directly with
+    // the packed kernel's exact per-element sequence.
+    if n_elim <= 2 && packed_schur_enabled() {
+        apply_small_flush_direct(a, nrow, k, n_elim, j_start, d_panel, subdiag, fma);
+        return;
+    }
+
     // Issue #99 Phase B-2: the packed trailing update
     // (`apply_schur_panel_range_packed`) handles a **mixed** 1×1 / 2×2 /
     // zero-d pivot stream byte-exactly — each element walks the pivot
@@ -3638,6 +3647,88 @@ fn apply_blocked_schur(
                 }
             }
             q += 1;
+        }
+    }
+}
+
+/// Issue #224 Step 2: deferred-Schur flush of a rank-1 or rank-2 panel
+/// (`n_elim <= 2`) as a direct column loop, no packing or tile dispatch.
+///
+/// Bit-exactness contract: identical, element by element, to the packed
+/// tile walk (`apply_schur_panel_range_packed_impl` and
+/// `schur_kernel::packed_schur_tiles_*`), whose per-element result
+/// depends only on the order of operations applied to that element:
+/// - 1×1 at `q` with `d_q != 0` (the packed walk skips `d_q == 0` and
+///   nothing else): `b = L[j,q]·d_q`, then `a[i,j] = a[i,j] − b·L[i,q]`
+///   (nofma), or one fused `(−b)·L[i,q] + a[i,j]` (fma);
+/// - 2×2 at `(0, 1)`: `b0 = d11·L[j,0] + d21·L[j,1]`,
+///   `b1 = d21·L[j,0] + d22·L[j,1]`, then
+///   `a[i,j] = a[i,j] − (b0·L[i,0] + b1·L[i,1])` (nofma), or two chained
+///   fused ops, `b0` first (fma);
+/// - pivots applied in ascending `q`; every row `i ≥ j` of every column
+///   `j ∈ [j_start, nrow)`.
+///
+/// Pinned by `tests/blocked_ldlt.rs::test_issue224_small_bail_flush_parity`
+/// and the golden digests.
+#[allow(clippy::too_many_arguments)]
+fn apply_small_flush_direct(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    j_start: usize,
+    d_panel: &[f64],
+    subdiag: &[f64],
+    fma: bool,
+) {
+    debug_assert!((1..=2).contains(&n_elim) && k + n_elim <= j_start);
+    // Pivot columns `k, k+1` precede `j_start` in column-major order.
+    let (head, tail) = a.split_at_mut(j_start * nrow);
+    let col0 = &head[k * nrow..(k + 1) * nrow];
+    let col1 = if n_elim == 2 {
+        &head[(k + 1) * nrow..(k + 2) * nrow]
+    } else {
+        &head[0..0]
+    };
+    let pair = n_elim == 2 && subdiag[k] != 0.0;
+    for j in j_start..nrow {
+        let off = (j - j_start) * nrow;
+        let dst = &mut tail[off + j..off + nrow];
+        if pair {
+            let (d11, d22, d21) = (d_panel[0], d_panel[1], subdiag[k]);
+            let (l0, l1) = (col0[j], col1[j]);
+            let b0 = d11 * l0 + d21 * l1;
+            let b1 = d21 * l0 + d22 * l1;
+            let (s0, s1) = (&col0[j..nrow], &col1[j..nrow]);
+            if fma {
+                let (n0, n1) = (-b0, -b1);
+                for ((x, &p), &q) in dst.iter_mut().zip(s0).zip(s1) {
+                    *x = n1.mul_add(q, n0.mul_add(p, *x));
+                }
+            } else {
+                for ((x, &p), &q) in dst.iter_mut().zip(s0).zip(s1) {
+                    *x -= b0 * p + b1 * q;
+                }
+            }
+        } else {
+            for (q, col) in [col0, col1].into_iter().take(n_elim).enumerate() {
+                let dq = d_panel[q];
+                if dq == 0.0 {
+                    continue;
+                }
+                let b = col[j] * dq;
+                let src = &col[j..nrow];
+                if fma {
+                    let nb = -b;
+                    for (x, &p) in dst.iter_mut().zip(src) {
+                        *x = nb.mul_add(p, *x);
+                    }
+                } else {
+                    for (x, &p) in dst.iter_mut().zip(src) {
+                        *x -= b * p;
+                    }
+                }
+            }
         }
     }
 }
