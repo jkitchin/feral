@@ -32,3 +32,10 @@ F(0,2)+F(4,4) = 30 (the delayed column moves work into the root).
 61 parity matrices: counters identical par/seq/run-to-run; some
 matrices delay (actual ≠ predicted). cargo test --release: all green;
 golden digests unchanged.
+
+* 2026-10-23 :issue-227:step1:refactor:
+Step 1: the #154 pool-or-sequential block (initial factor and #65
+retry) moved into `Solver::dispatch_numeric` — an associated fn taking
+`use_parallel, pool, &mut workspace` because `symbolic` is borrowed from
+`self.last_symbolic`. Golden digests pass after the move (kill
+criterion 1 not tripped); cargo test --release 1001 passed, 0 failed.

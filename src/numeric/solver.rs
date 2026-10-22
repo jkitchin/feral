@@ -1421,6 +1421,30 @@ impl Solver {
         }
     }
 
+    /// The numeric phase's pool-or-sequential dispatch (issue #154): run
+    /// the parallel driver inside `pool.install` when `use_parallel` is on
+    /// and a pool exists, otherwise the sequential driver — never the
+    /// parallel driver bare on the global rayon pool. The two drivers are
+    /// bit-exact, so this choice is scheduling only. An associated
+    /// function (not `&mut self`) so callers can pass a `symbolic`
+    /// borrowed from `self` next to `&mut self.workspace`.
+    fn dispatch_numeric(
+        use_parallel: bool,
+        pool: Option<&Arc<rayon::ThreadPool>>,
+        workspace: &mut FactorWorkspace,
+        matrix: &CscMatrix,
+        symbolic: &SymbolicFactorization,
+        params: &NumericParams,
+    ) -> Result<(SparseFactors, Inertia), FeralError> {
+        if let (true, Some(p)) = (use_parallel, pool) {
+            p.install(|| {
+                factorize_multifrontal_parallel_with_workspace(matrix, symbolic, params, workspace)
+            })
+        } else {
+            factorize_multifrontal_with_workspace(matrix, symbolic, params, workspace)
+        }
+    }
+
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
         self.factor_impl(matrix, check_inertia, None)
     }
@@ -1779,23 +1803,14 @@ impl Solver {
         // reads `last_factors`. Memory only — the reused buffers are
         // fully re-initialized (tests/factor_output_recycling.rs).
         self.workspace.begin_recycle(self.last_factors.take());
-        let result = if let (true, Some(p)) = (self.use_parallel, pool.as_ref()) {
-            p.install(|| {
-                factorize_multifrontal_parallel_with_workspace(
-                    matrix,
-                    symbolic,
-                    &effective_params,
-                    &mut self.workspace,
-                )
-            })
-        } else {
-            factorize_multifrontal_with_workspace(
-                matrix,
-                symbolic,
-                &effective_params,
-                &mut self.workspace,
-            )
-        };
+        let result = Self::dispatch_numeric(
+            self.use_parallel,
+            pool.as_ref(),
+            &mut self.workspace,
+            matrix,
+            symbolic,
+            &effective_params,
+        );
 
         // Issue #65: inertia-guided MC64 scaling fallback. When the user
         // configured `Auto`, the resolved scaling was NOT MC64, and the
@@ -1840,23 +1855,14 @@ impl Solver {
                 }
                 // Same #154 pool-or-sequential dispatch as the initial
                 // factor above — never the parallel driver bare.
-                let retry = if let (true, Some(p)) = (self.use_parallel, pool.as_ref()) {
-                    p.install(|| {
-                        factorize_multifrontal_parallel_with_workspace(
-                            matrix,
-                            symbolic,
-                            &retry_params,
-                            &mut self.workspace,
-                        )
-                    })
-                } else {
-                    factorize_multifrontal_with_workspace(
-                        matrix,
-                        symbolic,
-                        &retry_params,
-                        &mut self.workspace,
-                    )
-                };
+                let retry = Self::dispatch_numeric(
+                    self.use_parallel,
+                    pool.as_ref(),
+                    &mut self.workspace,
+                    matrix,
+                    symbolic,
+                    &retry_params,
+                );
                 match retry {
                     Ok((rf, ri)) if ri.zero < first_zero => {
                         effective_params.scaling = ScalingStrategy::Mc64Symmetric;
