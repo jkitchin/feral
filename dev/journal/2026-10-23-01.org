@@ -100,3 +100,41 @@ escalated actual 4.44e6; stored 3.93e6 and 4.50e6, inertia (450,300,0)
 on all. Default margin 0.25 → declined NotCheaper (13 % cheaper); margin
 0.1 → the cheaper stored one adopted. Empty store → NoCandidate.
 Reports par == seq. cargo test --release 1022 passed.
+
+* 2026-10-23 :issue-227:step5:replay:acceptance:
+Harness $J/r227: `--policy onstale` now = Solver::with_reanalysis(
+OnStale(default)) (old review emulation renamed `review`; `proto` kept);
+prints per-factor digest, exp_neg, R227 report. Main reference: harness
+copy $J/r227main against a worktree at 95ba43b (res227/main.*.txt).
+Gate ($J/gate227.py, res227/s5.*.txt, sequential, nothing else running):
+| seq | flops On/Never | time On/Never | analyses/trials/adopt | inertia≠Never |
+| 2c init  | 0.7512 (≤0.80 ✓) | 0.451 (≤0.65 ✓) | 7/2/1 | 0 |
+| 2c kkt   | 0.9795 (≤1.00 ✓) | 0.778 (≤0.75 ✗) | 7/5/2 | 0 |
+| 2nc init | 1.0000 (=1 ✓)    | 1.066 (≤1.15 ✓) | 6/1/0 | 0 |
+| 2nc kkt  | 0.5462 (≤0.60 ✓) | 0.573 (≤0.60 ✓) | 6/3/1 | 0 |
+| pooling  | 1.0000 ✓          | 1.077 (≤1.05 ✗?) | 2/1/0 | 0 |
+| clnlbeam | 1.0000 ✓          | 0.983 ✓          | 1/0/0 | 0 |
+| NARX_CFy | 1.0000 ✓          | 1.029 ✓          | 6/0/0 | 0 |
+Never digests == main on every factor of all 7 sequences (4 947 factors).
+No exp_neg regressions. Trials ≤ 8, analyses ≤ 12 everywhere.
+Mechanism on 2c init-first is the prototype's: k=2 probe stores the
+first-KKT LdltCompress analysis (pred 6.98e8 > 3.53e8), escalation at
+iter_076 trials it (1.35e9 vs fresh 2.22e9, same inertia) and adopts it;
+cost event at iter_077 declines; kill criterion 3 not tripped.
+Timing caveats (recorded, not tuned): 2c kkt-first repeated twice more:
+Never 51.3 / 43.1 s, OnStale 42.4 / 42.9 s → ratios 0.83 / 0.99; Never
+alone drifts 43–59 s, so the 0.75 time line is not resolvable on this
+machine; flops (the gate) 0.98 stable. Pooling: 3 more paired runs
++11 % / +2 % / +4.5 % on a ~46 ms sequence (Never itself 44–49 ms);
+the overhead is one cost event (k=149, ratio 2.49: one analysis + one
+declined trial, ~2–3 ms), not probes (guard keeps probes off at 90
+flops/nnz), so the plan's remedy (probe_first/probe_last) does not
+apply. Left as reported; a possible follow-up is to apply the
+flops-per-nnz guard to the cost event too — not done (not in the plan).
+Column25 Sylvester guard (fx/c25b, 7 iterates × seeds 0/1/4/8): 28/28
+neg 75597, tiny 0. kkt-pounce corpus (370 .mtx, diag_221_rook_cost
+COMPACT): HEAD vs main worktree identical on every non-timing field,
+total 63.85 → 62.16 s. Bench: identical to 2026-10-22-01.
+pounce end-to-end: not run (needs a pounce FeralConfig option in a
+clone; skipped for time). dev/context.md not regenerated (user's
+uncommitted edits in the working tree).

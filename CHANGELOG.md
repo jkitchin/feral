@@ -4,6 +4,49 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+**Breaking.** `FactorStats` (`feral::FactorStats`) is an exhaustive public
+struct and gains four public fields: `predicted_flops: u128`,
+`actual_flops: u128`, `reanalysed: bool` and `reanalysis_count: u32`. Code
+that builds it with a struct literal stops compiling; add the fields. The
+next release should be 0.22.0.
+
+### Added — re-analysis of a stale symbolic analysis (issue #227)
+
+`Solver::with_reanalysis(ReanalysisPolicy)` lets a solver replace a cached
+value-dependent analysis (`LdltCompress`, whose MC64 matching depends on
+the values it was built on) on a pattern it has already analysed. The
+default is `ReanalysisPolicy::Never`, which is bit-identical to 0.21: a
+golden test pins every factor's bits against digests computed before the
+change.
+
+Under `ReanalysisPolicy::OnStale(OnStaleParams::default())`, three events
+open a trial: the stored factor's actual dense-front work exceeding 2× the
+analysis's prediction (cost), a probe at factor 2, 8, 32, … (only where
+predicted work is at least 100 flops per stored nonzero), and the #102
+ordering escalation. Each candidate analysis (a fresh one, or one of up to
+two kept from earlier) factors the *same* matrix. A candidate is adopted
+only if its actual flops beat the incumbent by 25 %, the inertia is the
+same, and it floored or zeroed no more pivots. Nothing happens during an
+`increase_quality` ladder. Trials are capped at 8 per pattern.
+`Solver::last_reanalysis()` reports what happened on the last call.
+
+New counters: `symbolic::predicted_front_flops` and
+`SparseFactors::actual_front_flops` (exact integers; the same on every
+thread count), and `FactorStats.predicted_flops` / `actual_flops` /
+`reanalysed` / `reanalysis_count`.
+
+Replays of pounce's KKT sequences, `OnStale` against `Never` in the same
+call order (summed actual flops; inertia identical to `Never` on every
+factor of every sequence):
+
+| sequence | flops ratio | adoptions |
+|---|---|---|
+| qcqp1000-2c, init first (what pounce does) | 0.751 | 1 (the first-KKT analysis, at the escalation) |
+| qcqp1000-2c, KKT first | 0.980 | 2 |
+| qcqp1000-2nc, init first | 1.000 | 0 |
+| qcqp1000-2nc, KKT first | 0.546 | 1 |
+| clnlbeam, NARX_CFy, pooling_rt2stp | 1.000 | 0 |
+
 ### Performance — delayed-pivot fronts (issue #224)
 
 Two changes cut the time feral spends on fronts where many pivots fail the
