@@ -56,3 +56,30 @@ until Step 3 wires them. Golden digests unchanged; 1010 passed.
 Also: `cargo clippy --all-targets` flagged `c % 3 != 0` in the test
 fixture (is_multiple_of) — the pre-commit hook only lints the lib, so
 the earlier fixture commit slipped it; semantics unchanged.
+
+* 2026-10-23 :issue-227:step3:policy:tests:fixture:
+Step 3: `Solver::reanalysis_events` hooked after the factor is stored and
+after the escalation block, skipped under Never (one matches!) and on
+the escalation re-entry. Cost > probe precedence on the same factor; no
+event on factor 1 of a pattern (analysed on its own matrix — the plan's
+"cost fires on factor 2" needs this). Trials: same effective params minus
+profiler, pattern_reused_hint = false (keeps the incumbent's permute
+cache), no begin_recycle, no #65 retry; cached_mc64 cleared after every
+trial; trial errors discarded.
+Fixture finding: the synthetic KKT path resolves `LdltCompress` under
+Auto (its constraint columns are degree ≤ 2), so the plan's
+"pattern-only → Identical" test pins `preprocess = None` explicitly and
+compares with Never under the same params.
+New qcqp-like fixture (tests/common227::qcqp_like; pounce StdAugSystem
+layout, n = 750; Sylvester oracle (450, 300, 0) from H ≻ 0 by
+Gershgorin and A full row rank): init (W = 0) and iterate 0 resolve
+LdltCompress (pred 3.90e6 / 4.50e6), iterate ≥ ~6 resolves None (pred
+1.96e6). OnStale defaults (guard 0): k = 2 probe stores (NotCheaper, no
+trial); k = 8 trial: None actual 2.41e6 vs incumbent 3.93e6, same
+inertia → adopted, in both call orders. Adopted factors bit-equal a
+fresh Never solver's on the following iterates. Cost event at k = 9
+(trigger 0.5) trials the two stored analyses (Fresh{2}, Initial),
+declines NotCheaper, latches. Ladder: Always policy on #221's
+diag fixture → Ladder decline on the rung, #221 still undoes the worse
+rung, events resume after. Reports identical across 2 solvers and
+par/seq. cargo test --release: 1018 passed (before the cost-trial test).

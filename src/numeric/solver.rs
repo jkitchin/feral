@@ -17,7 +17,11 @@ use crate::numeric::factorize::{
     factorize_multifrontal_parallel_with_workspace, factorize_multifrontal_with_workspace,
     FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
 };
-use crate::numeric::reanalysis::{ReanalysisPolicy, ReanalysisReport, ReanalysisState};
+use crate::numeric::reanalysis::{
+    cheaper_by_margin, cost_ratio_fires, effective, is_probe_index, pick, probes_allowed,
+    AnalysisOrigin, DeclineReason, Measure, ReanalysisEvent, ReanalysisPolicy, ReanalysisReport,
+    ReanalysisState, StoredAnalysis, TrialOutcome,
+};
 use crate::numeric::solve::{
     solve_sparse, solve_sparse_into, solve_sparse_many, solve_sparse_many_into,
     solve_sparse_many_refined_into, solve_sparse_refined_auto_into, RefineOptions,
@@ -1484,6 +1488,253 @@ impl Solver {
         }
     }
 
+    /// Issue #227: evaluate the re-analysis events on the factor just
+    /// stored and, when a candidate analysis wins its trial, swap it in.
+    ///
+    /// Called from `factor_impl` after the factor is stored, only when the
+    /// policy is not `Never`. `params` are the numeric parameters the
+    /// stored factor was computed with; every trial uses the same ones
+    /// (minus the profiler and the permute-cache hint), so a trial differs
+    /// from the incumbent only in its analysis. Trials neither recycle
+    /// output buffers nor run the #65 MC64 retry, and a trial or candidate
+    /// analysis that errors is discarded — the incumbent is never put at
+    /// risk.
+    fn reanalysis_events(
+        &mut self,
+        matrix: &CscMatrix,
+        params: &NumericParams,
+        pool: Option<&Arc<rayon::ThreadPool>>,
+        escalation: bool,
+    ) {
+        use crate::symbolic::{predicted_front_flops, OrderingPreprocess};
+        let Some((p, every)) = effective(&self.reanalysis) else {
+            return;
+        };
+        let k = self.reanalysis_state.factor_index;
+        let (inc_pred, inc, inc_value_dependent) =
+            match (&self.last_symbolic, &self.last_factors, &self.last_inertia) {
+                (Some(s), Some(f), Some(i)) => (
+                    predicted_front_flops(s),
+                    Measure {
+                        actual: f.actual_front_flops(),
+                        inertia: i.clone(),
+                        n_tiny: f.n_tiny(),
+                        n_zero: f.n_zero_pivots(),
+                    },
+                    s.resolved_preprocess == OrderingPreprocess::LdltCompress,
+                ),
+                _ => return,
+            };
+
+        // The first factor of a pattern was analysed on its own matrix:
+        // nothing is stale yet.
+        let event = if escalation {
+            Some(ReanalysisEvent::Escalation)
+        } else if k < 2 {
+            None
+        } else if let Some(ratio) = cost_ratio_fires(
+            inc.actual,
+            inc_pred,
+            p.trigger_ratio,
+            self.reanalysis_state.cost_latched,
+        ) {
+            Some(ReanalysisEvent::Cost { ratio })
+        } else if every {
+            Some(ReanalysisEvent::Always)
+        } else if is_probe_index(k, p.probe_first, p.probe_step, p.probe_last)
+            && probes_allowed(inc_pred, matrix.nnz(), p.min_flops_per_nnz_for_probes)
+        {
+            Some(ReanalysisEvent::Probe { k })
+        } else {
+            None
+        };
+        let Some(event) = event else {
+            return;
+        };
+        let is_cost = matches!(event, ReanalysisEvent::Cost { .. });
+        let mut report = ReanalysisReport {
+            event,
+            factor_index: k,
+            incumbent_predicted: inc_pred,
+            incumbent_actual: inc.actual,
+            fresh_predicted: None,
+            trials: Vec::new(),
+            declined: None,
+        };
+        // Issue #221: a rung is judged against the factor that prompted
+        // it; a different analysis in between would break that.
+        if self.ladder_start.is_some() || self.rung_before.is_some() {
+            report.declined = Some(DeclineReason::Ladder);
+            self.reanalysis_state.last_report = Some(report);
+            return;
+        }
+        if self.reanalysis_state.trials_used >= p.max_trials_per_pattern {
+            report.declined = Some(DeclineReason::CapReached);
+            self.reanalysis_state.last_report = Some(report);
+            return;
+        }
+
+        // Fresh candidate (cost and probe events): the solver's own
+        // configuration, with `LdltCompress` forced after an escalation.
+        let mut fresh: Option<StoredAnalysis> = None;
+        let mut fresh_trial = false;
+        let mut identical = false;
+        if !escalation {
+            let mut sp = self.snode_params.clone();
+            sp.symbolic_profiler = None;
+            if self.ordering_escalated {
+                sp.preprocess = OrderingPreprocess::LdltCompress;
+            }
+            if let Ok(sym) = symbolic_factorize_with_method(matrix, &sp, self.ordering.clone()) {
+                self.symbolic_call_count += 1;
+                let fp = predicted_front_flops(&sym);
+                report.fresh_predicted = Some(fp);
+                // A pattern-only analysis next to a pattern-only incumbent
+                // is the same analysis.
+                identical =
+                    sym.resolved_preprocess == OrderingPreprocess::None && !inc_value_dependent;
+                if !identical {
+                    let reference = if is_cost { inc.actual } else { inc_pred };
+                    fresh_trial = cheaper_by_margin(fp, reference, p.margin);
+                    fresh = Some(StoredAnalysis {
+                        sym,
+                        origin: AnalysisOrigin::Fresh { k },
+                        predicted: fp,
+                    });
+                }
+            }
+        }
+
+        // Candidates in trial order: the fresh analysis, then (cost and
+        // escalation events) every stored one.
+        let mut stored = std::mem::take(&mut self.reanalysis_state.stored);
+        let mut order: Vec<Option<usize>> = Vec::new();
+        if fresh_trial {
+            order.push(None);
+        }
+        if is_cost || escalation {
+            order.extend((0..stored.len()).map(Some));
+        }
+        let mut trial_params = params.clone();
+        trial_params.profiler = None;
+        trial_params.pattern_reused_hint = false;
+        let mut measures: Vec<Measure> = Vec::new();
+        let mut tried: Vec<Option<usize>> = Vec::new();
+        let mut best: Option<(usize, SparseFactors, Inertia)> = None;
+        for c in order {
+            if self.reanalysis_state.trials_used >= p.max_trials_per_pattern {
+                break;
+            }
+            let (sym, origin, predicted, from_store) = match c {
+                None => match fresh.as_mut() {
+                    Some(f) => (&mut f.sym, f.origin, f.predicted, false),
+                    None => continue,
+                },
+                Some(i) => match stored.get_mut(i) {
+                    Some(sa) => (&mut sa.sym, sa.origin, sa.predicted, true),
+                    None => continue,
+                },
+            };
+            self.reanalysis_state.trials_used += 1;
+            let out = Self::dispatch_numeric(
+                self.use_parallel,
+                pool,
+                &mut self.workspace,
+                matrix,
+                sym,
+                &trial_params,
+            );
+            // Issue #38 invariant: the one-shot MC64 cache never outlives
+            // the factor it was built for.
+            sym.cached_mc64 = None;
+            let Ok((f, i)) = out else {
+                continue;
+            };
+            let m = Measure {
+                actual: f.actual_front_flops(),
+                inertia: i.clone(),
+                n_tiny: f.n_tiny(),
+                n_zero: f.n_zero_pivots(),
+            };
+            report.trials.push(TrialOutcome {
+                origin,
+                from_store,
+                predicted,
+                actual: m.actual,
+                inertia: i.clone(),
+                n_tiny: m.n_tiny,
+                n_zero: m.n_zero,
+                adopted: false,
+            });
+            let admissible = crate::numeric::reanalysis::judge(&m, &inc, p.margin).is_ok();
+            let improves = match &best {
+                Some((b, _, _)) => m.actual < measures[*b].actual,
+                None => true,
+            };
+            measures.push(m);
+            tried.push(c);
+            if admissible && improves {
+                best = Some((measures.len() - 1, f, i));
+            }
+        }
+
+        match (pick(&measures, &inc, p.margin), best) {
+            (Ok(j), Some((b, f, i))) if j == b => {
+                let adopted = match tried[j] {
+                    None => fresh.take(),
+                    Some(si) => (si < stored.len()).then(|| stored.remove(si)),
+                };
+                if let Some(new) = adopted {
+                    report.trials[j].adopted = true;
+                    let old_origin =
+                        std::mem::replace(&mut self.reanalysis_state.incumbent_origin, new.origin);
+                    if let Some(mut old) = self.last_symbolic.replace(new.sym) {
+                        if old.resolved_preprocess == OrderingPreprocess::LdltCompress {
+                            old.cached_mc64 = None;
+                            stored.push(StoredAnalysis {
+                                sym: old,
+                                origin: old_origin,
+                                predicted: inc_pred,
+                            });
+                        }
+                    }
+                    self.last_factors = Some(f);
+                    self.last_inertia = Some(i);
+                    // Observations of the displaced analysis's factors.
+                    self.prev_max_n_delayed_in = None;
+                    self.auto_arm_latched = false;
+                    let st = &mut self.reanalysis_state;
+                    st.adoptions += 1;
+                    st.reanalysed_now = true;
+                    st.cost_latched = false;
+                }
+            }
+            (verdict, _) => {
+                report.declined = Some(match verdict {
+                    Err(Some(r)) => r,
+                    _ if identical && measures.is_empty() => DeclineReason::Identical,
+                    _ if escalation && measures.is_empty() => DeclineReason::NoCandidate,
+                    _ => DeclineReason::NotCheaper,
+                });
+                if is_cost {
+                    self.reanalysis_state.cost_latched = true;
+                }
+            }
+        }
+        // A value-dependent fresh analysis that was not adopted is kept as
+        // a candidate for a later event.
+        if let Some(f) = fresh {
+            if f.sym.resolved_preprocess == OrderingPreprocess::LdltCompress {
+                stored.push(f);
+            }
+        }
+        while stored.len() > p.max_stored {
+            stored.remove(0);
+        }
+        self.reanalysis_state.stored = stored;
+        self.reanalysis_state.last_report = Some(report);
+    }
+
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
         self.factor_impl(matrix, check_inertia, None)
     }
@@ -1639,6 +1890,15 @@ impl Solver {
                 Ok(sym) => {
                     self.symbolic_call_count += 1;
                     self.last_symbolic = Some(sym);
+                    // Issue #227: where the cached analysis came from (the
+                    // escalation re-entry computes the #102 analysis).
+                    self.reanalysis_state.incumbent_origin = if reentry_pattern_reused.is_some() {
+                        AnalysisOrigin::Escalation {
+                            k: self.reanalysis_state.factor_index,
+                        }
+                    } else {
+                        AnalysisOrigin::Initial
+                    };
                     self.last_pattern_fingerprint = Some(fp);
                     // Store the exact pattern (issue #121) so a future
                     // fingerprint hit is confirmed by an exact compare, never
@@ -2135,6 +2395,29 @@ impl Solver {
                         }
                     }
                 }
+                // Issue #227: re-analysis events on the stored factor. Under
+                // `Never` (the default) this is the only line that reads
+                // the policy, and the factor and status are untouched.
+                let (partial_singular, inertia) =
+                    if matches!(self.reanalysis, ReanalysisPolicy::Never)
+                        || reentry_pattern_reused.is_some()
+                    {
+                        (partial_singular, inertia)
+                    } else {
+                        self.reanalysis_events(matrix, &effective_params, pool.as_ref(), false);
+                        // An adoption replaced the stored factor; the status
+                        // follows the factor handed to the caller.
+                        match (&self.last_factors, &self.last_inertia) {
+                            (Some(f), Some(i)) => (
+                                matches!(
+                                    f.scaling_info,
+                                    crate::scaling::ScalingInfo::PartialSingular { .. }
+                                ),
+                                i.clone(),
+                            ),
+                            _ => (partial_singular, inertia),
+                        }
+                    };
                 if partial_singular {
                     FactorStatus::Singular
                 } else if let Some(expected) = check_inertia {

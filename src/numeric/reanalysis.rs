@@ -31,9 +31,6 @@
 //!
 //! Everything a decision reads is an exact integer or an inertia, so the
 //! policy is deterministic across runs and thread counts.
-// Step 2 of the #227 plan: the decision functions and store are wired into
-// `Solver::factor` in Step 3, which removes this allow.
-#![allow(dead_code)]
 
 use crate::inertia::Inertia;
 use crate::symbolic::SymbolicFactorization;

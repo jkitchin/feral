@@ -163,3 +163,105 @@ pub fn factor_digest(f: &SparseFactors, inertia: &Inertia) -> u64 {
     h.word(inertia.zero as u64);
     h.0
 }
+
+/// Sizes of the qcqp-like KKT fixture.
+pub const Q_NX: usize = 300;
+pub const Q_MD: usize = 150;
+pub const Q_MC: usize = 150;
+
+/// A qcqp-like IPM KKT in pounce's `StdAugSystem` layout, unknowns
+/// `(x, s, c, d)`:
+///
+/// ```text
+/// [ W + D_x   0     J_cᵀ   J_dᵀ ]
+/// [ 0         D_s   0      −I   ]
+/// [ J_c       0     −D_c   0    ]
+/// [ J_d       −I    0      −D_d ]
+/// ```
+///
+/// The slack, `c` and `d` columns have stored degree ≤ 2, so
+/// `pick_ordering_preprocess` recommends `LdltCompress`, and whether the
+/// `Auto` fill race keeps it depends on the values (the MC64 matching).
+///
+/// `iterate = None` is pounce's least-squares-multiplier init matrix:
+/// `W` all explicit zeros, `D_x = D_s = 1`, `D_c = D_d = 0`; its `Auto`
+/// analysis resolves `LdltCompress`. `iterate = Some(k)` has a small
+/// random `W` (entries in ±1e-3), `D_x = Σ_i |W_ij| + 10^e`, `D_s = 10^e`
+/// (`e ∈ [−6, 6]`), `D_c = D_d = 1e-8`; its `Auto` analysis resolves
+/// `None`. The pattern is the same for every member.
+///
+/// Inertia oracle (Sylvester/Haynsworth): `H = blockdiag(W + D_x, D_s)` is
+/// positive definite (`W + D_x` strictly diagonally dominant with positive
+/// diagonal, Gershgorin; `W = 0` and `D = I` at the init), and
+/// `A = [[J_c, 0], [J_d, −I]]` has full row rank (`J_c` has pivot
+/// columns `2i` and its other entries sit in odd columns, and the `d`
+/// rows carry `−I` on the slacks), so `−D − A H⁻¹ Aᵀ` is negative
+/// definite for `D ⪰ 0`: inertia `(n_x + m_d, m_c + m_d, 0)`.
+pub fn qcqp_like(iterate: Option<u64>) -> CscMatrix {
+    let init = iterate.is_none();
+    let mut rng = Rng(1);
+    let mut vr = Rng(0x0abc ^ iterate.map_or(0, |k| 0x9e37_79b9 * (k + 1)));
+    let (nx, md, mc) = (Q_NX, Q_MD, Q_MC);
+    let n = nx + md + mc + md;
+    let (ss, cs, ds) = (nx, nx + md, nx + md + mc);
+    let mut t: Vec<(usize, usize, f64)> = Vec::new();
+    let mut rowsum = vec![0.0f64; nx];
+    let mut wt = Vec::new();
+    for j in 0..nx {
+        for _ in 0..3 {
+            let i = rng.below(nx);
+            if i > j {
+                let v = if init {
+                    0.0
+                } else {
+                    1e-3 * (2.0 * vr.unit() - 1.0)
+                };
+                rowsum[i] += v.abs();
+                rowsum[j] += v.abs();
+                wt.push((i, j, v));
+            }
+        }
+    }
+    let expo = |r: &mut Rng| pow10(r.below(13) as i32 - 6);
+    for (j, rs) in rowsum.iter().enumerate() {
+        let d = if init { 1.0 } else { rs + expo(&mut vr) };
+        t.push((j, j, d));
+    }
+    t.extend(wt);
+    for i in 0..md {
+        let d_s = if init { 1.0 } else { expo(&mut vr) };
+        t.push((ss + i, ss + i, d_s));
+        t.push((ds + i, ss + i, -1.0));
+        t.push((ds + i, ds + i, if init { 0.0 } else { -1e-8 }));
+        for _ in 0..4 {
+            let j = rng.below(nx);
+            t.push((ds + i, j, 2.0 * vr.unit() - 1.0));
+        }
+    }
+    for i in 0..mc {
+        t.push((cs + i, cs + i, if init { 0.0 } else { -1e-8 }));
+        t.push((cs + i, 2 * i, 1.0 + vr.unit()));
+        for _ in 0..3 {
+            let j = rng.below(nx);
+            if j % 2 == 1 {
+                t.push((cs + i, j, 2.0 * vr.unit() - 1.0));
+            }
+        }
+    }
+    let r: Vec<usize> = t.iter().map(|x| x.0).collect();
+    let c: Vec<usize> = t.iter().map(|x| x.1).collect();
+    let v: Vec<f64> = t.iter().map(|x| x.2).collect();
+    match CscMatrix::from_triplets(n, &r, &c, &v) {
+        Ok(a) => a,
+        Err(e) => panic!("qcqp_like({iterate:?}): {e}"),
+    }
+}
+
+/// Sylvester/Haynsworth inertia of every [`qcqp_like`] member.
+pub fn qcqp_like_inertia() -> Inertia {
+    Inertia {
+        positive: Q_NX + Q_MD,
+        negative: Q_MC + Q_MD,
+        zero: 0,
+    }
+}
