@@ -1,6 +1,9 @@
 # FERAL
 
-![FERAL banner](https://raw.githubusercontent.com/jkitchin/feral/main/assets/feral-banner.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/jkitchin/feral/main/assets/feral-logo-dark.svg">
+  <img alt="FERAL" src="https://raw.githubusercontent.com/jkitchin/feral/main/assets/feral-logo.svg">
+</picture>
 
 [![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jkitchin/feral/branch/main/graph/badge.svg)](https://codecov.io/gh/jkitchin/feral)
