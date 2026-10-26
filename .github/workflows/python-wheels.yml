@@ -94,9 +94,18 @@ jobs:
             target: x64
     steps:
       - uses: actions/checkout@v6
+      # maturin is asked for all four interpreters below, so install all
+      # four. The Windows image stopped shipping 3.10/3.11/3.13 on PATH
+      # (v0.22.0's release run: "Interpreters [CPython 3.10] were found in
+      # maturin's bundled sysconfig, but compiling for Windows without an
+      # interpreter requires PyO3's generate-import-lib feature").
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: |
+            3.10
+            3.11
+            3.13
+            3.12
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
