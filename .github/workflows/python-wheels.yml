@@ -20,7 +20,21 @@ on:
       - ".github/workflows/python-wheels.yml"
   release:
     types: [published]
+  # Manual runs build wheels and the sdist. With `ref` set to a release tag
+  # and `publish` ticked, they also publish that tag to PyPI. That is the
+  # recovery path when a release run's wheel build fails: re-running that
+  # run would reuse the workflow file at the tag. It was added after
+  # v0.22.0's Windows wheel failed.
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or ref to build (e.g. v0.22.0); empty = the dispatched ref"
+        required: false
+        default: ""
+      publish:
+        description: "Publish the built wheels and sdist to PyPI (needs ref = a vX.Y.Z tag)"
+        type: boolean
+        default: false
 
 # Cancel in-progress runs on the same branch when a new push lands.
 concurrency:
@@ -41,6 +55,8 @@ jobs:
         python: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v6
         with:
@@ -94,6 +110,8 @@ jobs:
             target: x64
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       # maturin is asked for all four interpreters below, so install all
       # four. The Windows image stopped shipping 3.10/3.11/3.13 on PATH
       # (v0.22.0's release run: "Interpreters [CPython 3.10] were found in
@@ -126,6 +144,8 @@ jobs:
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v6
         with:
@@ -148,6 +168,8 @@ jobs:
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: wheels-linux-x86_64
@@ -167,7 +189,10 @@ jobs:
     name: Publish to PyPI
     needs: [wheels, sdist, smoke-test]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish &&
+       startsWith(inputs.ref, 'v'))
     environment:
       name: pypi
       url: https://pypi.org/p/feral-solver
@@ -183,4 +208,22 @@ jobs:
         with:
           name: sdist
           path: dist
+      # Every file must carry the version being published: the release tag
+      # on a release run, `inputs.ref` on a manual run.
+      - name: Verify artifact versions match the tag
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.ref }}
+        run: |
+          set -euo pipefail
+          want="${TAG#v}"
+          ls dist
+          n=0
+          for f in dist/*; do
+            case "$(basename "$f")" in
+              feral_solver-"$want"-*.whl|feral_solver-"$want".tar.gz) n=$((n+1)) ;;
+              *) echo "::error::$f does not match version $want"; exit 1 ;;
+            esac
+          done
+          [ "$n" -gt 0 ] || { echo "::error::no artifacts"; exit 1; }
+          echo "all $n artifacts are version $want"
       - uses: pypa/gh-action-pypi-publish@release/v1
