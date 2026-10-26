@@ -3,6 +3,7 @@
 [Introduction](./introduction.md)
 
 - [Getting started](./getting-started.md)
+- [Interior-point use](./ipm.md)
 - [Inertia semantics](./inertia.md)
 - [Scaling](./scaling.md)
 - [Fill-reducing ordering](./ordering.md)
