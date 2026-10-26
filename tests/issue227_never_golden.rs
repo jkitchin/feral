@@ -25,7 +25,17 @@ const SYNTHETIC_DIGESTS: [u64; N_ITER] = [
     0x6c1b1b6ec45e207f,
     0x94989d5e8d87d735,
 ];
-const PARITY_DIGEST: u64 = 0xc9f250bc555067d9;
+// The parity corpus runs the full default pipeline on real matrices, which
+// is not bit-identical across architectures (issue #211 class), so its
+// digest is pinned per architecture. Both were computed on main @ 95ba43b:
+// aarch64 locally (macOS), x86_64 on GitHub's ubuntu runner (CI run
+// 40311235566). The synthetic digests above are the same on both.
+#[cfg(target_arch = "aarch64")]
+const PARITY_DIGEST: Option<u64> = Some(0xc9f250bc555067d9);
+#[cfg(target_arch = "x86_64")]
+const PARITY_DIGEST: Option<u64> = Some(0xb3e9485f1cfbb3fd);
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+const PARITY_DIGEST: Option<u64> = None;
 const PARITY_COUNT: usize = 122;
 
 fn printing() -> bool {
@@ -127,5 +137,7 @@ fn parity_corpus_is_bit_identical_to_main() {
     }
     assert_eq!((dp, np), (ds, ns), "parallel and sequential digests differ");
     assert_eq!(np, PARITY_COUNT);
-    assert_eq!(dp, PARITY_DIGEST);
+    if let Some(want) = PARITY_DIGEST {
+        assert_eq!(dp, want);
+    }
 }
