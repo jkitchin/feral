@@ -25,6 +25,11 @@
 # SILENTLY SKIPPED at publish time — shipping stale code (the same drift
 # that shipped the v0.5.0 Python trio at 0.4.0). See do_ordering_check.
 #
+# Two documentation strings also carry the version and are bumped and
+# checked here too (they had drifted to 0.3.0 and "0.10" by 0.22.0):
+#   7. CITATION.cff            version: X.Y.Z and date-released
+#   8. book/src/getting-started.md   feral = "X.Y" (major.minor)
+#
 # Usage:
 #   scripts/release-checklist.sh [check]      verify all six agree (default)
 #   scripts/release-checklist.sh bump X.Y.Z   set all six to X.Y.Z, re-check
@@ -60,6 +65,14 @@ lock_version() {
             match($0, /"[^"]*"/); print substr($0, RSTART + 1, RLENGTH - 2); exit
         }
     ' "$file"
+}
+
+# CITATION.cff `version:` and the book's `feral = "X.Y"` dependency line.
+cff_version() {
+    awk '/^version:/ { print $2; exit }' CITATION.cff
+}
+book_dep_version() {
+    sed -nE 's/^feral = "([^"]+)"$/\1/p' book/src/getting-started.md | head -1
 }
 
 # --- ordering-crate staleness guard ------------------------------------
@@ -163,6 +176,24 @@ do_check() {
         changelog_ok=0
     fi
 
+    # Documentation version strings (not part of the six; see header).
+    local docs_ok=1 cff book want_book
+    cff="$(cff_version)"
+    book="$(book_dep_version)"
+    want_book="${canonical%.*}"
+    if [ "$cff" = "$canonical" ]; then
+        echo "  ok    CITATION.cff version $cff"
+    else
+        echo "  DIFF  CITATION.cff version ${cff:-<missing>} (want $canonical)"
+        docs_ok=0
+    fi
+    if [ "$book" = "$want_book" ]; then
+        echo "  ok    book getting-started feral = \"$book\""
+    else
+        echo "  DIFF  book getting-started feral = \"${book:-<missing>}\" (want \"$want_book\")"
+        docs_ok=0
+    fi
+
     # The tag should NOT exist yet for an unreleased version.
     if git rev-parse -q --verify "refs/tags/v$canonical" >/dev/null; then
         echo "  note  tag v$canonical already exists (already released?)"
@@ -190,13 +221,19 @@ do_check() {
         echo "        record it in CHANGELOG.md."
         rc=1
     fi
+    if [ "$docs_ok" -eq 0 ]; then
+        echo "RESULT: CITATION.cff or the book's getting-started version is"
+        echo "        stale — 'scripts/release-checklist.sh bump $canonical' sets both."
+        rc=1
+    fi
     if [ "$changelog_ok" -eq 0 ]; then
         echo "RESULT: CHANGELOG.md still needs a [$canonical] section."
         rc=1
     fi
     if [ "$rc" -eq 0 ]; then
-        echo "RESULT: all six version strings agree on $canonical; no ordering"
-        echo "        crate is stale; CHANGELOG has a [$canonical] section."
+        echo "RESULT: all six version strings agree on $canonical; CITATION.cff"
+        echo "        and the book agree; no ordering crate is stale; CHANGELOG"
+        echo "        has a [$canonical] section."
     fi
     return "$rc"
 }
@@ -228,6 +265,18 @@ do_bump() {
     set_toml_version python/Cargo.toml      package "$ver"
     set_toml_version python/pyproject.toml  project "$ver"
 
+    # Documentation version strings.
+    local tmp
+    tmp="$(mktemp)"
+    awk -v ver="$ver" -v day="$(date +%Y-%m-%d)" '
+        /^version:/       { print "version: " ver; next }
+        /^date-released:/ { print "date-released: " day; next }
+        { print }
+    ' CITATION.cff > "$tmp" && mv "$tmp" CITATION.cff
+    tmp="$(mktemp)"
+    sed -E "s/^feral = \"[^\"]+\"$/feral = \"${ver%.*}\"/" \
+        book/src/getting-started.md > "$tmp" && mv "$tmp" book/src/getting-started.md
+
     # Refresh both lockfiles. --workspace updates only workspace members
     # (feral / feral-python), never their third-party dependencies.
     echo "  cargo update --workspace (root) ..."
@@ -244,22 +293,25 @@ Remaining manual steps (this script does NOT commit, tag, or release):
 
   1. Edit CHANGELOG.md — move the [Unreleased] entries into a new
      section:  ## [$ver] - $(date +%Y-%m-%d)
-  2. cargo test            (root workspace — hard rule before commit)
+  2. Review the user-facing docs for this release's changes: README.md
+     (test count in "Status", "Known limitations"), book/src/*.md (new
+     APIs and options), python/README.md. The CHANGELOG lists what moved.
+  3. cargo test            (root workspace — hard rule before commit)
      cargo test --manifest-path python/Cargo.toml
-  3. Review:  git diff
-  4. git commit  (every commit needs a body: what / why / evidence)
-  5. git tag -a v$ver -m "feral v$ver"
-  6. git push origin main && git push origin v$ver
-  7. gh release create v$ver --title "feral v$ver" --notes-file <notes> \\
+  4. Review:  git diff
+  5. git commit  (every commit needs a body: what / why / evidence)
+  6. git tag -a v$ver -m "feral v$ver"
+  7. git push origin main && git push origin v$ver
+  8. gh release create v$ver --title "feral v$ver" --notes-file <notes> \\
        --verify-tag
 
-  ⚠  Step 7 is the irreversible trigger. Publishing the GitHub release
+  ⚠  Step 8 is the irreversible trigger. Publishing the GitHub release
      fires release.yml (publishes all 7 crates to crates.io — permanent,
      only 'cargo yank' is possible) AND python-wheels.yml (builds
      feral_solver-$ver wheels and publishes to PyPI — that version's
      files can never be re-uploaded). Make sure $ver is final first.
 
-  8. Verify (crates.io rejects a request with no User-Agent, and does it
+  9. Verify (crates.io rejects a request with no User-Agent, and does it
      silently — without the header even 'serde' reads as unpublished):
        curl -s -H 'User-Agent: feral-release (jkitchin@andrew.cmu.edu)' \\
          https://crates.io/api/v1/crates/feral | \\
