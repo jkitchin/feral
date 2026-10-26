@@ -940,6 +940,25 @@ impl SymbolicFactorization {
     }
 }
 
+/// Predicted dense-front work of an analysis (issue #227):
+/// `Σ_supernodes F(ncol, nrow)` with `F(c, r) = Σ_{k<c} (r − k)²`, the
+/// rank-1-update count of eliminating `c` columns from an `r`-row front.
+///
+/// An exact integer, so it is identical across runs and thread counts.
+/// Compare it with [`SparseFactors::actual_front_flops`] of a factor
+/// computed under this analysis: the two agree when no pivot is delayed,
+/// and delayed pivots move work from child fronts to larger parent
+/// fronts. This is *not* [`WorkEstimate::factor_flops`] (the
+/// `Σ ncol·nrow²` proxy), which is kept as is for existing readers.
+///
+/// [`SparseFactors::actual_front_flops`]: crate::numeric::factorize::SparseFactors::actual_front_flops
+pub fn predicted_front_flops(sym: &SymbolicFactorization) -> u128 {
+    sym.supernodes
+        .iter()
+        .map(|sn| supernode::front_flops(sn.ncol, sn.nrow))
+        .sum()
+}
+
 /// Concrete candidates raced by [`OrderingMethod::AutoRace`].
 ///
 /// Public so callers (and tests) can see what the race covers without
