@@ -25,7 +25,7 @@ optimization. It is published on
 **full ~183k-matrix KKT corpus** with no n-size filter (matrices up to
 n ≈ 5×10⁵, ~14k above n = 500 and ~10k above n = 1000; residuals at
 machine precision on the well-conditioned majority), and passes
-**705 tests, 0 failed** (lib + integration, 20 ignored).
+**1022 tests, 0 failed** (lib + integration, 24 ignored).
 
 Inertia correctness is validated against a multi-source consensus oracle —
 feral + canonical Fortran **MUMPS 5.8.2** + **SPRAL/SSIDS** — via
@@ -180,6 +180,11 @@ form writing into a caller-owned buffer instead of allocating —
 `solve_sparse_refined_into`, `solve_sparse_many_refined_into`. Each is
 bit-identical to its allocating twin; a wrong-length buffer returns
 `DimensionMismatch` rather than panicking.
+
+For interior-point use — one `Solver` across a whole solve, inertia
+checks, `increase_quality`, the opt-in `ReanalysisPolicy::OnStale`, and the
+`FactorStats` diagnostics — see the book's
+[Interior-point use](book/src/ipm.md) chapter.
 
 ## Python bindings
 
@@ -444,8 +449,11 @@ story of how and why it was built.
   (`may_delay = true`, `n_delayed_in/out` plumbed through
   `factorize_multifrontal`). The standalone dense `factor` entry
   point still falls back to `ZeroPivotAction::ForceAccept` on
-  rank-deficient blocks; the sparse-path root supernode runs under
-  `may_delay = false` for the same reason.
+  rank-deficient blocks. In the sparse path, fronts that cannot delay
+  (the root, and cascade-break fronts whose delay budget is spent) run
+  under `may_delay = false` and factor in two phases: the ordinary
+  threshold pass first, then a forced pass over what is left (issue
+  #221).
 
 ## References
 

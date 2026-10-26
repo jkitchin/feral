@@ -12,8 +12,8 @@ authors:
     email: jkitchin@andrew.cmu.edu
     affiliation: Carnegie Mellon University
     orcid: "https://orcid.org/0000-0003-2625-9232"
-version: 0.3.0
-date-released: 2026-05-13
+version: 0.22.0
+date-released: 2026-10-26
 license: MIT
 repository-code: "https://github.com/jkitchin/feral"
 url: "https://github.com/jkitchin/feral"

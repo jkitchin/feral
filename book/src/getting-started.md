@@ -4,7 +4,7 @@ Add feral to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-feral = "0.10"
+feral = "0.22"
 ```
 
 feral is primarily a **sparse** symmetric indefinite solver. The
@@ -107,5 +107,8 @@ let x = solve(&factors, &b)?;
   [`examples/`](https://github.com/jkitchin/feral/tree/main/examples)
   exercises the dense and sparse paths, scaling, and refinement.
 - Python bindings and notebooks: see [Python bindings](./python.md).
+- Interior-point solves (inertia checks, `increase_quality`, the
+  re-analysis policy, factor diagnostics): see
+  [Interior-point use](./ipm.md).
 - Inertia guarantees on singular matrices: see
   [Inertia semantics](./inertia.md).

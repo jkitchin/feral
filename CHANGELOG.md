@@ -4,11 +4,12 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-26
+
 **Breaking.** `FactorStats` (`feral::FactorStats`) is an exhaustive public
 struct and gains four public fields: `predicted_flops: u128`,
 `actual_flops: u128`, `reanalysed: bool` and `reanalysis_count: u32`. Code
-that builds it with a struct literal stops compiling; add the fields. The
-next release should be 0.22.0.
+that builds it with a struct literal stops compiling; add the fields.
 
 ### Added — re-analysis of a stale symbolic analysis (issue #227)
 
