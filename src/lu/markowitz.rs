@@ -32,8 +32,8 @@
 //! `Vec` per column or row (issue #232).
 //!
 //! The count heaps that drive the general pivot search are built only when the
-//! singleton stacks first run dry, i.e. over the kernel left after the
-//! triangular peel, not over all `m` (issue #232). The rank-1 update runs column-oriented — for each alive column `j`
+//! singleton stacks first run dry, from a log of what they would have held, so
+//! the pivots are exactly those of eagerly maintained heaps (issue #232). The rank-1 update runs column-oriented — for each alive column `j`
 //! in the pivot row, `col_j ← col_j − u_j · l` — so finding `u_j` costs a scan of
 //! `col_j`, which that column's rebuild pays for anyway. The pivot search reads
 //! column values directly, which is what it needs: both `max_k|a_kj|` and the
@@ -172,7 +172,7 @@ impl<T: Copy + Default> Lists<T> {
 ///
 /// `u_thresh` is the relative pivot threshold (`0 < u ≤ 1`; `1.0` degenerates to
 /// partial pivoting within the chosen column). `max_search` is the Suhl cutoff:
-/// stop examining candidate columns once this many distinct columns have been
+/// stop examining candidate columns once this many heap entries have been
 /// examined and a candidate is in hand. `zero_pivot_tol` is scaled by `max|A|`
 /// exactly as the Gilbert–Peierls path scales it.
 ///
@@ -239,12 +239,31 @@ pub(super) fn markowitz_factor(
 
     // Lazy min-heaps over the counts; stale pairs are discarded on pop.
     //
-    // Built the first time the singleton stacks run dry, over the columns and
-    // rows still alive then — i.e. over the kernel, not the whole basis
-    // (issue #232). Before that point nothing reads them, so nothing is pushed:
-    // building them up front over all m and pushing on every count change left
-    // ~17k stale entries to pop one at a time once the kernel search started.
+    // **The heap contents are part of the pivot rule.** The heap can hold
+    // several live copies of `(c, j)` (a column re-pushed without its count
+    // changing, or a count returning to an earlier value), the search scans
+    // and counts each copy against `max_search`, so how far it looks depends
+    // on the multiset of entries. pounce's active-set QP uses this
+    // factorization as a rank-reveal probe, and a search that examined each
+    // column once instead (an earlier revision of #232) changed which rows it
+    // declared dependent and made QGFRDXPN cycle to the iteration cap
+    // (PR #234). So the multiset is reproduced exactly, not approximated.
+    //
+    // Nothing pops either heap until the first step with no singleton pivot,
+    // so up to that step the heap is just "initial entries + every push", in
+    // order-free form. During the singleton peel those entries go into plain
+    // logs (an append, not a sift), and the heaps are built from the logs by
+    // one heapify when the stacks first run dry. A min-heap's sequence of
+    // popped values depends only on its multiset (equal entries are equal
+    // values), so the search then sees exactly what the eagerly maintained
+    // heaps would have held. Entries for rows and columns already eliminated
+    // are left out of the build: they are discarded on every pop and a dead
+    // row or column never comes back, so dropping them changes nothing but
+    // cost. On a near-triangular LP basis that is ~17k entries the eager
+    // heaps sifted in and then popped one at a time (issue #232).
     let mut heaps_built = false;
+    let mut cheap_log: Vec<(usize, usize)> = (0..m).map(|j| (ccnt[j], j)).collect();
+    let mut rheap_log: Vec<(usize, usize)> = (0..m).map(|i| (rcnt[i], i)).collect();
     let mut cheap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
     let mut rheap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
 
@@ -259,7 +278,6 @@ pub(super) fn markowitz_factor(
     let mut lvec: Vec<(usize, f64)> = Vec::new();
     let mut uvec: Vec<(usize, f64)> = Vec::new();
     let mut scanned: Vec<usize> = Vec::new();
-    let mut scan_mark = vec![false; m];
 
     // ---- output ----------------------------------------------------------
     let mut perm = Vec::with_capacity(m);
@@ -317,14 +335,18 @@ pub(super) fn markowitz_factor(
         }
 
         if fast.is_none() && !heaps_built {
-            cheap = (0..m)
-                .filter(|&j| alive_c[j])
-                .map(|j| Reverse((ccnt[j], j)))
-                .collect();
-            rheap = (0..m)
-                .filter(|&i| alive_r[i])
-                .map(|i| Reverse((rcnt[i], i)))
-                .collect();
+            cheap = cheap_log
+                .drain(..)
+                .filter(|&(_, j)| alive_c[j])
+                .map(Reverse)
+                .collect::<Vec<_>>()
+                .into();
+            rheap = rheap_log
+                .drain(..)
+                .filter(|&(_, i)| alive_r[i])
+                .map(Reverse)
+                .collect::<Vec<_>>()
+                .into();
             heaps_built = true;
         }
 
@@ -364,15 +386,9 @@ pub(super) fn markowitz_factor(
                 }
             }
             cheap.pop();
-            // The heap can hold several live copies of `(c, j)` (a column
-            // re-pushed without its count changing). Examine each column once:
-            // a second look cannot improve `best`, and counting it again
-            // against `max_search` would cut the search short by an amount
-            // that depends on push history rather than on the matrix.
-            if scan_mark[j] {
-                continue;
-            }
-            scan_mark[j] = true;
+            // A column with several live copies is scanned once per copy and
+            // each scan counts against `max_search`: see the heap comment above
+            // for why that is kept.
             scanned.push(j);
 
             let colmax = cols
@@ -408,7 +424,6 @@ pub(super) fn markowitz_factor(
             }
         }
         for &j in scanned.iter() {
-            scan_mark[j] = false;
             if alive_c[j] {
                 cheap.push(Reverse((ccnt[j], j)));
             }
@@ -572,13 +587,15 @@ pub(super) fn markowitz_factor(
             }
             seen_list.clear();
             ccnt[j] = cols.len[j];
-            // Into the heap as well once it exists: the stack is a fast path,
-            // not an alternative index. A column that stops being a singleton
-            // is dropped from the stack, and if it were not in `cheap` too it
-            // would be invisible to the general search and reported singular.
-            // Before the heaps are built, the build itself picks it up.
+            // Into the heap as well (or its log, before it exists): the stack
+            // is a fast path, not an alternative index. A column that stops
+            // being a singleton is dropped from the stack, and if it were not
+            // in `cheap` too it would be invisible to the general search and
+            // reported singular.
             if heaps_built {
                 cheap.push(Reverse((ccnt[j], j)));
+            } else {
+                cheap_log.push((ccnt[j], j));
             }
             if ccnt[j] == 1 {
                 col_singletons.push(j);
@@ -596,6 +613,8 @@ pub(super) fn markowitz_factor(
                 }
                 if heaps_built {
                     rheap.push(Reverse((rcnt[i], i)));
+                } else {
+                    rheap_log.push((rcnt[i], i));
                 }
             }
         }
