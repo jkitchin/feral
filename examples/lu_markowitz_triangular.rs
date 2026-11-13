@@ -10,7 +10,9 @@
 //! singletons, plus the pure-diagonal columns as column singletons) and `K` a
 //! random sparse kernel.
 //!
-//! Also reads Matrix Market bases given on the command line.
+//! Also reads bases given on the command line: Matrix Market (`.mtx`) or
+//! discopt's basis dump (anything else; e.g. `piperout-d27_basis100.txt`,
+//! gunzipped).
 //!
 //! Usage: `cargo run --release --example lu_markowitz_triangular [reps] [file.mtx ...]`
 //! (`reps = 0`: digest and fill only; `FERAL_SEEDS=n`: n synthetic bases).
@@ -114,6 +116,29 @@ fn read_mtx(path: &str) -> SparseColMatrix {
     SparseColMatrix::from_sparse_columns(m, &cols).expect("basis")
 }
 
+/// discopt's basis dump (issue #232): first token `m`, then per column
+/// `count r1 v1 r2 v2 ...` with 0-based rows. Whitespace-separated, so line
+/// breaks do not matter.
+fn read_discopt_basis(path: &str) -> SparseColMatrix {
+    let text = std::fs::read_to_string(path).expect("read");
+    let mut tok = text.split_whitespace();
+    let mut next = || tok.next().expect("truncated basis file");
+    let m: usize = next().parse().expect("m");
+    let mut cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+    for _ in 0..m {
+        let k: usize = next().parse().expect("count");
+        let mut col = Vec::with_capacity(k);
+        for _ in 0..k {
+            let r: usize = next().parse().expect("row");
+            let v: f64 = next().parse().expect("value");
+            col.push((r, v));
+        }
+        col.sort_by_key(|&(r, _)| r);
+        cols.push(col);
+    }
+    SparseColMatrix::from_sparse_columns(m, &cols).expect("basis")
+}
+
 fn digest(lu: &mut SparseLu) -> u64 {
     let m = lu.dim();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -212,6 +237,11 @@ fn main() {
         );
     }
     for path in args.iter().skip(1) {
-        run(path, &read_mtx(path), reps);
+        let a = if path.ends_with(".mtx") {
+            read_mtx(path)
+        } else {
+            read_discopt_basis(path)
+        };
+        run(path, &a, reps);
     }
 }
