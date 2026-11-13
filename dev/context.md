@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-13T19:26:38Z
+Generated: 2026-11-13T20:51:25Z
 
 ## Latest Session
 File: dev/sessions/2026-11-13-02.md
@@ -59,11 +59,11 @@ The issue's real basis was not measured.
 
 ## Git Status
 ```
+e8a1d59 Markowitz LU: restore the 0.22 pivot order exactly (PR #234 regression)
+dd98cb8 Merge origin/main into claude/gallant-cray-pjv1tt (PR #234)
+41e7c2b Merge pull request #233 from jkitchin/claude/eloquent-galileo-zssfkc
 cae166d Session 2026-11-13-01 checkpoint: in-place refactor follow-up (#232)
 c25e89b lu_markowitz_triangular: time and verify the in-place refactor (#232)
-132c16e SparseLu::refactor_markowitz: in-place refactor reusing memory (#232)
-962ffa1 Session 2026-11-13-01 checkpoint: #232 Markowitz LU bookkeeping
-6a5afd3 Sparse LU assemble: no per-column Vecs in remap_and_sort_l, sized u_above (#232)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 475 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.64s
+test result: ok. 475 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.55s
 
 ```
 
@@ -107,24 +107,6 @@ Identical to 2026-10-23-01.
 ```
 
 ## Recent Decisions
-**Why.** Building the count heaps only over the kernel (the #232 speed fix)
-changes the heap's push history, and the copy count was a function of that
-history, not of the matrix. Without the dedup the pivot order would depend
-on an implementation detail of when the heap was built. With it, the
-bookkeeping refactor is bit-identical to "old code + dedup" on every basis
-measured, so the only behaviour change is this one, isolated and measured.
-
-**Evidence.** Fill on 40 synthetic near-triangular bases: geomean +0.27 %
-(min -0.46 %, max +1.61 %, 36 worse / 4 better). QPLIB_1157 +0.54 %,
-QPLIB_3852 and bchoco06 unchanged. All 1022 tests pass. Journal
-2026-11-13-02.
-
-## 2026-11-13 — fresh and in-place sparse LU factors share one fill path (issue #232)
-
-**Decision.** `SparseLu` is built by `assemble_into`, which overwrites
-every field of an existing `SparseLu` and reuses its buffers. A fresh
-factor is `assemble_into` on `SparseLu::empty()`. `refactor_markowitz`
-calls it on the live factor, and `SparseLu::refactor` routes to it under
 Markowitz pivoting. `assemble_into` destructures `SparseLu` exhaustively.
 
 **Why.** The in-place path is only safe if it leaves exactly the state a
@@ -138,27 +120,45 @@ fresh bitwise, including under the same script of solves and FT updates
 afterwards; deleting any of three resets fails it. ~22 % faster on the
 #232 basis shape (journal 2026-11-13-02).
 
+## 2026-11-13 — Markowitz pivot order is held bit-identical to 0.22 (reverses the distinct-columns entry above, PR #234)
+
+**Decision.** The threshold-Markowitz search keeps its 0.22 budget: each
+live heap entry it examines counts against `markowitz_max_search`,
+duplicates included. The kernel-only heap build reproduces the eager heaps'
+multiset exactly (peel-phase pushes logged, heapified at the first
+non-singleton step, dead rows/columns left out). This reverses the earlier
+2026-11-13 entry "Markowitz candidate search counts distinct columns".
+
+**Why.** pounce's active-set QP uses this factorization as a rank-reveal
+probe. The distinct-columns rule made QGFRDXPN cycle to the iteration cap
+(details in `dev/tried-and-rejected.md`, 2026-11-13). Pivot order is
+therefore treated as part of the contract.
+
+**Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
+QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
+fails if the dedup is re-added. Journal 2026-11-13-02.
+
 ## Recent Tried-and-Rejected
-  (`dense::matrix::fit_pooled_front`).
-- **Recycling absorbed blocks' buffers through the contribution pool.**
-  The kernel reuses a pooled buffer with `reserve`, so a buffer grows
-  along a chain of siblings up to twice the largest block, and the
-  parent's small block then pins it until the grandparent assembles: 19
-  of 2,000 random trees more than 2% above `Off` (worst 1.128×), and the
-  retained factor larger in 1,126 (review finding). Pooling only
-  delayed-pivot remainders still grew one delaying tree's retained
-  factor by 32 B. Absorbed blocks and remainders are now freed; `Off`
-  already pays one allocation per leaf block.
-- **Counting packed blocks in `WorkEstimate::peak_contrib_bytes`.** The
-  default `Solver` runs the parallel task graph when the tree has task
-  parallelism, which holds square blocks, so a packed figure understated
-  that path's contribution memory by about half (review finding). The
-  estimate stays the classic square one, an upper bound for every driver
-  and scheme.
-- **A `ContribLayout` argument on the public dense kernels.** Only the
-  crate's own drivers pass anything but `Square`. The public signatures
-  stay as in 0.22.0; the drivers call crate-internal `_with_layout`
-  variants.
+the contract for callers that use `SparseLu` as a rank-reveal probe. With
+PR #234 at dd98cb8, pounce's
+`crates/pounce-cli/tests/issue_1076_qgfrdxpn_active_set_prune_cap.rs`
+(`convex_qp_qgfrdxpn`, `solver_selection=qp-active-set`) went from
+SolveSucceeded, 3 553 iterations, 6.0 s on feral 0.22 to
+MaximumIterationsExceeded at 27 811 iterations, 50.6 s (objective 1.00569e11
+at the cap vs 1.00791e11 optimal); it reproduced on re-run. The other 2 156
+pounce tests passed, and pounce's default fixture sweep diffed empty
+because its default routing never reaches the rank probe. The only signal
+I had measured was fill (+0.27 % geomean over 40 synthetic bases, 36/40
+worse), which says nothing about which rows a rank reveal declares
+dependent.
+
+**Replaced with.** Exact reproduction of the 0.22 heap contents: peel-phase
+pushes are logged and heapified when the singleton stacks first run dry,
+minus entries for eliminated rows/columns. Digests are bit-identical to 0.22
+on 3 real and 40 synthetic bases, pinned by `tests/lu_markowitz_golden.rs`.
+Lesson: on a factorization other code uses for rank decisions, a change to
+pivot order is a behaviour change even when fill and residuals are fine;
+gate it on a golden pivot test, not on fill.
 
 ## Source Files
 ```
@@ -300,6 +300,7 @@ tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
+tests/lu_markowitz_golden.rs
 tests/lu_real_bases.rs
 tests/lu_refactor_inplace.rs
 tests/lu_scaling.rs

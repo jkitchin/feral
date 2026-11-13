@@ -8230,3 +8230,21 @@ it, rather than a stale value carried into the next factorization.
 fresh bitwise, including under the same script of solves and FT updates
 afterwards; deleting any of three resets fails it. ~22 % faster on the
 #232 basis shape (journal 2026-11-13-02).
+
+## 2026-11-13 — Markowitz pivot order is held bit-identical to 0.22 (reverses the distinct-columns entry above, PR #234)
+
+**Decision.** The threshold-Markowitz search keeps its 0.22 budget: each
+live heap entry it examines counts against `markowitz_max_search`,
+duplicates included. The kernel-only heap build reproduces the eager heaps'
+multiset exactly (peel-phase pushes logged, heapified at the first
+non-singleton step, dead rows/columns left out). This reverses the earlier
+2026-11-13 entry "Markowitz candidate search counts distinct columns".
+
+**Why.** pounce's active-set QP uses this factorization as a rank-reveal
+probe. The distinct-columns rule made QGFRDXPN cycle to the iteration cap
+(details in `dev/tried-and-rejected.md`, 2026-11-13). Pivot order is
+therefore treated as part of the contract.
+
+**Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
+QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
+fails if the dedup is re-added. Journal 2026-11-13-02.

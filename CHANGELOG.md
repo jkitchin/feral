@@ -39,14 +39,14 @@ Measurements and unfavourable results:
 ### Changed — faster threshold-Markowitz sparse LU on near-triangular bases (issue #232)
 
 `SparseLu::factor_markowitz` (the default `LuPivoting::Markowitz` route)
-builds its pivot-search heaps only over the kernel left after the singleton
-peel, stores the active submatrix in packed buffers instead of one `Vec`
-per column and row, and no longer allocates per column when sorting `L`.
-On a synthetic basis shaped like the issue's LP basis (m = 17 470, ~92 %
-triangular) the factor drops from ~12.9 ms to ~5.4 ms median; QPLIB_3852
-0.78 -> 0.35 ms. The candidate search now counts each column once against
-`markowitz_max_search`, which changes some kernel pivot choices: fill moves
-by +0.27 % geomean (max +1.6 %) on 40 synthetic bases.
+logs its pivot-search heap entries during the singleton peel and builds the
+heaps once at the kernel, stores the active submatrix in packed buffers
+instead of one `Vec` per column and row, and no longer allocates per column
+when sorting `L`. **Pivots and factor values are bit-identical to 0.22**
+(pinned by `tests/lu_markowitz_golden.rs`). On a synthetic basis shaped like
+the issue's LP basis (m = 17 470, ~92 % triangular) a new factor, including
+dropping the old one, takes ~6.4 ms against ~12.9 ms; QPLIB_3852
+0.78 -> 0.40 ms.
 
 ### Added — in-place sparse LU refactorization (issue #232)
 
@@ -55,7 +55,7 @@ existing factorization and reuses its memory (U rows, column index, work
 arrays). The result is bit-identical to `SparseLu::factor_markowitz`; on
 error the previous factor is left intact. `SparseLu::refactor` (and the
 Python `LuFactor.refactor`) uses it under the default Markowitz pivoting.
-On the #232 basis shape a refactor takes ~4.9 ms against ~6.3 ms for
+On the #232 basis shape a refactor takes ~5.3 ms against ~6.4 ms for
 building a new factor and dropping the old one. Callers that create a new
 `SparseLu` per refactorization should hold one and call
 `refactor_markowitz` instead.

@@ -6401,3 +6401,35 @@ thousands of leaf blocks all land in one small front).
   crate's own drivers pass anything but `Square`. The public signatures
   stay as in 0.22.0; the drivers call crate-internal `_with_layout`
   variants.
+
+## 2026-11-13 — #232: Markowitz candidate search examining each column once per step
+
+**Tried.** A per-step mark (`scan_mark`) so the pivot search scanned each
+column at most once and counted distinct columns against
+`markowitz_max_search`. The lazy count heap holds several live copies of
+`(count, j)`, and building the heaps over the kernel only (the #232 speed
+fix) changes how many, so the dedup was meant to make the search
+independent of push history. Recorded as a decision in `dev/decisions.md`
+the same day.
+
+**Why it failed.** It changes kernel pivots, and pivot choice is part of
+the contract for callers that use `SparseLu` as a rank-reveal probe. With
+PR #234 at dd98cb8, pounce's
+`crates/pounce-cli/tests/issue_1076_qgfrdxpn_active_set_prune_cap.rs`
+(`convex_qp_qgfrdxpn`, `solver_selection=qp-active-set`) went from
+SolveSucceeded, 3 553 iterations, 6.0 s on feral 0.22 to
+MaximumIterationsExceeded at 27 811 iterations, 50.6 s (objective 1.00569e11
+at the cap vs 1.00791e11 optimal); it reproduced on re-run. The other 2 156
+pounce tests passed, and pounce's default fixture sweep diffed empty
+because its default routing never reaches the rank probe. The only signal
+I had measured was fill (+0.27 % geomean over 40 synthetic bases, 36/40
+worse), which says nothing about which rows a rank reveal declares
+dependent.
+
+**Replaced with.** Exact reproduction of the 0.22 heap contents: peel-phase
+pushes are logged and heapified when the singleton stacks first run dry,
+minus entries for eliminated rows/columns. Digests are bit-identical to 0.22
+on 3 real and 40 synthetic bases, pinned by `tests/lu_markowitz_golden.rs`.
+Lesson: on a factorization other code uses for rank decisions, a change to
+pivot order is a behaviour change even when fill and residuals are fine;
+gate it on a golden pivot test, not on fill.
