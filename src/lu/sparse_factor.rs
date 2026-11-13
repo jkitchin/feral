@@ -245,6 +245,12 @@ pub struct SparseLu {
     /// [`LuParams::update_pivot_search`] is enabled; issue #112). Zero after
     /// factor/refactor.
     pub(super) pivot_search_swaps: usize,
+    /// The threshold-Markowitz elimination's working storage, kept only by
+    /// [`SparseLu::refactor_markowitz`] so the next in-place refactor reuses
+    /// it (issue #232). Empty after a fresh factor, so a factor that is only
+    /// held does not carry it. Never read across calls: it is a source of
+    /// buffers, not state.
+    pub(super) markowitz_work: super::markowitz::MarkowitzWork,
 }
 
 impl SparseLu {
@@ -296,6 +302,7 @@ impl SparseLu {
             update_work_total: 0,
             last_refactor: None,
             pivot_search_swaps: 0,
+            markowitz_work: super::markowitz::MarkowitzWork::default(),
         }
     }
 
@@ -721,7 +728,7 @@ impl SparseLu {
     /// singleton has cost 0 and is taken first.
     pub fn factor_markowitz(a: &SparseColMatrix, params: LuParams) -> Result<Self, FeralError> {
         let mut lu = SparseLu::empty();
-        lu.markowitz_into(a, params)?;
+        lu.markowitz_into(a, params, false)?;
         Ok(lu)
     }
 
@@ -747,14 +754,21 @@ impl SparseLu {
         a: &SparseColMatrix,
         params: LuParams,
     ) -> Result<(), FeralError> {
-        self.markowitz_into(a, params)
+        self.markowitz_into(a, params, true)
     }
 
     /// Shared body of [`Self::factor_markowitz`] and
     /// [`Self::refactor_markowitz`]. Nothing in `self` is modified until the
     /// elimination has succeeded, except that `U`-row buffers may be taken
-    /// from `row_pool` (a free-list whose contents are never read).
-    fn markowitz_into(&mut self, a: &SparseColMatrix, params: LuParams) -> Result<(), FeralError> {
+    /// from `row_pool` and `markowitz_work` may be emptied (buffer sources
+    /// whose contents are never read). `keep_work` keeps the elimination's
+    /// storage on `self` for the next call.
+    fn markowitz_into(
+        &mut self,
+        a: &SparseColMatrix,
+        params: LuParams,
+        keep_work: bool,
+    ) -> Result<(), FeralError> {
         params.validate()?;
         let m = a.m;
 
@@ -776,7 +790,11 @@ impl SparseLu {
             params.on_singular,
             &mut self.row_pool,
             self.l_val.len(),
+            &mut self.markowitz_work,
         )?;
+        if !keep_work {
+            self.markowitz_work = super::markowitz::MarkowitzWork::default();
+        }
 
         // ---- success: from here on `self` is overwritten ------------------
         let mut perm_inv = std::mem::take(&mut self.perm_inv);
@@ -1188,6 +1206,9 @@ fn assemble_into(
         update_work_total,
         last_refactor,
         pivot_search_swaps,
+        // Elimination scratch, not factor state: `markowitz_into` decides
+        // whether it stays.
+        markowitz_work: _,
     } = lu;
 
     // Row-wise index of L and the reach workspace: built only when the

@@ -89,6 +89,7 @@ pub(super) struct MarkowitzFactor {
 /// `push` and `swap_remove` reproduce `Vec`'s element order exactly, so the
 /// pivot search's tie-breaks (which depend on that order) are those of the
 /// `Vec<Vec<T>>` it replaced.
+#[derive(Debug, Clone, Default)]
 struct Lists<T> {
     start: Vec<usize>,
     len: Vec<usize>,
@@ -99,19 +100,33 @@ struct Lists<T> {
 impl<T: Copy + Default> Lists<T> {
     /// Empty lists, list `j` with room for `caps[j]` entries before it has to
     /// move. Filled with [`Self::push`].
+    #[cfg(test)]
     fn with_capacities(caps: &[usize]) -> Self {
-        let mut start = Vec::with_capacity(caps.len());
+        let mut l = Self {
+            start: Vec::new(),
+            len: Vec::new(),
+            cap: Vec::new(),
+            data: Vec::new(),
+        };
+        l.reset(caps);
+        l
+    }
+
+    /// Make these the lists [`Self::with_capacities`] would build, reusing
+    /// the buffers (issue #232: in-place refactorization).
+    fn reset(&mut self, caps: &[usize]) {
+        self.start.clear();
         let mut total = 0usize;
         for &c in caps {
-            start.push(total);
+            self.start.push(total);
             total += c;
         }
-        Self {
-            start,
-            len: vec![0; caps.len()],
-            cap: caps.to_vec(),
-            data: vec![T::default(); total],
-        }
+        self.len.clear();
+        self.len.resize(caps.len(), 0);
+        self.cap.clear();
+        self.cap.extend_from_slice(caps);
+        self.data.clear();
+        self.data.resize(total, T::default());
     }
 
     #[inline]
@@ -196,6 +211,7 @@ fn ckey_col(key: u64) -> usize {
 /// when last [`Self::set`]; the caller re-registers every row whose count
 /// changed before the next query, and [`Self::remove`]s a row as it is
 /// eliminated.
+#[derive(Debug, Clone, Default)]
 struct RowCounts {
     hist: Vec<usize>,
     reg: Vec<usize>,
@@ -204,16 +220,23 @@ struct RowCounts {
 }
 
 impl RowCounts {
+    #[cfg(test)]
     fn new(rcnt: &[usize]) -> Self {
-        let mut hist = vec![0usize; rcnt.len() + 1];
+        let mut r = Self::default();
+        r.reset(rcnt);
+        r
+    }
+
+    /// Register every row under `rcnt`, reusing the buffers.
+    fn reset(&mut self, rcnt: &[usize]) {
+        self.hist.clear();
+        self.hist.resize(rcnt.len() + 1, 0);
         for &c in rcnt {
-            hist[c] += 1;
+            self.hist[c] += 1;
         }
-        Self {
-            hist,
-            reg: rcnt.to_vec(),
-            lo: 0,
-        }
+        self.reg.clear();
+        self.reg.extend_from_slice(rcnt);
+        self.lo = 0;
     }
 
     fn set(&mut self, i: usize, c: usize) {
@@ -239,6 +262,43 @@ impl RowCounts {
     }
 }
 
+/// The elimination's working storage, kept between in-place refactorizations
+/// so they reset buffers instead of allocating them (issue #232). Every field
+/// is fully re-initialised at the start of [`markowitz_factor`]; nothing is
+/// read across calls, so a reused `MarkowitzWork` and a fresh one give the
+/// same factorization.
+#[derive(Debug, Clone, Default)]
+pub(super) struct MarkowitzWork {
+    ccnt: Vec<usize>,
+    rcnt: Vec<usize>,
+    cols: Lists<(usize, f64)>,
+    row_cols: Lists<usize>,
+    alive_r: Vec<bool>,
+    alive_c: Vec<bool>,
+    col_singletons: Vec<usize>,
+    row_singletons: Vec<usize>,
+    cheap_log: Vec<u64>,
+    cheap: Vec<Reverse<u64>>,
+    row_counts: RowCounts,
+    lscat: Vec<f64>,
+    lmark: Vec<bool>,
+    seen_mark: Vec<bool>,
+    seen_list: Vec<usize>,
+    row_seen: Vec<bool>,
+    dirty_rows: Vec<usize>,
+    dirty_mark: Vec<bool>,
+    lvec: Vec<(usize, f64)>,
+    uvec: Vec<(usize, f64)>,
+    upos: Vec<usize>,
+    scanned: Vec<usize>,
+}
+
+/// `v` becomes `n` copies of `x`, keeping its allocation.
+fn refill<T: Clone>(v: &mut Vec<T>, n: usize, x: T) {
+    v.clear();
+    v.resize(n, x);
+}
+
 /// Right-looking threshold-Markowitz LU of `a`.
 ///
 /// `u_thresh` is the relative pivot threshold (`0 < u ≤ 1`; `1.0` degenerates to
@@ -251,7 +311,8 @@ impl RowCounts {
 /// refilled; an empty pool allocates), and `l_nnz_hint` pre-sizes the `L`
 /// arrays. Both only change where memory comes from, never the result; they
 /// are how [`SparseLu::refactor_markowitz`](super::SparseLu::refactor_markowitz)
-/// avoids one allocation per pivot (issue #232).
+/// avoids one allocation per pivot (issue #232). `work` is the elimination's
+/// own storage, likewise only a source of buffers.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn markowitz_factor(
     a: &SparseColMatrix,
@@ -261,7 +322,34 @@ pub(super) fn markowitz_factor(
     on_singular: LuSingularAction,
     row_pool: &mut Vec<Vec<(usize, f64)>>,
     l_nnz_hint: usize,
+    work: &mut MarkowitzWork,
 ) -> Result<MarkowitzFactor, FeralError> {
+    // Taken out for the duration and put back on success; on `Err` the caller
+    // is left with an empty `MarkowitzWork`, which is still valid.
+    let MarkowitzWork {
+        mut ccnt,
+        mut rcnt,
+        mut cols,
+        mut row_cols,
+        mut alive_r,
+        mut alive_c,
+        mut col_singletons,
+        mut row_singletons,
+        mut cheap_log,
+        cheap: cheap_storage,
+        mut row_counts,
+        mut lscat,
+        mut lmark,
+        mut seen_mark,
+        mut seen_list,
+        mut row_seen,
+        mut dirty_rows,
+        mut dirty_mark,
+        mut lvec,
+        mut uvec,
+        mut upos,
+        mut scanned,
+    } = std::mem::take(work);
     let m = a.m;
 
     let mut a_max = 0.0_f64;
@@ -273,8 +361,8 @@ pub(super) fn markowitz_factor(
     // ---- active submatrix ------------------------------------------------
     // Explicit zeros are dropped, so count the stored nonzeros first and size
     // the packed lists exactly.
-    let mut ccnt = vec![0usize; m];
-    let mut rcnt = vec![0usize; m];
+    refill(&mut ccnt, m, 0);
+    refill(&mut rcnt, m, 0);
     for (j, cj) in ccnt.iter_mut().enumerate() {
         for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
             if a.values[idx] != 0.0 {
@@ -283,8 +371,8 @@ pub(super) fn markowitz_factor(
             }
         }
     }
-    let mut cols: Lists<(usize, f64)> = Lists::with_capacities(&ccnt);
-    let mut row_cols: Lists<usize> = Lists::with_capacities(&rcnt);
+    cols.reset(&ccnt);
+    row_cols.reset(&rcnt);
     for j in 0..m {
         for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
             let (i, v) = (a.row_idx[idx], a.values[idx]);
@@ -294,8 +382,8 @@ pub(super) fn markowitz_factor(
             }
         }
     }
-    let mut alive_r = vec![true; m];
-    let mut alive_c = vec![true; m];
+    refill(&mut alive_r, m, true);
+    refill(&mut alive_c, m, true);
 
     // Suhl-Suhl inside the Markowitz loop. A column with one live entry has
     // Markowitz cost 0 and is always taken; so is a row with one live entry
@@ -305,8 +393,10 @@ pub(super) fn markowitz_factor(
     // traffic would otherwise dominate the whole factorization
     // (`dev/research/lu-fill-markowitz-2026-08-13.md`). It changes cost, not the
     // pivot rule: these are exactly the pivots the general search would pick.
-    let mut col_singletons: Vec<usize> = (0..m).filter(|&j| ccnt[j] == 1).collect();
-    let mut row_singletons: Vec<usize> = (0..m).filter(|&i| rcnt[i] == 1).collect();
+    col_singletons.clear();
+    col_singletons.extend((0..m).filter(|&j| ccnt[j] == 1));
+    row_singletons.clear();
+    row_singletons.extend((0..m).filter(|&i| rcnt[i] == 1));
 
     // Lazy min-heap over the column counts; stale pairs are discarded on pop.
     // (The row side only needs the smallest live row count: `RowCounts`.)
@@ -343,25 +433,30 @@ pub(super) fn markowitz_factor(
             u32::MAX
         )));
     }
-    let mut cheap_log: Vec<u64> = (0..m).map(|j| ckey(ccnt[j], j)).collect();
-    let mut row_counts = RowCounts::new(&rcnt);
-    let mut cheap: BinaryHeap<Reverse<u64>> = BinaryHeap::new();
+    cheap_log.clear();
+    cheap_log.extend((0..m).map(|j| ckey(ccnt[j], j)));
+    row_counts.reset(&rcnt);
+    let mut cheap: BinaryHeap<Reverse<u64>> = BinaryHeap::from({
+        let mut v = cheap_storage;
+        v.clear();
+        v
+    });
 
     // ---- workspaces ------------------------------------------------------
-    let mut lscat = vec![0.0_f64; m];
-    let mut lmark = vec![false; m];
-    let mut seen_mark = vec![false; m];
-    let mut seen_list: Vec<usize> = Vec::new();
-    let mut row_seen = vec![false; m];
-    let mut dirty_rows: Vec<usize> = Vec::new();
-    let mut dirty_mark = vec![false; m];
-    let mut lvec: Vec<(usize, f64)> = Vec::new();
-    let mut uvec: Vec<(usize, f64)> = Vec::new();
+    refill(&mut lscat, m, 0.0);
+    refill(&mut lmark, m, false);
+    refill(&mut seen_mark, m, false);
+    seen_list.clear();
+    refill(&mut row_seen, m, false);
+    dirty_rows.clear();
+    refill(&mut dirty_mark, m, false);
+    lvec.clear();
+    uvec.clear();
     // `upos[t]`: position of the pivot-row entry in column `uvec[t].0`, found
     // by the gather. Still valid when that column's update runs: each column
     // is updated once per step and only its own update moves its entries.
-    let mut upos: Vec<usize> = Vec::new();
-    let mut scanned: Vec<usize> = Vec::new();
+    upos.clear();
+    scanned.clear();
 
     // ---- output ----------------------------------------------------------
     let mut perm = Vec::with_capacity(m);
@@ -419,12 +514,15 @@ pub(super) fn markowitz_factor(
         }
 
         if fast.is_none() && !heaps_built {
-            cheap = cheap_log
-                .drain(..)
-                .filter(|&k| alive_c[ckey_col(k)])
-                .map(Reverse)
-                .collect::<Vec<_>>()
-                .into();
+            let mut v = std::mem::take(&mut cheap).into_vec();
+            v.clear();
+            v.extend(
+                cheap_log
+                    .drain(..)
+                    .filter(|&k| alive_c[ckey_col(k)])
+                    .map(Reverse),
+            );
+            cheap = BinaryHeap::from(v);
             heaps_built = true;
         }
 
@@ -697,6 +795,31 @@ pub(super) fn markowitz_factor(
             }
         }
     }
+
+    *work = MarkowitzWork {
+        ccnt,
+        rcnt,
+        cols,
+        row_cols,
+        alive_r,
+        alive_c,
+        col_singletons,
+        row_singletons,
+        cheap_log,
+        cheap: cheap.into_vec(),
+        row_counts,
+        lscat,
+        lmark,
+        seen_mark,
+        seen_list,
+        row_seen,
+        dirty_rows,
+        dirty_mark,
+        lvec,
+        uvec,
+        upos,
+        scanned,
+    };
 
     Ok(MarkowitzFactor {
         perm,
