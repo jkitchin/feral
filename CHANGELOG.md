@@ -4,6 +4,16 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — packed contribution blocks in the sequential drivers
+
+The sequential multifrontal driver and the Schur-complement driver hold
+each child's contribution block as its packed lower triangle,
+`c·(c+1)/2` entries instead of `c²`, so a parent's assembly holds about
+half the block memory. Factors are bit-identical to 0.22.0. The parallel
+task-graph driver is unchanged (square blocks); the parallel entry point
+hands a tree with too little task parallelism to the sequential driver,
+which packs. Public kernel signatures are unchanged.
+
 ## [0.22.0] - 2026-10-26
 
 **Breaking.** `FactorStats` (`feral::FactorStats`) is an exhaustive public

@@ -26,7 +26,7 @@
 //! SIMD trailing-update lane uses separate `mul_f64s` + `sub_f64s`
 //! instead of `mul_add_f64s`. No FMA anywhere in this module.
 
-use crate::dense::factor::{BunchKaufmanParams, FrontalFactors};
+use crate::dense::factor::{BunchKaufmanParams, ContribLayout, FactorScratch, FrontalFactors};
 use crate::dense::matrix::SymmetricMatrix;
 use crate::dense::schur_kernel;
 use crate::error::FeralError;
@@ -70,7 +70,8 @@ pub(crate) fn factor_block32(
     ncol: usize,
     may_delay: bool,
     params: &BunchKaufmanParams,
-    scratch: &mut crate::dense::factor::FactorScratch,
+    scratch: &mut FactorScratch,
+    contrib_layout: ContribLayout,
 ) -> Result<FrontalFactors, FeralError> {
     if matrix.n != BLOCK_SIZE {
         return Err(FeralError::InvalidInput(format!(
@@ -79,7 +80,12 @@ pub(crate) fn factor_block32(
         )));
     }
     crate::dense::factor::factor_frontal_in_place_with_scratch(
-        matrix, ncol, may_delay, params, scratch,
+        matrix,
+        ncol,
+        may_delay,
+        params,
+        scratch,
+        contrib_layout,
     )
 }
 
@@ -281,7 +287,7 @@ pub(crate) fn update_2x2_block32(a: &mut [f64], p: usize, d11: f64, d21: f64, d2
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dense::factor::{factor_frontal, FactorScratch};
+    use crate::dense::factor::factor_frontal;
 
     /// Build a 32×32 lower-triangular `SymmetricMatrix` from a
     /// row-major dense slice. Only the lower triangle is read; the
@@ -559,7 +565,14 @@ mod tests {
         let mut m = SymmetricMatrix::zeros(16);
         let params = BunchKaufmanParams::default();
         let mut scratch = FactorScratch::new();
-        let res = factor_block32(&mut m, 16, false, &params, &mut scratch);
+        let res = factor_block32(
+            &mut m,
+            16,
+            false,
+            &params,
+            &mut scratch,
+            ContribLayout::Square,
+        );
         assert!(res.is_err());
     }
 
@@ -578,8 +591,15 @@ mod tests {
         let params = BunchKaufmanParams::default();
         let mut scratch = FactorScratch::new();
         let scalar = factor_frontal(&a, BLOCK_SIZE, false, &params).expect("scalar");
-        let block =
-            factor_block32(&mut b, BLOCK_SIZE, false, &params, &mut scratch).expect("block32");
+        let block = factor_block32(
+            &mut b,
+            BLOCK_SIZE,
+            false,
+            &params,
+            &mut scratch,
+            ContribLayout::Square,
+        )
+        .expect("block32");
         assert_factors_bit_equal(&block, &scalar);
     }
 
@@ -593,8 +613,15 @@ mod tests {
         let params = BunchKaufmanParams::default();
         let mut scratch = FactorScratch::new();
         let scalar = factor_frontal(&a, BLOCK_SIZE, false, &params).expect("scalar");
-        let block =
-            factor_block32(&mut b, BLOCK_SIZE, false, &params, &mut scratch).expect("block32");
+        let block = factor_block32(
+            &mut b,
+            BLOCK_SIZE,
+            false,
+            &params,
+            &mut scratch,
+            ContribLayout::Square,
+        )
+        .expect("block32");
         assert_factors_bit_equal(&block, &scalar);
     }
 }
