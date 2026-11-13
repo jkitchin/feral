@@ -43,8 +43,10 @@ gains the empty-block rule below.
    front area `A = order(p)²` and children's packed blocks `B(i)` in
    `children` order, `symbolic::accumulate_from` names the first child
    `j` with `Σ_{i≤j} B(i) > A` and `Σ_{i>j} B(i) ≥ A` (none if the
-   children sum to less than `2A`). The plan is computed once per
-   analysis and cached on it. When `j` is deposited, `p` gets an
+   children sum to less than `2A`). Each factorization derives the plan
+   when it builds its accumulators, in `O(supernodes + children)` with no
+   allocation beyond the plans themselves, so it always matches the
+   analysis. When `j` is deposited, `p` gets an
    accumulator — its frontal over its static rows, seeded with its
    original entries — into which the held children `≤ j` and then every
    later child are extend-added in order. At `p`'s assembly the
@@ -52,17 +54,23 @@ gains the empty-block rule below.
    into the larger frontal and the delayed remainders added. The
    sequential drivers deposit in ascending supernode order, which is
    `children` order, so a min-heap of each plan's next expected child
-   recognises a member deposit in O(log plans). The hidden `Always`
-   (open at every parent's first child) exists for the parity tests.
+   recognises a member deposit in O(log plans). A deposit out of that
+   order abandons the plans it passes over (debug builds assert): the
+   accumulator keeps the prefix of children it absorbed, the rest are held
+   whole and added after it, still in `children` order, so the factors
+   are unchanged and only that parent's memory bound is lost. `Always`
+   (open at every parent's first child) exists for the parity tests,
+   behind the internal `__early-assembly-always` feature.
 
 3. **Buffers follow the classic history.** The drivers recycle two
    buffers: the frontal pool and a one-slot contribution-block pool.
-   Both only grow (`Vec::resize` / `reserve`), so the bound below holds
+   Both only grow, so the bound below holds
    for the whole heap only if `WideParents` never leaves a pooled buffer
    larger than `Off` would:
    - an adopted accumulator is freed once its front is factored, and the
      idle frontal pool grows by the one rule both paths use
-     (`dense::matrix::fit_pooled_front`), as if it had held that front;
+     (`dense::matrix::grow_pooled_front`: capacity `max(2·cap, n²)`, set
+     explicitly, nothing written), as if it had held that front;
    - absorbed blocks and delayed-pivot remainders are freed, not pooled
      (only a whole block, assembled classically, returns to the pool);
    - a front whose block is empty (a root) takes no pooled buffer, in
@@ -129,8 +137,8 @@ value to its packed slot; nothing is recomputed.
   backstop), and the Schur driver with and without delays (frontal
   adoption with a Schur block); the parallel driver under each scheme
   must not change. `Off` and `WideParents` digests are pinned to 0.22.0
-  for aarch64; the Schur kernel dispatches on run-time CPU features, so
-  the pin is ignored on other targets rather than passing vacuously.
+  on every target: computed on aarch64, and the parent produces the same
+  16 digests on x86_64 (the maintainer's run on Linux x86_64).
 - `tests/wide_tree_memory.rs` (counting allocator): a 1,500-leaf star,
   peak live heap `Off` 65.73 MiB, `WideParents` 12.12 MiB; generated
   trees (the review's pool-growth tree, a delaying star, 150 random trees
@@ -141,8 +149,9 @@ value to its packed slot; nothing is recomputed.
   most 7,208 B above. Reverting either buffer fix or the empty-block rule
   fails it.
 - Unit (`numeric::contrib`, `symbolic`): square and packed extend-add
-  alike; the plan on hand-built stars; `take` before every child is
-  deposited, out-of-order deposits and a row outside the parent all fail.
+  alike; the plan on hand-built stars; an out-of-order deposit falls back
+  to held blocks with the in-order sum bit for bit; a row outside the
+  parent fails.
 
 ## Measurements
 

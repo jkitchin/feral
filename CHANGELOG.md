@@ -29,7 +29,9 @@ field `early_assembly`: a literal that lists every field must add it;
   live heap is `Off`'s plus a few words per such parent; the retained
   factor and the factors themselves are unchanged. It can cost a few
   percent of factorization time on trees with small wide parents, hence
-  opt-in. The parallel task-graph driver ignores it.
+  opt-in. The parallel task-graph driver ignores it. The test-only
+  `EarlyAssembly::Always` exists only under the internal
+  `__early-assembly-always` feature.
 
 Measurements and unfavourable results:
 `dev/research/wide-tree-contribution-memory.md`.

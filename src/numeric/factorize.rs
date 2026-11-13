@@ -3,7 +3,7 @@ use crate::dense::factor::{
     factor_frontal_diagonal_in_place, factor_frontal_diagonal_with_layout, phase_timing,
     BunchKaufmanParams, FactorOutputBufs, FactorScratch, FrontalFactors, ZeroPivotAction,
 };
-use crate::dense::matrix::{fit_pooled_front, SymmetricMatrix};
+use crate::dense::matrix::{grow_pooled_front, SymmetricMatrix};
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 use crate::numeric::contrib::{
@@ -387,7 +387,10 @@ pub enum EarlyAssembly {
     /// Open an accumulator for every parent at its first child, so every
     /// front is assembled through one. For parity tests only: it holds
     /// whole fronts open across later child subtrees, which can raise
-    /// the peak well above `Off`'s.
+    /// the peak well above `Off`'s. Exists only under the internal
+    /// `__early-assembly-always` feature, which the crate's own tests
+    /// enable.
+    #[cfg(feature = "__early-assembly-always")]
     #[doc(hidden)]
     Always,
 }
@@ -2210,7 +2213,7 @@ fn factorize_multifrontal_with_schur_inner(
     let mut needs_refinement = false;
 
     for (snode_idx, &nvschur) in nvschur_per_snode.iter().enumerate() {
-        let accumulator = accumulators.take(snode_idx)?;
+        let accumulator = accumulators.take(snode_idx);
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -2561,7 +2564,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         // is single-threaded so before/after differencing is exact.
         let phase_before = phase_timing::snapshot();
         let recycled = ws.take_recycled(snode_idx);
-        let accumulator = accumulators.take(snode_idx)?;
+        let accumulator = accumulators.take(snode_idx);
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -2739,9 +2742,11 @@ fn factor_one_supernode<L: BlockLayout>(
     // pivot search at this node as additional fully-summed columns
     // on top of `snode.ncol()`.
     //
-    // With an accumulator every child has been assembled into it except
-    // for the delayed columns, which wait in per-child remainders; the
-    // blocks left in `contrib_blocks` are then exactly those remainders.
+    // With an accumulator every child it absorbed has been assembled into
+    // it except for the delayed columns, which wait in per-child
+    // remainders; the blocks left in `contrib_blocks` are those remainders
+    // (and, only if its plan was abandoned, the whole blocks of the
+    // children after them). Either way they carry every delayed column.
     let n_delayed_in: usize = snode
         .children
         .iter()
@@ -2888,32 +2893,39 @@ fn factor_one_supernode<L: BlockLayout>(
 
     // Steps 1-2: the frontal. With an accumulator and no delays it *is*
     // the frontal (same rows, same layout). With delays its cells move to
-    // their frontal positions and the remainders are added on top.
-    // Without one, the classic steps run.
+    // their frontal positions. Either way the blocks its children left
+    // are added on top: remainders of the children it absorbed, and the
+    // whole blocks of any later children (a plan its deposits abandoned;
+    // `Accumulators::deposit`). Without one, the classic steps run.
     let adopted = accumulator.is_some() && n_delayed_in == 0;
     let mut frontal = match accumulator {
-        Some(acc) if n_delayed_in == 0 => SymmetricMatrix {
-            n: actual_nrow,
-            data: acc.data,
-        },
         Some(acc) => {
-            let frontal_buf = std::mem::take(&mut ws.frontal_values);
-            let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
-            let n_static = static_rows.len();
-            let position = |s: usize| {
-                if s < own_ncol {
-                    own_col_offset + s
-                } else {
-                    expanded_ncol + (s - own_ncol)
+            let mut frontal = if n_delayed_in == 0 {
+                SymmetricMatrix {
+                    n: actual_nrow,
+                    data: acc.data,
                 }
+            } else {
+                let frontal_buf = std::mem::take(&mut ws.frontal_values);
+                let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
+                let n_static = static_rows.len();
+                let position = |s: usize| {
+                    if s < own_ncol {
+                        own_col_offset + s
+                    } else {
+                        expanded_ncol + (s - own_ncol)
+                    }
+                };
+                for sj in 0..n_static {
+                    let fj = position(sj);
+                    for si in sj..n_static {
+                        frontal.data[fj * actual_nrow + position(si)] =
+                            acc.data[sj * n_static + si];
+                    }
+                }
+                frontal
             };
-            for sj in 0..n_static {
-                let fj = position(sj);
-                for si in sj..n_static {
-                    frontal.data[fj * actual_nrow + position(si)] = acc.data[sj * n_static + si];
-                }
-            }
-            assemble_children(snode, contrib_blocks, Held::Remainders, ws, &mut frontal);
+            assemble_children(snode, contrib_blocks, acc.absorbed, ws, &mut frontal);
             frontal
         }
         None => {
@@ -2942,7 +2954,7 @@ fn factor_one_supernode<L: BlockLayout>(
                 }
             }
             phase_timing::stop(&phase_timing::SCATTER_NS, _pt_sc);
-            assemble_children(snode, contrib_blocks, Held::Whole, ws, &mut frontal);
+            assemble_children(snode, contrib_blocks, 0, ws, &mut frontal);
             frontal
         }
     };
@@ -3055,11 +3067,12 @@ fn factor_one_supernode<L: BlockLayout>(
         );
     }
     // The frontal buffer goes back to the pool. An adopted accumulator is
-    // freed instead and the idle pool grows as if it had held this front,
-    // so the pool's capacity history is the classic scheme's.
+    // freed instead and the idle pool's capacity grows as if it had held
+    // this front (nothing written), so the pool's capacity history is the
+    // classic scheme's.
     if adopted {
         drop(frontal.data);
-        fit_pooled_front(&mut ws.frontal_values, actual_nrow);
+        grow_pooled_front(&mut ws.frontal_values, actual_nrow);
     } else {
         ws.frontal_values = frontal.data;
     }
@@ -3093,17 +3106,12 @@ fn factor_one_supernode<L: BlockLayout>(
     })
 }
 
-/// What a front's children left in `contrib_blocks` for its assembly.
-#[derive(Debug, Clone, Copy)]
-enum Held {
-    /// Whole blocks (the classic scheme).
-    Whole,
-    /// The delayed columns of the blocks an accumulator absorbed.
-    Remainders,
-}
-
 /// Step 2 of a front's assembly: extend-add the children's blocks still
-/// in `contrib_blocks`, in children order, through `ws.row_map`.
+/// in `contrib_blocks`, in children order, through `ws.row_map`. The
+/// first `absorbed` children went into an accumulator (`Accumulator::
+/// absorbed`; 0 without one): what they left is a remainder, of which
+/// only the delayed columns are added. Every later child's block is
+/// whole (the classic scheme, or a plan its deposits abandoned).
 ///
 /// Phase C: each consumed whole block's storage moves into the factor
 /// scratch's single-slot pool, so the next kernel call takes it instead
@@ -3115,16 +3123,18 @@ enum Held {
 fn assemble_children<L: BlockLayout>(
     snode: &Supernode,
     contrib_blocks: &mut [Option<ContribBlock<L>>],
-    held: Held,
+    absorbed: usize,
     ws: &mut FactorWorkspace,
     frontal: &mut SymmetricMatrix,
 ) {
     let _pt_ea = phase_timing::start();
-    for &child_idx in &snode.children {
+    for (position, &child_idx) in snode.children.iter().enumerate() {
         if let Some(contrib) = contrib_blocks[child_idx].take() {
-            let cols = match held {
-                Held::Whole => contrib.dim,
-                Held::Remainders => contrib.n_delayed,
+            let whole = position >= absorbed;
+            let cols = if whole {
+                contrib.dim
+            } else {
+                contrib.n_delayed
             };
             let row_map = &ws.row_map;
             extend_add(
@@ -3134,7 +3144,7 @@ fn assemble_children<L: BlockLayout>(
                 &mut frontal.data,
                 frontal.n,
             );
-            if let Held::Whole = held {
+            if whole {
                 ws.factor_scratch.contrib_pool = Some(contrib.into_buffer());
             }
         }
@@ -5955,7 +5965,6 @@ mod tests {
             resolved_amalgamation: crate::symbolic::AmalgamationStrategy::Adjacency,
             resolved_preprocess: crate::symbolic::OrderingPreprocess::None,
             is_schur_tail: None,
-            planned_accumulators: std::sync::OnceLock::new(),
         }
     }
 

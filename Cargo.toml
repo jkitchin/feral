@@ -59,6 +59,11 @@ crate-type = ["staticlib", "rlib"]
 # pollute the allocation-regression probe. Enable with
 # `cargo test --features lu-ft-invariant-check`.
 lu-ft-invariant-check = []
+# Internal, not part of the public API: exposes `EarlyAssembly::Always`
+# (an accumulator at every parent), which only the parity tests use. It
+# can raise the peak contribution memory well above `Off`'s. The crate's
+# own tests enable it through the self dev-dependency below.
+__early-assembly-always = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -85,10 +90,19 @@ feral-scotch = { path = "crates/feral-scotch", version = "0.3" }
 feral-kahip = { path = "crates/feral-kahip", version = "0.3" }
 
 [dev-dependencies]
+# The crate's own tests see the internal `EarlyAssembly::Always`; a
+# dependent crate never does unless it names the feature.
+feral = { path = ".", features = ["__early-assembly-always"] }
 approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
 # rmumps used only for reference timing comparisons in benchmarks:
 # rmumps = { path = "../ripopt/rmumps" }  # uncomment when needed
+
+[[test]]
+# Measures live heap with a counting global allocator: no test harness,
+# so no other thread allocates during a measurement.
+name = "wide_tree_memory"
+harness = false
 
 [[bench]]
 name = "lu"

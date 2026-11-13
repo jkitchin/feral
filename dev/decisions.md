@@ -8169,3 +8169,26 @@ scheme and driver.
 `tests/wide_tree_memory.rs` (generated trees, `WideParents` peak at most
 `Off`'s plus a bookkeeping allowance, retained factor no larger, no
 factor owns contribution storage; fails before the fix).
+
+## 2026-11-13 — `WideParents` review follow-ups
+
+**Decision.** The accumulator plan is derived by each factorization that
+uses it (`Accumulators::new`, from `SymbolicFactorization::
+wide_parent_plan`), not cached on the analysis: no private field on the
+public struct, and no stale plan after a caller edits `supernodes`. A
+deposit out of ascending order abandons the plans it passes over instead
+of failing at the parent (debug builds assert): the accumulator keeps the
+prefix of children it absorbed, the rest are assembled whole after it in
+children order, so factors are unchanged. `EarlyAssembly::Always` sits
+behind the internal `__early-assembly-always` feature, which the crate's
+tests enable through a self dev-dependency. The frontal pool's growth rule
+is explicit (`grow_pooled_front`: capacity `max(2·cap, n²)`), and an
+adopted accumulator grows the idle pool's capacity without writing it.
+
+**Why.** Maintainer review of PR #231. Deriving the plan costs one pass
+over supernodes and children (about 6 µs on the 1,501-supernode star).
+
+**Evidence.** `tests/wide_tree_memory.rs` (now `harness = false`)
+unchanged figures: star `Off` 65.73 MiB, `WideParents` 12.12 MiB; 192
+matrices, at most 7,208 B above `Off`. `tests/early_assembly_parity.rs`
+digests unchanged; the parent-release pin now runs on every target.

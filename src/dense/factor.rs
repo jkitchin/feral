@@ -1727,8 +1727,20 @@ pub(crate) enum ContribLayout {
     #[default]
     Square,
     /// The lower triangle packed column-major: column `j` holds rows
-    /// `j..contrib_dim`, so `contrib_dim·(contrib_dim+1)/2` entries.
+    /// `j..contrib_dim`, so [`packed_lower_len`]`(contrib_dim,
+    /// contrib_dim)` entries.
     PackedLower,
+}
+
+/// Entries in the first `cols` columns of a lower triangle of order `dim`
+/// packed column-major (`Σ_{k<cols} (dim − k)`), which is also the offset
+/// of column `cols`; the whole triangle (`cols = dim`) has
+/// `dim·(dim+1)/2`. The one definition of the packed layout's length,
+/// shared by the kernel that writes it, the drivers that hold it and the
+/// symbolic plan that sizes it.
+#[inline]
+pub(crate) fn packed_lower_len(dim: usize, cols: usize) -> usize {
+    cols * (2 * dim - cols + 1) / 2
 }
 
 /// Extract the trailing `(n − offset)²` block of the `n × n` column-major
@@ -1751,7 +1763,7 @@ fn extract_contrib(
     let cdim = n - offset;
     let len = match layout {
         ContribLayout::Square => cdim * cdim,
-        ContribLayout::PackedLower => cdim * (cdim + 1) / 2,
+        ContribLayout::PackedLower => packed_lower_len(cdim, cdim),
     };
     if len == 0 {
         return Vec::new();

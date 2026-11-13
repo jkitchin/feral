@@ -30,17 +30,18 @@ commits, each passing the gates on its own.
 ### Files
 - `src/symbolic/mod.rs`: `accumulate_from` (the opening rule and its
   bound).
-- `src/symbolic/mod.rs`: the plan cached on the analysis
-  (`planned_accumulators`).
+- `src/symbolic/mod.rs`: the plan as an iterator over the analysis
+  (`wide_parent_plan`), derived by each factorization that asks.
 - `src/numeric/contrib.rs`: `Accumulators` (plans sorted by parent, a
   min-heap of each plan's next expected child, one row map), `deposit`,
   `take`, `open_accumulator`; absorbed blocks are freed.
 - `src/numeric/factorize.rs`: `EarlyAssembly {Off (default),
-  WideParents, Always (hidden)}` and `NumericParams::early_assembly`
+  WideParents, Always (internal feature)}` and `NumericParams::early_assembly`
   (needs `use_static_row_indices`); the sequential and Schur drivers
   deposit through `Accumulators` and adopt the accumulator as the
   frontal, then free it and grow the frontal pool by
-  `dense::matrix::fit_pooled_front`; only whole blocks are pooled.
+  `dense::matrix::grow_pooled_front` (capacity only); only whole blocks
+  are pooled.
 - `src/dense/factor.rs`: an empty block takes no pooled buffer.
 
 ### Tests (written first)
@@ -52,9 +53,10 @@ commits, each passing the gates on its own.
 - `tests/early_assembly_parity.rs`: `Off` / `WideParents` / `Always`
   digests equal; parallel driver unchanged under each; the Schur driver
   with and without delays; `Off` and `WideParents` pinned to 0.22.0
-  (aarch64 digests; ignored elsewhere).
-- Unit: plan and peak model on hand-built stars; unfinished `take`,
-  out-of-order deposits and a row outside the parent fail.
+  (computed on aarch64, equal on x86_64).
+- Unit: plan and peak model on hand-built stars; an out-of-order deposit
+  falls back to held blocks, bit-identical; a row outside the parent
+  fails.
 
 ## Success Criteria
 - Factors bit-identical to 0.22.0 under every scheme and driver.

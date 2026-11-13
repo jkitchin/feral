@@ -8,17 +8,32 @@ pub struct SymmetricMatrix {
     pub data: Vec<f64>,
 }
 
-/// Size the pooled frontal buffer `buf` for an `n × n` front: the one
-/// growth rule of the multifrontal drivers' frontal pool, whichever way a
-/// front is assembled, so its capacity history depends only on the
-/// sequence of fronts. `resize` grows the tail with zeros (amortised:
-/// at least double the capacity when it must grow) or truncates. It does
-/// NOT re-zero entries `[0, min(old_len, n²))`, which is where the
-/// bandwidth saving of [`SymmetricMatrix::from_pooled_buf`] comes from
-/// in steady state (capacity already reached after the first few large
-/// supernodes; later calls only re-zero the lower triangle).
+/// Size the pooled frontal buffer `buf` for an `n × n` front: grow its
+/// capacity by [`grow_pooled_front`], then `resize`, which fills the tail
+/// with zeros or truncates. It does NOT re-zero entries
+/// `[0, min(old_len, n²))`, which is where the bandwidth saving of
+/// [`SymmetricMatrix::from_pooled_buf`] comes from in steady state
+/// (capacity already reached after the first few large supernodes; later
+/// calls only re-zero the lower triangle).
 pub(crate) fn fit_pooled_front(buf: &mut Vec<f64>, n: usize) {
+    grow_pooled_front(buf, n);
     buf.resize(n * n, 0.0);
+}
+
+/// The one growth rule of the multifrontal drivers' frontal pool,
+/// whichever way a front is assembled, so the pool's capacity history
+/// depends only on the sequence of fronts: when an `n × n` front does not
+/// fit, the capacity becomes `max(2 · capacity, n²)` (amortised doubling),
+/// exactly — the rule is spelled out rather than left to `Vec`'s own
+/// growth strategy. Capacity only: the length and contents are unchanged,
+/// so a front that never uses the pool (an adopted accumulator) grows it
+/// without writing it.
+pub(crate) fn grow_pooled_front(buf: &mut Vec<f64>, n: usize) {
+    let needed = n * n;
+    if buf.capacity() < needed {
+        let target = needed.max(2 * buf.capacity());
+        buf.reserve_exact(target - buf.len());
+    }
 }
 
 impl SymmetricMatrix {

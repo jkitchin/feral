@@ -33,7 +33,7 @@
 //! only grows, and the parent's own block would keep its capacity
 //! alive), and once an adopted accumulator's front is factored it is
 //! freed and the idle frontal pool grows by the same rule
-//! (`dense::matrix::fit_pooled_front`) as if it had held that front.
+//! (`dense::matrix::grow_pooled_front`) as if it had held that front.
 //! No returned factor keeps a contribution buffer (a root's empty block
 //! takes none from the pool), so the retained factor is the same.
 //!
@@ -45,8 +45,10 @@
 //! is seeded with the original entries when it opens, and the sequential
 //! drivers deposit children in ascending supernode order, which is
 //! `children` order (a parent whose children are not ascending gets no
-//! accumulator, and one whose children arrive out of order fails at its
-//! assembly). Columns a child
+//! accumulator). Should deposits ever leave that order, the plans they
+//! pass over are abandoned (`Accumulators::deposit`): the accumulator
+//! keeps the prefix of children it absorbed, the rest are held whole and
+//! added after it in children order, so the order still holds. Columns a child
 //! *delays* stay behind in a packed remainder (the leading `n_delayed`
 //! columns of the packed block hold exactly the cells with a delayed
 //! index): a delayed column belongs to one child, and the original matrix
@@ -62,18 +64,11 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::marker::PhantomData;
 
-use crate::dense::factor::{ContribLayout, FrontalFactors};
+use crate::dense::factor::{packed_lower_len, ContribLayout, FrontalFactors};
 use crate::error::FeralError;
 use crate::numeric::factorize::{EarlyAssembly, NumericParams};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
-
-/// Entries in the first `cols` columns of a packed lower triangle of
-/// order `dim` (`Σ_{k<cols} (dim − k)`); also the offset of column `cols`.
-#[inline]
-fn packed_len(dim: usize, cols: usize) -> usize {
-    cols * (2 * dim - cols + 1) / 2
-}
 
 /// Storage of a held contribution block: where the lower part of each
 /// column (rows `j..dim` of column `j`) starts.
@@ -110,11 +105,11 @@ impl BlockLayout for Packed {
     const KERNEL: ContribLayout = ContribLayout::PackedLower;
     #[inline]
     fn len(dim: usize) -> usize {
-        packed_len(dim, dim)
+        packed_lower_len(dim, dim)
     }
     #[inline]
     fn column_start(dim: usize, j: usize) -> usize {
-        packed_len(dim, j)
+        packed_lower_len(dim, j)
     }
 }
 
@@ -208,7 +203,8 @@ impl ContribBlock<Packed> {
     /// Drop the columns already assembled into an accumulator, keeping
     /// the delayed ones.
     fn keep_delayed_columns(&mut self) {
-        self.data.truncate(packed_len(self.dim, self.n_delayed));
+        self.data
+            .truncate(packed_lower_len(self.dim, self.n_delayed));
         self.data.shrink_to_fit();
     }
 }
@@ -255,6 +251,10 @@ pub(crate) struct Accumulator {
     /// `sub_sym_area` of the children absorbed whole (a child that left
     /// a remainder keeps its own).
     pub(crate) sub_sym_area: usize,
+    /// The children it absorbed: the first `absorbed` of the parent's
+    /// `children`. All of them, unless its plan was abandoned
+    /// ([`Accumulators::deposit`]); the blocks of the rest are held whole.
+    pub(crate) absorbed: usize,
 }
 
 /// Position of global row `r` in a supernode's static rows `[own |
@@ -293,9 +293,8 @@ struct Plan {
     parent: usize,
     /// Child position at which the accumulator opens.
     open_at: usize,
-    /// `children.len()` of the parent.
-    n_children: usize,
-    /// Children deposited so far (a prefix of `children`).
+    /// Children deposited in children order so far (a prefix of
+    /// `children`).
     deposited: usize,
     /// Opened by the child at `open_at`.
     accumulator: Option<Accumulator>,
@@ -309,9 +308,9 @@ pub(crate) struct Accumulators {
     /// Ascending by parent.
     plans: Vec<Plan>,
     /// `(child, plan)`: the child each unfinished plan expects next, least
-    /// first. The sequential drivers deposit in ascending supernode order
-    /// and a planned parent's children ascend, so a deposit that belongs
-    /// to a plan is the least expected child.
+    /// first; a plan leaves it when finished or abandoned. The sequential drivers deposit in ascending
+    /// supernode order and a planned parent's children ascend, so a
+    /// deposit that belongs to a plan is the least expected child.
     expected: BinaryHeap<Reverse<(usize, usize)>>,
     /// Scratch: the positions of an absorbed block's rows in its parent's
     /// static rows.
@@ -320,36 +319,37 @@ pub(crate) struct Accumulators {
 
 impl Accumulators {
     /// The accumulators `params.early_assembly` opens on `symbolic`
-    /// ([`SymbolicFactorization::planned_accumulators`]). An accumulator
-    /// is laid out over its parent's static rows, so none opens when
+    /// ([`SymbolicFactorization::wide_parent_plan`]), derived here for
+    /// this factorization: one pass over the supernodes and their
+    /// children, cheap next to the factorization. An accumulator is laid
+    /// out over its parent's static rows, so none opens when
     /// `params.use_static_row_indices` is off.
     pub(crate) fn new(symbolic: &SymbolicFactorization, params: &NumericParams) -> Self {
-        let always;
-        let pairs: &[(usize, usize)] = match params.early_assembly {
-            _ if !params.use_static_row_indices => &[],
-            EarlyAssembly::Off => &[],
-            EarlyAssembly::WideParents => symbolic.planned_accumulators(),
-            EarlyAssembly::Always => {
-                always = symbolic.accumulator_plan(|_| Some(0));
-                &always
-            }
-        };
-        let supernodes = &symbolic.supernodes;
-        // The bookkeeping lives for the whole factorization: exact
-        // capacity, nothing per child.
-        let mut plans = Vec::with_capacity(pairs.len());
-        let mut expected = Vec::with_capacity(pairs.len());
-        for &(parent, open_at) in pairs {
-            let children = &supernodes[parent].children;
-            if let Some(&first) = children.first() {
-                expected.push(Reverse((first, plans.len())));
-                plans.push(Plan {
+        let plans_from = |pairs: &mut dyn Iterator<Item = (usize, usize)>| -> Vec<Plan> {
+            pairs
+                .map(|(parent, open_at)| Plan {
                     parent,
                     open_at,
-                    n_children: children.len(),
                     deposited: 0,
                     accumulator: None,
-                });
+                })
+                .collect()
+        };
+        let mut plans = match params.early_assembly {
+            _ if !params.use_static_row_indices => Vec::new(),
+            EarlyAssembly::Off => Vec::new(),
+            EarlyAssembly::WideParents => plans_from(&mut symbolic.wide_parent_plan()),
+            #[cfg(feature = "__early-assembly-always")]
+            EarlyAssembly::Always => plans_from(&mut symbolic.accumulator_plan(|_| Some(0))),
+        };
+        // The bookkeeping lives for the whole factorization: exact
+        // capacity, nothing per child.
+        plans.shrink_to_fit();
+        let supernodes = &symbolic.supernodes;
+        let mut expected = Vec::with_capacity(plans.len());
+        for (index, plan) in plans.iter().enumerate() {
+            if let Some(&first) = supernodes[plan.parent].children.first() {
+                expected.push(Reverse((first, index)));
             }
         }
         Self {
@@ -367,21 +367,62 @@ impl Accumulators {
     /// absorbed at once. A block with delayed columns leaves its
     /// remainder in `blocks`; a block absorbed whole is freed (not pooled:
     /// a pooled buffer only grows, and a later block of the parent would
-    /// keep its capacity alive). A child deposited out of ascending order
-    /// counts as under no plan, and its parent's [`Self::take`] fails.
+    /// keep its capacity alive).
+    ///
+    /// The drivers deposit in ascending supernode order; a deposit out of
+    /// that order abandons the plans it passes over (debug builds assert).
     pub(crate) fn deposit(
         &mut self,
         blocks: &mut [Option<ContribBlock<Packed>>],
         child: usize,
         inputs: &AssemblyInputs<'_>,
     ) -> Result<(), FeralError> {
-        let Some(&Reverse((expected, plan_index))) = self.expected.peek() else {
-            return Ok(());
+        let in_order = self.deposit_in_any_order(blocks, child, inputs)?;
+        debug_assert!(
+            in_order,
+            "early assembly: supernode {child} deposited after a planned child it should follow"
+        );
+        Ok(())
+    }
+
+    /// [`Self::deposit`] without the order assertion; `false` if `child`
+    /// came after a child some plan still expected.
+    ///
+    /// A plan expecting a child below `child` cannot keep children order:
+    /// that child either came earlier, out of order, or comes later. It is
+    /// abandoned: its accumulator (if open) keeps the children it absorbed
+    /// — always a prefix of `children` — and its later children's blocks
+    /// stay whole in `blocks`, as under the classic scheme, so the
+    /// parent's assembly adds them after the accumulator, still in
+    /// children order (`factorize::assemble_children`). Every cell then
+    /// receives the same additions in the same order as under `Off`, so
+    /// the factors are unchanged; only the memory bound is lost for that
+    /// parent. Popping every passed-over plan here keeps the least
+    /// expected child at the top of `expected`, so one abandoned plan
+    /// never stalls the others.
+    fn deposit_in_any_order(
+        &mut self,
+        blocks: &mut [Option<ContribBlock<Packed>>],
+        child: usize,
+        inputs: &AssemblyInputs<'_>,
+    ) -> Result<bool, FeralError> {
+        let mut in_order = true;
+        let plan_index = loop {
+            let Some(&Reverse((expected, plan_index))) = self.expected.peek() else {
+                return Ok(in_order);
+            };
+            if expected < child {
+                // Abandoned: it never enters `expected` again.
+                self.expected.pop();
+                in_order = false;
+            } else if expected == child {
+                self.expected.pop();
+                break plan_index;
+            } else {
+                // Under no plan (or a repeated deposit): held.
+                return Ok(in_order);
+            }
         };
-        if expected != child {
-            return Ok(());
-        }
-        self.expected.pop();
         let plan = &mut self.plans[plan_index];
         let parent = plan.parent;
         let children = &inputs.symbolic.supernodes[parent].children;
@@ -391,7 +432,7 @@ impl Accumulators {
             self.expected.push(Reverse((next, plan_index)));
         }
         if position < plan.open_at {
-            return Ok(());
+            return Ok(in_order);
         }
         let first = if position == plan.open_at {
             0
@@ -406,26 +447,20 @@ impl Accumulators {
                 absorb(parent, c, held, inputs, &mut self.map, accumulator, blocks)?;
             }
         }
-        Ok(())
+        accumulator.absorbed = position + 1;
+        Ok(in_order)
     }
 
-    /// Supernode `p`'s accumulator, if its scheme opened one, once all
-    /// its children are deposited. The remainders its children left are
-    /// in `blocks`, where `p`'s assembly finds them as it finds held
-    /// blocks. A child not yet deposited is a driver error: assembling
-    /// without it would drop its block.
-    pub(crate) fn take(&mut self, p: usize) -> Result<Option<Accumulator>, FeralError> {
-        let Ok(plan) = self.plans.binary_search_by_key(&p, |pl| pl.parent) else {
-            return Ok(None);
-        };
-        let plan = &mut self.plans[plan];
-        if plan.deposited < plan.n_children {
-            return Err(FeralError::InvalidInput(format!(
-                "early assembly: supernode {p} assembled after {} of its {} children",
-                plan.deposited, plan.n_children
-            )));
-        }
-        Ok(plan.accumulator.take())
+    /// Supernode `p`'s accumulator, if its scheme opened one. The blocks
+    /// its children left are in `blocks`, where `p`'s assembly finds them
+    /// as it finds held blocks: remainders of the children the
+    /// accumulator absorbed ([`Accumulator::absorbed`]), and the whole
+    /// blocks of any later ones — children of a plan its deposits
+    /// abandoned, or (a driver error) not yet deposited, which the
+    /// deposit of `p` itself then abandons and asserts on.
+    pub(crate) fn take(&mut self, p: usize) -> Option<Accumulator> {
+        let index = self.plans.binary_search_by_key(&p, |pl| pl.parent).ok()?;
+        self.plans[index].accumulator.take()
     }
 }
 
@@ -489,6 +524,7 @@ fn open_accumulator(p: usize, inputs: &AssemblyInputs<'_>) -> Accumulator {
     Accumulator {
         data,
         sub_sym_area: 0,
+        absorbed: 0,
     }
 }
 
@@ -530,7 +566,7 @@ mod tests {
         let dim = rows.len();
         ContribBlock {
             row_indices: rows,
-            data: vec![value; packed_len(dim, dim)],
+            data: vec![value; packed_lower_len(dim, dim)],
             dim,
             n_delayed,
             sub_sym_area: 0,
@@ -633,7 +669,7 @@ mod tests {
             let mut blocks = self.blocks();
             self.deposit_through(&mut accumulators, &mut blocks, self.root - 1, make)
                 .unwrap();
-            let acc = accumulators.take(self.root).unwrap().unwrap();
+            let acc = accumulators.take(self.root).unwrap();
             (acc, blocks)
         }
     }
@@ -656,23 +692,53 @@ mod tests {
         }
     }
 
-    /// Children deposited out of children order make the parent's
-    /// assembly an error, not a silently reordered sum.
+    /// A deposit out of children order abandons the plan instead of
+    /// failing: the accumulator keeps the children it absorbed, the later
+    /// ones stay whole, and adding those after it in children order gives
+    /// every cell the in-order sum of [`VALUES`], bit for bit. The
+    /// abandoned plan leaves nothing expected behind to stall other plans.
     #[test]
-    fn a_deposit_out_of_children_order_fails() {
+    fn a_deposit_out_of_children_order_falls_back_to_held_blocks() {
         let fixture = Fixture::new();
         let mut accumulators = Accumulators::new(&fixture.symbolic, &always());
         let mut blocks = fixture.blocks();
-        for k in (0..fixture.n_children()).rev() {
-            blocks[fixture.child(k)] = Some(fixture.block(1.0));
-            accumulators
-                .deposit(&mut blocks, fixture.child(k), &fixture.inputs())
+        // Ascending, as the drivers deposit, except that child 1 comes
+        // right after child 2: the next supernode after it passes over it.
+        let (one, two) = (fixture.child(1), fixture.child(2));
+        let mut order: Vec<usize> = (0..fixture.root).filter(|&s| s != one).collect();
+        let at = order.iter().position(|&s| s == two).unwrap() + 1;
+        order.insert(at, one);
+        let children = &fixture.symbolic.supernodes[fixture.root].children;
+        for s in order {
+            blocks[s] = children
+                .iter()
+                .position(|&c| c == s)
+                .and_then(|k| VALUES.get(k).map(|&v| fixture.block(v)));
+            let in_order = accumulators
+                .deposit_in_any_order(&mut blocks, s, &fixture.inputs())
                 .unwrap();
+            assert_eq!(in_order, s != one + 1, "supernode {s}");
         }
-        assert!(matches!(
-            accumulators.take(fixture.root),
-            Err(FeralError::InvalidInput(_))
-        ));
+        // Nothing below the root is still expected: no plan stalls.
+        assert!(accumulators
+            .expected
+            .iter()
+            .all(|&Reverse((c, _))| c >= fixture.root));
+        let mut acc = accumulators.take(fixture.root).unwrap();
+        assert_eq!(acc.absorbed, 1);
+        let rows = fixture.symbolic.static_rows(fixture.root);
+        let n = rows.len();
+        for k in acc.absorbed..fixture.n_children() {
+            if let Some(block) = blocks[fixture.child(k)].take() {
+                extend_add(&block, block.dim, |i| i, &mut acc.data, n);
+            }
+        }
+        let in_order = VALUES.iter().fold(0.0, |s, &v| s + v);
+        for j in 0..n {
+            for i in j..n {
+                assert_eq!(acc.data[j * n + i].to_bits(), in_order.to_bits());
+            }
+        }
     }
 
     /// The accumulator carries the `sub_sym_area` of the children it
@@ -695,25 +761,7 @@ mod tests {
         assert_eq!(acc.sub_sym_area, areas[0] + areas[2]);
         let remainder = blocks[fixture.child(1)].as_ref().unwrap();
         assert_eq!(remainder.sub_sym_area, areas[1]);
-        assert_eq!(remainder.data.len(), packed_len(remainder.dim, 1));
-    }
-
-    /// Taking an accumulator before every child is deposited is an error,
-    /// not a silently dropped block.
-    #[test]
-    fn take_before_every_child_is_deposited_fails() {
-        let fixture = Fixture::new();
-        let mut accumulators = Accumulators::new(&fixture.symbolic, &always());
-        let mut blocks = fixture.blocks();
-        fixture
-            .deposit_through(&mut accumulators, &mut blocks, fixture.child(0), |_| {
-                Some(fixture.block(1.0))
-            })
-            .unwrap();
-        assert!(matches!(
-            accumulators.take(fixture.root),
-            Err(FeralError::InvalidInput(_))
-        ));
+        assert_eq!(remainder.data.len(), packed_lower_len(remainder.dim, 1));
     }
 
     /// A block whose trailing row is not one of the parent's static rows

@@ -500,12 +500,6 @@ pub struct SymbolicFactorization {
     /// to enforce the per-front NPIV ≤ NASS − NVSCHUR stopping rule
     /// (F3.2b).
     pub is_schur_tail: Option<usize>,
-
-    /// `(parent, child position)` of every accumulator
-    /// `EarlyAssembly::WideParents` opens (`accumulate_from`), ascending by
-    /// parent: computed by the first factorization that asks for it
-    /// ([`Self::planned_accumulators`]), so other callers pay nothing.
-    pub(crate) planned_accumulators: std::sync::OnceLock<Vec<(usize, usize)>>,
 }
 
 impl SymbolicFactorization {
@@ -527,12 +521,13 @@ impl SymbolicFactorization {
 
     /// The accumulators `EarlyAssembly::WideParents` opens: `(parent, child
     /// position)` pairs ascending by parent, as [`Self::accumulator_plan`]
-    /// computes them with `accumulate_from`; computed once per analysis.
-    pub(crate) fn planned_accumulators(&self) -> &[(usize, usize)] {
-        self.planned_accumulators.get_or_init(|| {
-            self.accumulator_plan(|p| {
-                accumulate_from(&self.supernodes, |s| self.static_rows(s).len(), p)
-            })
+    /// yields them with `accumulate_from`. Each factorization that asks
+    /// derives them afresh (`numeric::contrib::Accumulators::new`), in
+    /// `O(supernodes + children)` time and no allocation, so they always
+    /// match the analysis as it is.
+    pub(crate) fn wide_parent_plan(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.accumulator_plan(|p| {
+            accumulate_from(&self.supernodes, |s| self.static_rows(s).len(), p)
         })
     }
 
@@ -541,12 +536,11 @@ impl SymbolicFactorization {
     /// analysis has its static rows (an accumulator's layout) and its
     /// children are ascending supernodes below it, so the sequential
     /// drivers deposit them in `children` order.
-    pub(crate) fn accumulator_plan(
-        &self,
-        open_at: impl Fn(usize) -> Option<usize>,
-    ) -> Vec<(usize, usize)> {
-        let mut plan: Vec<(usize, usize)> = self
-            .supernodes
+    pub(crate) fn accumulator_plan<'a>(
+        &'a self,
+        open_at: impl Fn(usize) -> Option<usize> + 'a,
+    ) -> impl Iterator<Item = (usize, usize)> + 'a {
+        self.supernodes
             .iter()
             .enumerate()
             .filter(|(p, sn)| {
@@ -554,10 +548,7 @@ impl SymbolicFactorization {
                     && sn.children.last().is_some_and(|&c| c < *p)
                     && !self.static_rows(*p).is_empty()
             })
-            .filter_map(|(p, _)| open_at(p).map(|at| (p, at)))
-            .collect();
-        plan.shrink_to_fit();
-        plan
+            .filter_map(move |(p, _)| open_at(p).map(|at| (p, at)))
     }
 }
 
@@ -936,9 +927,9 @@ pub struct WorkEstimate {
     /// assembled. This is the multifrontal working set that sits on top
     /// of the resident factor and is invisible to a caller who only
     /// measures the factor. Blocks are counted square under the classic
-    /// scheme: without delayed pivots this bounds every driver and
-    /// `EarlyAssembly` scheme (the sequential drivers hold packed blocks,
-    /// about half as large).
+    /// scheme: without delayed pivots this bounds every driver under
+    /// `EarlyAssembly::Off` and `EarlyAssembly::WideParents` (the
+    /// sequential drivers hold packed blocks, about half as large).
     pub peak_contrib_bytes: usize,
     /// `factor_bytes + peak_contrib_bytes` — the headline number to
     /// compare against a memory budget.
@@ -1696,7 +1687,6 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> SymbolicFactorization {
         resolved_amalgamation: snode_params.amalgamation_strategy,
         resolved_preprocess,
         is_schur_tail: None,
-        planned_accumulators: std::sync::OnceLock::new(),
     }
 }
 
@@ -1919,7 +1909,6 @@ pub fn symbolic_factorize_with_schur(
         resolved_amalgamation: effective_params.amalgamation_strategy,
         resolved_preprocess: OrderingPreprocess::None,
         is_schur_tail: Some(n_schur),
-        planned_accumulators: std::sync::OnceLock::new(),
     })
 }
 
@@ -2199,7 +2188,7 @@ fn split_straddling_supernode(
 /// block, given its front `order`.
 fn packed_block(supernodes: &[Supernode], order: usize, s: usize) -> usize {
     let c = order.saturating_sub(supernodes[s].ncol());
-    c * (c + 1) / 2
+    crate::dense::factor::packed_lower_len(c, c)
 }
 
 /// The position in supernode `p`'s `children` at which the sequential
@@ -2223,15 +2212,15 @@ fn packed_block(supernodes: &[Supernode], order: usize, s: usize) -> usize {
 ///   block, and the frontal pool grown to `p`'s front).
 ///
 /// The drivers keep everything else as the classic scheme has it: the
-/// frontal pool grows by one rule (`dense::matrix::fit_pooled_front`)
+/// frontal pool grows by one rule (`dense::matrix::grow_pooled_front`)
 /// whether or not a front was an accumulator, and an absorbed block is
 /// freed, not pooled. While `p`'s own front is factored the adopted
 /// accumulator, the idle pool and the kernel's outputs (`L`, the
 /// packed block: at most `A + O(order(p))` entries) are live together,
 /// which the classic assembly moment (`≥ 2A` of blocks) covers to within
 /// `O(order(p))` words. So the plan's peak live heap is the classic
-/// scheme's plus its bookkeeping (a few words per planned parent, cached
-/// on the analysis), a scratch map of one block's rows and those
+/// scheme's plus its bookkeeping (a few words per planned parent, for the
+/// length of a factorization), a scratch map of one block's rows and those
 /// `O(order)` words; delayed pivots only enlarge the classic scheme's
 /// blocks. A parent whose children's blocks add up to less than `2A`
 /// stays classic. Time is not bounded by construction: the same

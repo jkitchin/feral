@@ -12,9 +12,11 @@
 //! factor is no larger. The parallel task-graph driver ignores the
 //! scheme and is not measured here.
 //!
-//! A counting `#[global_allocator]` measures live heap. The tests take
-//! one lock while measuring, so nothing else in this binary allocates
-//! meanwhile.
+//! A counting `#[global_allocator]` measures live heap. The binary has no
+//! test harness (`harness = false` in `Cargo.toml`): `main` runs the
+//! checks one after another on its own thread, so nothing else in the
+//! process allocates while one measures. It takes substring filters as
+//! positional arguments, and ignores flags such as `--nocapture`.
 
 #[path = "wide_star/mod.rs"]
 mod wide_star;
@@ -26,13 +28,12 @@ use feral::symbolic::{
 };
 use feral::{CscMatrix, FactorStatus, Solver};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::sync::Mutex;
 use wide_star::{star_kkt, Star};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
-static MEASURING: Mutex<()> = Mutex::new(());
 
 fn grow(bytes: usize) {
     let live = LIVE.fetch_add(bytes, Relaxed) + bytes;
@@ -96,9 +97,9 @@ fn measure(a: &CscMatrix, symbolic: &SymbolicFactorization, mode: EarlyAssembly)
     (peak, retained)
 }
 
-/// `Off` and `WideParents` on one analysis. `WideParents` runs once first: the
-/// plan is cached on the analysis (bookkeeping that outlives a
-/// factorization), so it must not count as retained factor.
+/// `Off` and `WideParents` on one analysis, after an unmeasured
+/// `WideParents` run, so process-wide state that a first factorization
+/// initialises once (cached environment settings) counts in neither.
 fn off_and_wide_parents(a: &CscMatrix, symbolic: &SymbolicFactorization) -> [(usize, usize); 2] {
     measure(a, symbolic, EarlyAssembly::WideParents);
     [
@@ -110,9 +111,7 @@ fn off_and_wide_parents(a: &CscMatrix, symbolic: &SymbolicFactorization) -> [(us
 /// `Solver::with_early_assembly` reaches the sequential driver: on the
 /// star, a `Solver` factorization (analysis included) peaks far lower
 /// with `WideParents` than with `Off`.
-#[test]
 fn solver_setter_reaches_the_sequential_driver() {
-    let _measuring = MEASURING.lock().unwrap_or_else(|e| e.into_inner());
     let matrix = star_kkt(Star {
         groups: 1500,
         local: 4,
@@ -137,9 +136,7 @@ fn solver_setter_reaches_the_sequential_driver() {
     );
 }
 
-#[test]
 fn wide_star_peak_is_far_below_the_classic_scheme() {
-    let _measuring = MEASURING.lock().unwrap_or_else(|e| e.into_inner());
     let star = Star {
         groups: 1500,
         local: 4,
@@ -334,9 +331,7 @@ fn pool_growth_tree() -> Spec {
     }
 }
 
-#[test]
 fn wide_parents_never_exceeds_off_on_generated_trees() {
-    let _measuring = MEASURING.lock().unwrap_or_else(|e| e.into_inner());
     let supernodes = SupernodeParams {
         nemin: 1,
         ..SupernodeParams::default()
@@ -403,4 +398,54 @@ fn wide_parents_never_exceeds_off_on_generated_trees() {
         planned_below > 0,
         "the generator must produce trees a plan helps"
     );
+}
+
+/// The checks, in the order `main` runs them.
+const CHECKS: [(&str, fn()); 3] = [
+    (
+        "solver_setter_reaches_the_sequential_driver",
+        solver_setter_reaches_the_sequential_driver,
+    ),
+    (
+        "wide_star_peak_is_far_below_the_classic_scheme",
+        wide_star_peak_is_far_below_the_classic_scheme,
+    ),
+    (
+        "wide_parents_never_exceeds_off_on_generated_trees",
+        wide_parents_never_exceeds_off_on_generated_trees,
+    ),
+];
+
+/// Run every check whose name contains a positional argument (all of them
+/// without one) and report each; exit non-zero if any failed.
+fn main() {
+    let filters: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+    let selected: Vec<_> = CHECKS
+        .iter()
+        .filter(|(name, _)| filters.is_empty() || filters.iter().any(|f| name.contains(f.as_str())))
+        .collect();
+    println!("\nrunning {} checks", selected.len());
+    let mut failed = Vec::new();
+    for (name, check) in &selected {
+        let outcome = catch_unwind(AssertUnwindSafe(check));
+        println!(
+            "check {name} ... {}",
+            if outcome.is_ok() { "ok" } else { "FAILED" }
+        );
+        if outcome.is_err() {
+            failed.push(*name);
+        }
+    }
+    println!(
+        "\ncheck result: {}. {} passed; {} failed\n",
+        if failed.is_empty() { "ok" } else { "FAILED" },
+        selected.len() - failed.len(),
+        failed.len()
+    );
+    if !failed.is_empty() {
+        std::process::exit(1);
+    }
 }

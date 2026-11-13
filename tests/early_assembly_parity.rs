@@ -16,8 +16,8 @@
 //! must not change. The digest covers each front's row indices,
 //! delayed-in count and cascade-break flag as well as its factor. The
 //! digests of both drivers under `Off` and `WideParents` are also pinned to
-//! the release before this change (on aarch64, where they were computed;
-//! ignored elsewhere).
+//! the release before this change. `Always` is internal: the crate's own
+//! tests enable the `__early-assembly-always` feature for it.
 
 #[path = "common227/mod.rs"]
 mod common227;
@@ -421,12 +421,11 @@ fn golden_digests(base: &NumericParams) -> Vec<(String, u64)> {
 
 // [`golden_digests`] on `main` @ d3f7eb6, before contribution blocks were
 // packed or accumulated, computed by running `golden_digests` there
-// (aarch64, macOS). The full default pipeline is not bit-identical across
-// architectures (issue #211 class; `issue227_never_golden`; on x86_64 the
-// Schur kernel dispatches on the CPU's features at run time), so the
-// digests hold on aarch64 only. No x86_64 digests are pinned: they need a
-// run of the parent on an x86_64 machine, and the test is ignored there
-// rather than passing without a comparison.
+// (aarch64, macOS). The parent gives the same digests on Linux x86_64.
+// The full default pipeline is not bit-identical across architectures in
+// general (issue #211 class; `issue227_never_golden`; on x86_64 the Schur
+// kernel dispatches on the CPU's features at run time), so a runner whose
+// CPU picks a different kernel would show up here.
 const PARENT_GOLDEN: [u64; 8] = [
     0xc392686a5ff99c30,
     0xc392686a5ff99c30,
@@ -445,10 +444,6 @@ const PARENT_GOLDEN: [u64; 8] = [
 /// between this build's schemes.
 /// `FERAL_EARLY_ASSEMBLY_PRINT=1` prints the digests.
 #[test]
-#[cfg_attr(
-    not(target_arch = "aarch64"),
-    ignore = "parent digests are pinned for aarch64 only"
-)]
 fn assembly_matches_the_parent_release() {
     for mode in [EarlyAssembly::Off, EarlyAssembly::WideParents] {
         let got = golden_digests(&params(mode));
