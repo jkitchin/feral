@@ -107,3 +107,25 @@ Timing, seeds 1-3: fresh 6.44/6.06/6.75, in-place 5.33/5.25/5.91 ms
 clippy clean on 1.97 and 1.100; bench identical.
 Could not run pounce here (repository not attached to this session); the
 argument that it now matches the baseline is the bit-identity above.
+
+* 21:35 :issue-232:real-basis:benchmark:profile:
+Ran the issue's real basis (discopt branch claude/sleepy-gates-8ronyd,
+head 896c43f, docs/dev/data/highs-parity/rootgap/factor_bench/
+piperout-d27_basis100.txt.gz; m = 17 470, nnz 50 762 as in the issue).
+Baseline = origin/main 41e7c2b (0.22 code) in a worktree, same example
+minus the in-place half; its synthetic digests equal the 0.22 reference.
+Median of 400, 3 alternating rounds:
+  0.22      15.44 / 15.49 / 15.55 ms
+  PR fresh  10.42 / 10.37 / 10.38 ms  (1.49x)
+  PR inplace 9.42 /  9.39 /  9.53 ms  (1.64x)
+Digest 31399b05c1410d43 identical on both. Much less than the synthetic
+shape's ~2.4x: the synthetic kernel was not representative.
+Issue reports HiGHS HFactor 2.7 ms against feral 17-18 ms on the
+author's machine (0.22 here: 15.5 ms), so ~3.5x remains. Does not close
+#232.
+Callgrind (PR build, real basis): BinaryHeap push/pop ~18 % of
+markowitz_factor instructions (kernel-phase pushes, which pivot
+identity with 0.22 depends on); the rank-1 update's column walk
+(`while k < cols.len[j]` / find of the pivot-row entry) is the largest
+line-level cost. Both need algorithmic changes (count buckets or
+entry-position index) that must be checked against the golden pivots.
