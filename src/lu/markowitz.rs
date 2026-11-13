@@ -175,12 +175,21 @@ impl<T: Copy + Default> Lists<T> {
 /// stop examining candidate columns once this many distinct columns have been
 /// examined and a candidate is in hand. `zero_pivot_tol` is scaled by `max|A|`
 /// exactly as the Gilbert–Peierls path scales it.
+///
+/// `row_pool` supplies recycled buffers for the `U` rows (popped, cleared,
+/// refilled; an empty pool allocates), and `l_nnz_hint` pre-sizes the `L`
+/// arrays. Both only change where memory comes from, never the result; they
+/// are how [`SparseLu::refactor_markowitz`](super::SparseLu::refactor_markowitz)
+/// avoids one allocation per pivot (issue #232).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn markowitz_factor(
     a: &SparseColMatrix,
     u_thresh: f64,
     max_search: usize,
     zero_pivot_tol: f64,
     on_singular: LuSingularAction,
+    row_pool: &mut Vec<Vec<(usize, f64)>>,
+    l_nnz_hint: usize,
 ) -> Result<MarkowitzFactor, FeralError> {
     let m = a.m;
 
@@ -256,8 +265,8 @@ pub(super) fn markowitz_factor(
     let mut perm = Vec::with_capacity(m);
     let mut qcol = Vec::with_capacity(m);
     let mut l_col_ptr = Vec::with_capacity(m + 1);
-    let mut l_row_idx: Vec<usize> = Vec::new();
-    let mut l_val: Vec<f64> = Vec::new();
+    let mut l_row_idx: Vec<usize> = Vec::with_capacity(l_nnz_hint);
+    let mut l_val: Vec<f64> = Vec::with_capacity(l_nnz_hint);
     l_col_ptr.push(0);
     let mut u_rows_orig: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
 
@@ -478,10 +487,12 @@ pub(super) fn markowitz_factor(
         perm.push(pi);
         qcol.push(pj);
 
-        // U row: diagonal plus the surviving row entries. One allocation per
-        // pivot, which is the `SparseLu` U-row storage itself: the caller
-        // remaps it in place.
-        let mut urow = Vec::with_capacity(1 + uvec.len());
+        // U row: diagonal plus the surviving row entries. This buffer becomes
+        // the `SparseLu` U-row storage itself (the caller remaps it in place),
+        // so it comes from the pool when one is supplied.
+        let mut urow = row_pool.pop().unwrap_or_default();
+        urow.clear();
+        urow.reserve(1 + uvec.len());
         urow.push((pj, pv));
         urow.extend_from_slice(&uvec);
         u_rows_orig.push(urow);
