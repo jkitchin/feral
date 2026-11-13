@@ -28,7 +28,12 @@
 //! The active submatrix is **column-major with values** (`cols[j]`), plus a
 //! row-wise *index-only* list (`row_cols[i]`) that is allowed to carry stale and
 //! duplicate entries and is deduplicated with a mark array when a pivot row is
-//! gathered. The rank-1 update runs column-oriented — for each alive column `j`
+//! gathered. Both are packed into one buffer each ([`Lists`]) rather than one
+//! `Vec` per column or row (issue #232).
+//!
+//! The count heaps that drive the general pivot search are built only when the
+//! singleton stacks first run dry, i.e. over the kernel left after the
+//! triangular peel, not over all `m` (issue #232). The rank-1 update runs column-oriented — for each alive column `j`
 //! in the pivot row, `col_j ← col_j − u_j · l` — so finding `u_j` costs a scan of
 //! `col_j`, which that column's rebuild pays for anyway. The pivot search reads
 //! column values directly, which is what it needs: both `max_k|a_kj|` and the
@@ -70,13 +75,106 @@ pub(super) struct MarkowitzFactor {
     pub a_max: f64,
 }
 
+/// Variable-length lists, one per column (or row), packed in one buffer.
+///
+/// Replaces `Vec<Vec<T>>` for the active submatrix (issue #232): on a
+/// near-triangular LP basis with m = 17 470 the per-list `Vec`s were ~35k small
+/// allocations per factorization, most of them for lists that are consumed at
+/// a singleton step and never grow. A list that outgrows its slot moves to the
+/// end of the buffer with doubled capacity, so total storage stays within a
+/// constant factor of the largest size each list ever reaches; the abandoned
+/// slots are not reclaimed, which is fine for a buffer that lives for one
+/// factorization.
+///
+/// `push` and `swap_remove` reproduce `Vec`'s element order exactly, so the
+/// pivot search's tie-breaks (which depend on that order) are those of the
+/// `Vec<Vec<T>>` it replaced.
+struct Lists<T> {
+    start: Vec<usize>,
+    len: Vec<usize>,
+    cap: Vec<usize>,
+    data: Vec<T>,
+}
+
+impl<T: Copy + Default> Lists<T> {
+    /// Empty lists, list `j` with room for `caps[j]` entries before it has to
+    /// move. Filled with [`Self::push`].
+    fn with_capacities(caps: &[usize]) -> Self {
+        let mut start = Vec::with_capacity(caps.len());
+        let mut total = 0usize;
+        for &c in caps {
+            start.push(total);
+            total += c;
+        }
+        Self {
+            start,
+            len: vec![0; caps.len()],
+            cap: caps.to_vec(),
+            data: vec![T::default(); total],
+        }
+    }
+
+    #[inline]
+    fn get(&self, j: usize) -> &[T] {
+        let s = self.start[j];
+        &self.data[s..s + self.len[j]]
+    }
+
+    #[inline]
+    fn get_mut(&mut self, j: usize) -> &mut [T] {
+        let s = self.start[j];
+        let l = self.len[j];
+        &mut self.data[s..s + l]
+    }
+
+    #[inline]
+    fn push(&mut self, j: usize, x: T) {
+        if self.len[j] == self.cap[j] {
+            self.grow(j);
+        }
+        let at = self.start[j] + self.len[j];
+        self.data[at] = x;
+        self.len[j] += 1;
+    }
+
+    #[cold]
+    fn grow(&mut self, j: usize) {
+        let (s, l, c) = (self.start[j], self.len[j], self.cap[j]);
+        let new_cap = (2 * c).max(4);
+        if s + c == self.data.len() {
+            // Already the last slot: extend in place.
+            self.data.resize(s + new_cap, T::default());
+        } else {
+            let ns = self.data.len();
+            self.data.extend_from_within(s..s + l);
+            self.data.resize(ns + new_cap, T::default());
+            self.start[j] = ns;
+        }
+        self.cap[j] = new_cap;
+    }
+
+    /// `Vec::swap_remove`: the last element takes position `k`.
+    #[inline]
+    fn swap_remove(&mut self, j: usize, k: usize) {
+        let s = self.start[j];
+        let last = s + self.len[j] - 1;
+        self.data.swap(s + k, last);
+        self.len[j] -= 1;
+    }
+
+    #[inline]
+    fn clear(&mut self, j: usize) {
+        self.len[j] = 0;
+    }
+}
+
 /// Right-looking threshold-Markowitz LU of `a`.
 ///
 /// `u_thresh` is the relative pivot threshold (`0 < u ≤ 1`; `1.0` degenerates to
 /// partial pivoting within the chosen column). `max_search` is the Suhl cutoff:
-/// stop examining candidate columns once this many have been examined and a
-/// candidate is in hand. `zero_pivot_tol` is scaled by `max|A|` exactly as the
-/// Gilbert–Peierls path scales it.
+/// stop examining candidate columns once this many distinct columns have been
+/// examined and a candidate is in hand. `zero_pivot_tol` is scaled by `max|A|`
+/// exactly as the Gilbert–Peierls path scales it.
 pub(super) fn markowitz_factor(
     a: &SparseColMatrix,
     u_thresh: f64,
@@ -93,22 +191,29 @@ pub(super) fn markowitz_factor(
     let ztol = zero_pivot_tol * a_max;
 
     // ---- active submatrix ------------------------------------------------
-    let mut cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
-    let mut row_cols: Vec<Vec<usize>> = vec![Vec::new(); m];
+    // Explicit zeros are dropped, so count the stored nonzeros first and size
+    // the packed lists exactly.
+    let mut ccnt = vec![0usize; m];
     let mut rcnt = vec![0usize; m];
+    for (j, cj) in ccnt.iter_mut().enumerate() {
+        for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
+            if a.values[idx] != 0.0 {
+                *cj += 1;
+                rcnt[a.row_idx[idx]] += 1;
+            }
+        }
+    }
+    let mut cols: Lists<(usize, f64)> = Lists::with_capacities(&ccnt);
+    let mut row_cols: Lists<usize> = Lists::with_capacities(&rcnt);
     for j in 0..m {
-        let mut col = Vec::with_capacity(a.col_ptr[j + 1] - a.col_ptr[j]);
         for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
             let (i, v) = (a.row_idx[idx], a.values[idx]);
             if v != 0.0 {
-                col.push((i, v));
-                row_cols[i].push(j);
-                rcnt[i] += 1;
+                cols.push(j, (i, v));
+                row_cols.push(i, j);
             }
         }
-        cols.push(col);
     }
-    let mut ccnt: Vec<usize> = cols.iter().map(|c| c.len()).collect();
     let mut alive_r = vec![true; m];
     let mut alive_c = vec![true; m];
 
@@ -124,10 +229,15 @@ pub(super) fn markowitz_factor(
     let mut row_singletons: Vec<usize> = (0..m).filter(|&i| rcnt[i] == 1).collect();
 
     // Lazy min-heaps over the counts; stale pairs are discarded on pop.
-    let mut cheap: BinaryHeap<Reverse<(usize, usize)>> =
-        (0..m).map(|j| Reverse((ccnt[j], j))).collect();
-    let mut rheap: BinaryHeap<Reverse<(usize, usize)>> =
-        (0..m).map(|i| Reverse((rcnt[i], i))).collect();
+    //
+    // Built the first time the singleton stacks run dry, over the columns and
+    // rows still alive then — i.e. over the kernel, not the whole basis
+    // (issue #232). Before that point nothing reads them, so nothing is pushed:
+    // building them up front over all m and pushing on every count change left
+    // ~17k stale entries to pop one at a time once the kernel search started.
+    let mut heaps_built = false;
+    let mut cheap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    let mut rheap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
 
     // ---- workspaces ------------------------------------------------------
     let mut lscat = vec![0.0_f64; m];
@@ -140,6 +250,7 @@ pub(super) fn markowitz_factor(
     let mut lvec: Vec<(usize, f64)> = Vec::new();
     let mut uvec: Vec<(usize, f64)> = Vec::new();
     let mut scanned: Vec<usize> = Vec::new();
+    let mut scan_mark = vec![false; m];
 
     // ---- output ----------------------------------------------------------
     let mut perm = Vec::with_capacity(m);
@@ -158,7 +269,7 @@ pub(super) fn markowitz_factor(
             if !alive_c[j] || ccnt[j] != 1 {
                 continue;
             }
-            let (i, v) = cols[j][0];
+            let (i, v) = cols.get(j)[0];
             if v.abs() > ztol {
                 fast = Some((i, j));
                 break;
@@ -172,11 +283,11 @@ pub(super) fn markowitz_factor(
                 // Find the one live column holding it. `row_cols` carries stale
                 // entries, so this is a search, not a lookup.
                 let mut found = None;
-                for &j in row_cols[i].iter() {
+                for &j in row_cols.get(i).iter() {
                     if !alive_c[j] {
                         continue;
                     }
-                    if let Some(&(_, v)) = cols[j].iter().find(|&&(r, _)| r == i) {
+                    if let Some(&(_, v)) = cols.get(j).iter().find(|&&(r, _)| r == i) {
                         found = Some((j, v));
                         break;
                     }
@@ -184,13 +295,28 @@ pub(super) fn markowitz_factor(
                 // A row singleton still has to pass the threshold against its
                 // own column — it is a cheap pivot, not a free one.
                 if let Some((j, v)) = found {
-                    let colmax = cols[j].iter().fold(0.0_f64, |a, &(_, x)| a.max(x.abs()));
+                    let colmax = cols
+                        .get(j)
+                        .iter()
+                        .fold(0.0_f64, |a, &(_, x)| a.max(x.abs()));
                     if v.abs() > ztol && v.abs() >= u_thresh * colmax {
                         fast = Some((i, j));
                         break;
                     }
                 }
             }
+        }
+
+        if fast.is_none() && !heaps_built {
+            cheap = (0..m)
+                .filter(|&j| alive_c[j])
+                .map(|j| Reverse((ccnt[j], j)))
+                .collect();
+            rheap = (0..m)
+                .filter(|&i| alive_r[i])
+                .map(|i| Reverse((rcnt[i], i)))
+                .collect();
+            heaps_built = true;
         }
 
         // Smallest live row count, a valid lower bound on `r_i` for the
@@ -229,9 +355,19 @@ pub(super) fn markowitz_factor(
                 }
             }
             cheap.pop();
+            // The heap can hold several live copies of `(c, j)` (a column
+            // re-pushed without its count changing). Examine each column once:
+            // a second look cannot improve `best`, and counting it again
+            // against `max_search` would cut the search short by an amount
+            // that depends on push history rather than on the matrix.
+            if scan_mark[j] {
+                continue;
+            }
+            scan_mark[j] = true;
             scanned.push(j);
 
-            let colmax = cols[j]
+            let colmax = cols
+                .get(j)
                 .iter()
                 .fold(0.0_f64, |acc, &(_, v)| acc.max(v.abs()));
             if colmax <= ztol {
@@ -241,7 +377,7 @@ pub(super) fn markowitz_factor(
                 continue;
             }
             let bar = u_thresh * colmax;
-            for &(i, v) in cols[j].iter() {
+            for &(i, v) in cols.get(j).iter() {
                 if v.abs() < bar {
                     continue;
                 }
@@ -263,6 +399,7 @@ pub(super) fn markowitz_factor(
             }
         }
         for &j in scanned.iter() {
+            scan_mark[j] = false;
             if alive_c[j] {
                 cheap.push(Reverse((ccnt[j], j)));
             }
@@ -288,13 +425,15 @@ pub(super) fn markowitz_factor(
                             None => return Err(FeralError::SingularBasis { column: col }),
                         };
                         let mag = abs_floor.max(f64::MIN_POSITIVE);
-                        match cols[col].iter_mut().find(|(i, _)| *i == row) {
+                        match cols.get_mut(col).iter_mut().find(|(i, _)| *i == row) {
                             Some(e) => e.1 = if e.1 < 0.0 { -mag } else { mag },
                             None => {
-                                cols[col].push((row, mag));
-                                row_cols[row].push(col);
+                                cols.push(col, (row, mag));
+                                row_cols.push(row, col);
                                 rcnt[row] += 1;
                                 ccnt[col] += 1;
+                                // Reached only with no fast pivot, so the
+                                // heaps are built.
                                 cheap.push(Reverse((ccnt[col], col)));
                                 rheap.push(Reverse((rcnt[row], row)));
                             }
@@ -305,7 +444,8 @@ pub(super) fn markowitz_factor(
             }
         };
 
-        let pv = cols[pj]
+        let pv = cols
+            .get(pj)
             .iter()
             .find(|&&(i, _)| i == pi)
             .map(|&(_, v)| v)
@@ -314,22 +454,22 @@ pub(super) fn markowitz_factor(
         // ---- gather the pivot column (→ L) and pivot row (→ U) ------------
         lvec.clear();
         let inv = 1.0 / pv;
-        for &(i, v) in cols[pj].iter() {
+        for &(i, v) in cols.get(pj).iter() {
             if i != pi {
                 lvec.push((i, v * inv));
             }
         }
         uvec.clear();
-        for &j in row_cols[pi].iter() {
+        for &j in row_cols.get(pi).iter() {
             if j == pj || !alive_c[j] || row_seen[j] {
                 continue;
             }
             row_seen[j] = true;
-            if let Some(&(_, v)) = cols[j].iter().find(|&&(i, _)| i == pi) {
+            if let Some(&(_, v)) = cols.get(j).iter().find(|&&(i, _)| i == pi) {
                 uvec.push((j, v));
             }
         }
-        for &j in row_cols[pi].iter() {
+        for &j in row_cols.get(pi).iter() {
             row_seen[j] = false;
         }
 
@@ -338,7 +478,9 @@ pub(super) fn markowitz_factor(
         perm.push(pi);
         qcol.push(pj);
 
-        // U row: diagonal plus the surviving row entries.
+        // U row: diagonal plus the surviving row entries. One allocation per
+        // pivot, which is the `SparseLu` U-row storage itself: the caller
+        // remaps it in place.
         let mut urow = Vec::with_capacity(1 + uvec.len());
         urow.push((pj, pv));
         urow.extend_from_slice(&uvec);
@@ -360,25 +502,23 @@ pub(super) fn markowitz_factor(
                 dirty_rows.push(i);
             }
         }
-        cols[pj] = Vec::new();
+        cols.clear(pj);
+        row_cols.clear(pi);
 
         // ---- rank-1 update, column-oriented ------------------------------
         // In place: each column is walked once, existing entries updated where
         // the pivot column touches them and swap-removed on exact cancellation,
-        // and the rows the walk did not meet appended as fill. Rebuilding into a
-        // fresh `Vec` per column instead costs one allocation per (pivot, column)
-        // pair, which on a 5150-column basis is millions of them.
+        // and the rows the walk did not meet appended as fill.
         for &(i, lv) in lvec.iter() {
             lscat[i] = lv;
             lmark[i] = true;
         }
         for &(j, uval) in uvec.iter() {
-            let col = &mut cols[j];
             let mut k = 0;
-            while k < col.len() {
-                let (i, v) = col[k];
+            while k < cols.len[j] {
+                let (i, v) = cols.get(j)[k];
                 if i == pi {
-                    col.swap_remove(k); // consumed into the U row
+                    cols.swap_remove(j, k); // consumed into the U row
                     continue;
                 }
                 if uval != 0.0 && lmark[i] {
@@ -392,10 +532,10 @@ pub(super) fn markowitz_factor(
                             dirty_mark[i] = true;
                             dirty_rows.push(i);
                         }
-                        col.swap_remove(k);
+                        cols.swap_remove(j, k);
                         continue;
                     }
-                    col[k].1 = nv;
+                    cols.get_mut(j)[k].1 = nv;
                 }
                 k += 1;
             }
@@ -406,9 +546,9 @@ pub(super) fn markowitz_factor(
                     }
                     let nv = -uval * lv;
                     if nv != 0.0 {
-                        col.push((i, nv));
+                        cols.push(j, (i, nv));
                         rcnt[i] += 1;
-                        row_cols[i].push(j);
+                        row_cols.push(i, j);
                         if !dirty_mark[i] {
                             dirty_mark[i] = true;
                             dirty_rows.push(i);
@@ -420,12 +560,15 @@ pub(super) fn markowitz_factor(
                 seen_mark[i] = false;
             }
             seen_list.clear();
-            ccnt[j] = col.len();
-            // Always into the heap as well: the stack is a fast path, not an
-            // alternative index. A column that stops being a singleton is
-            // dropped from the stack, and if it were not in `cheap` too it would
-            // be invisible to the general search and reported singular.
-            cheap.push(Reverse((ccnt[j], j)));
+            ccnt[j] = cols.len[j];
+            // Into the heap as well once it exists: the stack is a fast path,
+            // not an alternative index. A column that stops being a singleton
+            // is dropped from the stack, and if it were not in `cheap` too it
+            // would be invisible to the general search and reported singular.
+            // Before the heaps are built, the build itself picks it up.
+            if heaps_built {
+                cheap.push(Reverse((ccnt[j], j)));
+            }
             if ccnt[j] == 1 {
                 col_singletons.push(j);
             }
@@ -440,7 +583,9 @@ pub(super) fn markowitz_factor(
                 if rcnt[i] == 1 {
                     row_singletons.push(i);
                 }
-                rheap.push(Reverse((rcnt[i], i)));
+                if heaps_built {
+                    rheap.push(Reverse((rcnt[i], i)));
+                }
             }
         }
     }
@@ -454,4 +599,66 @@ pub(super) fn markowitz_factor(
         u_rows_orig,
         a_max,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lists;
+
+    /// `Lists` must behave exactly like `Vec<Vec<T>>` under the operations the
+    /// elimination uses — element order included, since the pivot search's
+    /// tie-breaks read it. The oracle is `std`'s `Vec`.
+    #[test]
+    fn lists_match_vec_of_vecs_under_random_ops() {
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let n = 37;
+        let init: Vec<Vec<(usize, f64)>> = (0..n)
+            .map(|j| (0..(j % 5)).map(|k| (k, (j * 10 + k) as f64)).collect())
+            .collect();
+        let caps: Vec<usize> = init.iter().map(|v| v.len()).collect();
+        let mut lists: Lists<(usize, f64)> = Lists::with_capacities(&caps);
+        for (j, v) in init.iter().enumerate() {
+            for &x in v {
+                lists.push(j, x);
+            }
+        }
+        let mut oracle = init;
+        for step in 0..20_000 {
+            let j = next(n);
+            match next(10) {
+                0..=5 => {
+                    let x = (step, step as f64 * 0.5);
+                    lists.push(j, x);
+                    oracle[j].push(x);
+                }
+                6..=8 => {
+                    if !oracle[j].is_empty() {
+                        let k = next(oracle[j].len());
+                        lists.swap_remove(j, k);
+                        oracle[j].swap_remove(k);
+                    }
+                }
+                _ => {
+                    if next(8) == 0 {
+                        lists.clear(j);
+                        oracle[j].clear();
+                    } else if !oracle[j].is_empty() {
+                        let k = next(oracle[j].len());
+                        lists.get_mut(j)[k].1 = -1.0;
+                        oracle[j][k].1 = -1.0;
+                    }
+                }
+            }
+            assert_eq!(lists.get(j), oracle[j].as_slice(), "step {step}, list {j}");
+        }
+        for (j, v) in oracle.iter().enumerate() {
+            assert_eq!(lists.get(j), v.as_slice(), "final, list {j}");
+        }
+    }
 }
