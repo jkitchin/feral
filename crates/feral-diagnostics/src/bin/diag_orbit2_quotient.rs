@@ -44,8 +44,8 @@ fn main() {
         let lo = pat_owned.col_ptr[c];
         let hi = pat_owned.col_ptr[c + 1];
         let mut d = 0usize;
-        for k in lo..hi {
-            if pat_owned.row_idx[k] != c {
+        for &r in &pat_owned.row_idx[lo..hi] {
+            if r != c {
                 d += 1;
             }
         }

@@ -83,8 +83,7 @@ fn analyze_small_leaf_grouping(
         }
         trailing.clear();
         for j in first_col..first_col + ncol {
-            for k in pattern.col_ptr[j]..pattern.col_ptr[j + 1] {
-                let r = pattern.row_idx[k];
+            for &r in &pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]] {
                 if !seen[r] {
                     seen[r] = true;
                     trailing.push(r);

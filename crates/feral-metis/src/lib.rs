@@ -339,8 +339,7 @@ fn split_dense_columns(
             return Err(OrderingError::MalformedInput);
         }
         let mut acc: usize = 0;
-        for k in lo..hi {
-            let r = pattern.row_idx[k] as usize;
+        for r in pattern.row_idx[lo..hi].iter().map(|&x| x as usize) {
             if r != c {
                 acc += 1;
             }
@@ -399,8 +398,7 @@ fn split_dense_columns(
         let hi = pattern.col_ptr[c + 1] as usize;
         let mut diag_inserted = false;
         let local_c = orig_to_local[c];
-        for k in lo..hi {
-            let r = pattern.row_idx[k] as usize;
+        for r in pattern.row_idx[lo..hi].iter().map(|&x| x as usize) {
             if r == c {
                 // Diagonal handled below; skip here so we control its
                 // placement (input may or may not carry the diagonal).

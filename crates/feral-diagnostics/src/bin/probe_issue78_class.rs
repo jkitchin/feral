@@ -37,8 +37,8 @@ fn max_col_nnz(csc: &CscMatrix) -> usize {
     let mut m = 0;
     for j in 0..csc.n {
         let mut c = 0;
-        for k in csc.col_ptr[j]..csc.col_ptr[j + 1] {
-            if csc.values[k] != 0.0 {
+        for &v in &csc.values[csc.col_ptr[j]..csc.col_ptr[j + 1]] {
+            if v != 0.0 {
                 c += 1;
             }
         }

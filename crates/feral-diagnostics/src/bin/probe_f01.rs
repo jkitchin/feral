@@ -71,8 +71,7 @@ fn probe(label: &str, csc: &CscMatrix) {
     let mut signed_above_floor = 0usize;
     for node in &fac.node_factors {
         let ff = &node.frontal_factors;
-        for k in 0..ff.d_diag.len() {
-            let d = ff.d_diag[k];
+        for (k, &d) in ff.d_diag.iter().enumerate() {
             let ad = d.abs();
             let in_strict = ad <= eps;
             let in_band = ad > eps && ad <= floor;

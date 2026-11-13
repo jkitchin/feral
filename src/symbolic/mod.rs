@@ -594,8 +594,9 @@ fn compute_static_row_indices(
         trailing.clear();
         // (a) Own columns' reach in the symmetric pattern.
         for j in first_col..own_last {
-            for k in permuted_pattern.col_ptr[j]..permuted_pattern.col_ptr[j + 1] {
-                let r = permuted_pattern.row_idx[k];
+            for &r in &permuted_pattern.row_idx
+                [permuted_pattern.col_ptr[j]..permuted_pattern.col_ptr[j + 1]]
+            {
                 if r < own_last {
                     continue;
                 }

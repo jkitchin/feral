@@ -139,9 +139,7 @@ fn dense_with_zero_column(n: usize, k: usize) -> CscMatrix {
     // Zero the diagonal AND off-diagonals of column k.
     let cstart = m.col_ptr[k];
     let cend = m.col_ptr[k + 1];
-    for idx in cstart..cend {
-        m.values[idx] = 0.0;
-    }
+    m.values[cstart..cend].fill(0.0);
     // Zero the row-k entries in columns j < k (lower triangle only).
     for j in 0..k {
         let jstart = m.col_ptr[j];

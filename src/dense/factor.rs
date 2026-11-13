@@ -5325,8 +5325,7 @@ fn try_reject_1x1_with_rook_rescue(
     };
     if let Some(pivot) = rescued {
         *n_rook_rescues += 1;
-        for idx in 0..pivot.n_swaps {
-            let (p, q) = pivot.swaps[idx];
+        for &(p, q) in &pivot.swaps[..pivot.n_swaps] {
             swap_rows_cols(a, nrow, p, q, perm);
         }
         match pivot.kind {

@@ -366,8 +366,7 @@ impl SparseLu {
         let mut reach: Vec<usize> = touched.clone();
         while let Some(k) = stack.pop() {
             let (lo, hi) = (self.l_col_ptr[k], self.l_col_ptr[k + 1]);
-            for idx in lo..hi {
-                let i = self.l_row_idx[idx];
+            for &i in &self.l_row_idx[lo..hi] {
                 if !mark[i] {
                     mark[i] = true;
                     touched.push(i);

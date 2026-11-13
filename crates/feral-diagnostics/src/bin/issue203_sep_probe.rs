@@ -34,8 +34,7 @@ fn full_pattern(m: &CscMatrix) -> (Vec<i32>, Vec<i32>) {
     let n = m.n;
     let mut deg = vec![0usize; n];
     for j in 0..n {
-        for k in m.col_ptr[j]..m.col_ptr[j + 1] {
-            let i = m.row_idx[k];
+        for &i in &m.row_idx[m.col_ptr[j]..m.col_ptr[j + 1]] {
             deg[j] += 1;
             if i != j {
                 deg[i] += 1;
@@ -49,8 +48,7 @@ fn full_pattern(m: &CscMatrix) -> (Vec<i32>, Vec<i32>) {
     let mut fill = col_ptr.clone();
     let mut row_idx = vec![0i32; col_ptr[n] as usize];
     for j in 0..n {
-        for k in m.col_ptr[j]..m.col_ptr[j + 1] {
-            let i = m.row_idx[k];
+        for &i in &m.row_idx[m.col_ptr[j]..m.col_ptr[j + 1]] {
             row_idx[fill[j] as usize] = i as i32;
             fill[j] += 1;
             if i != j {

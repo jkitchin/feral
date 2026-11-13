@@ -179,8 +179,7 @@ pub fn compress_pattern(pat: &CscPattern, map: &SuperMap) -> CscPattern {
             // Walk the originals' column in `pat` and contract rows.
             let start = pat.col_ptr[orig_c];
             let end = pat.col_ptr[orig_c + 1];
-            for k in start..end {
-                let orig_r = pat.row_idx[k];
+            for &orig_r in &pat.row_idx[start..end] {
                 let sr = map.icmp[orig_r];
                 if sr == sc {
                     continue;

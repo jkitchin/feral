@@ -266,8 +266,7 @@ fn connected_components(graph: &Graph) -> (Vec<i32>, usize) {
             let vu = v as usize;
             let lo = graph.xadj[vu] as usize;
             let hi = graph.xadj[vu + 1] as usize;
-            for k in lo..hi {
-                let u = graph.adjncy[k];
+            for &u in &graph.adjncy[lo..hi] {
                 if cc[u as usize] < 0 {
                     cc[u as usize] = ncc;
                     queue.push(u);
