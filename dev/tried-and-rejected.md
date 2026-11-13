@@ -6315,3 +6315,89 @@ iter_083 0.479 → 0.485 s, iter_120 0.477 → 0.483 s, iter_135 0.493 →
 0.493 s, i.e. noise to slightly slower. The walk reaches the 2×2 test
 less often than it rescans rows. Dropped; the shipped Step 1 is the row
 memo plus BK-scan hints. Journal: 2026-10-22-01.org.
+
+## 2026-11-12 — Wide-tree contribution memory: caller-side routing, always-eager accumulators, pack-at-deposit, parallel accumulators, `WideParents` by default
+
+Context: dev/research/wide-tree-contribution-memory.md (a wide star whose
+thousands of leaf blocks all land in one small front).
+
+- **Caller-side dense-index Schur routing** (drafted in a downstream
+  caller's FERAL interface, never submitted). Factor the sparse
+  remainder `A_FF` and form the dense Schur complement outside FERAL.
+  It needs `A_FF` nonsingular, which whole-matrix LDLᵀ does not: an
+  equality row over only the dense variables makes `A_FF` singular, and
+  the route reported a regular KKT as singular where FERAL delays the
+  pivot into the dense front. It also left every other caller with the
+  same transient. Rejected for the FERAL-side change.
+- **Accumulator opened at every parent's first child.** Correct and
+  bit-identical (kept as the hidden `EarlyAssembly::Always` for the
+  parity tests), but it holds a whole front open across the parent's
+  later child subtrees: peak 1.6–2.0× 0.22.0 on 3D grids, 5.5× on nuffield2.
+- **A one-sided threshold (open once Σ held > `A`, unless last).** The
+  first version's rule. Opening when few blocks remain can hold the
+  accumulator, the held blocks and the frontal together above the
+  classic peak. Replaced on analysis, not on a measured case: the
+  shipped rule also requires the blocks still to come to be at least
+  `A`, which bounds the blocks and fronts (buffer recycling had to be
+  fixed for the whole heap to follow; see below).
+- **Pack at deposit.** Keep the kernel's square output and pack it when
+  the block is deposited (in-place `copy_within`, then `shrink_to_fit`).
+  `grid:40`, sequential `Solver::factor`, 8 rounds: 1.026× the parent,
+  nearly all of it the shrink or copy-out into freshly faulted pages.
+  Replaced by the kernel writing the packed triangle directly.
+- **Accumulators in the parallel task-graph driver.** Built and measured
+  in three designs: releases decided under the driver's global store
+  mutex (1.06–1.21× the parent on forests of stars at 4 threads);
+  extend-adds under a per-parent lock with a sorted `Vec` (a
+  20,000-leaf star with every leaf its own task 935 ms against 57 ms
+  under `Off`); one absorber outside the lock, whose backlog grew with
+  the worker count (398 MiB at 16 threads against 67 MiB under the lock)
+  until a 32-block limit bounded it. The last was bit-identical and
+  faster than `Off` on separate-task stars, but it added locks, condition
+  variables and a tuning constant to the task graph, and it changed the
+  parallel driver's peaks in both directions. Deferred to a separate
+  change; this one leaves the parallel driver as in 0.22.0.
+- **A per-child membership table (child → plan, position).** One entry
+  per child of every planned parent, for the whole factorization:
+  +12.5 KB peak on MUONSINE, whose plan saves nothing. Replaced by a
+  min-heap of each plan's next expected child (a few words per plan;
+  +112 B there).
+- **`WideParents` as the default.** On the 101-matrix corpus it never raised
+  memory beyond 112 B of plan bookkeeping, but on matrices with one
+  small planned front under 1,000–2,600 tiny children it was 2.6–4.1%
+  slower than `Off` (CRESC132 1.041×, VESUVIO 1.031×, sawpath 1.026×,
+  21 runs × 9 rounds). Not removable on principle: the accumulator's
+  layout and per-row placement are extra work the classic scheme does
+  not do. Opt-in.
+- **A modelled `WideParents` peak in `compute_peak_contrib`, and
+  `max_front_bytes` added to `peak_bytes`.** It changed the estimate on
+  every tree for every caller, under the default too. Reverted: the
+  model stays the classic one, an upper bound under `WideParents`.
+- **Adopting the exact-size accumulator as the frontal pool.** After a
+  planned front was factored its accumulator (allocated exactly `A`)
+  replaced the pooled frontal buffer when larger. A pooled buffer grows
+  by `Vec::resize` (at least doubling), so an exact `A` between the
+  previous maximum `M` and `2M` later regrew to `2A` where `Off`'s `2M`
+  already fitted: a hand-built tree (fronts 10,000 / 19,044 / 19,600
+  entries) peaked 1.117× `Off` (review finding). Replaced by freeing the
+  accumulator and growing the pool by the one rule both paths share
+  (`dense::matrix::fit_pooled_front`).
+- **Recycling absorbed blocks' buffers through the contribution pool.**
+  The kernel reuses a pooled buffer with `reserve`, so a buffer grows
+  along a chain of siblings up to twice the largest block, and the
+  parent's small block then pins it until the grandparent assembles: 19
+  of 2,000 random trees more than 2% above `Off` (worst 1.128×), and the
+  retained factor larger in 1,126 (review finding). Pooling only
+  delayed-pivot remainders still grew one delaying tree's retained
+  factor by 32 B. Absorbed blocks and remainders are now freed; `Off`
+  already pays one allocation per leaf block.
+- **Counting packed blocks in `WorkEstimate::peak_contrib_bytes`.** The
+  default `Solver` runs the parallel task graph when the tree has task
+  parallelism, which holds square blocks, so a packed figure understated
+  that path's contribution memory by about half (review finding). The
+  estimate stays the classic square one, an upper bound for every driver
+  and scheme.
+- **A `ContribLayout` argument on the public dense kernels.** Only the
+  crate's own drivers pass anything but `Square`. The public signatures
+  stay as in 0.22.0; the drivers call crate-internal `_with_layout`
+  variants.

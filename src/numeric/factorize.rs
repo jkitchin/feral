@@ -1,11 +1,15 @@
 use crate::dense::factor::{
-    factor, factor_frontal_blocked_in_place_with_scratch, factor_frontal_diagonal_in_place,
-    phase_timing, BunchKaufmanParams, FactorOutputBufs, FactorScratch, FrontalFactors,
-    ZeroPivotAction,
+    factor, factor_frontal_blocked_in_place_with_scratch, factor_frontal_blocked_with_layout,
+    factor_frontal_diagonal_in_place, factor_frontal_diagonal_with_layout, phase_timing,
+    BunchKaufmanParams, FactorOutputBufs, FactorScratch, FrontalFactors, ZeroPivotAction,
 };
-use crate::dense::matrix::SymmetricMatrix;
+use crate::dense::matrix::{grow_pooled_front, SymmetricMatrix};
 use crate::error::FeralError;
 use crate::inertia::Inertia;
+use crate::numeric::contrib::{
+    extend_add, Accumulator, Accumulators, AssemblyInputs, BlockLayout, ContribBlock, Packed,
+    Square,
+};
 use crate::scaling::{compute_scaling_dense_fast, compute_scaling_with_cache, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::{Supernode, SymbolicFactorization};
@@ -317,6 +321,21 @@ pub struct NumericParams {
     /// win and by the equivalence test in
     /// `tests/static_assembly_maps.rs`. Default `true`.
     pub use_static_row_indices: bool,
+
+    /// How children's contribution blocks reach their parent front in the
+    /// sequential driver ([`factorize_multifrontal_supernodal`]) and the
+    /// Schur-complement driver
+    /// (`dev/research/wide-tree-contribution-memory.md`). The parallel
+    /// task-graph driver ignores it: it always holds every child's block
+    /// until the parent is assembled. (The parallel entry point hands a
+    /// tree with too little task parallelism to the sequential driver,
+    /// which applies it.) It also needs `use_static_row_indices` (an
+    /// accumulator is laid out over its parent's static rows); without
+    /// it every setting runs the classic scheme. Factors are
+    /// bit-identical under every setting; only the transient memory
+    /// differs. Default [`EarlyAssembly::Off`]; [`EarlyAssembly::WideParents`]
+    /// bounds it on wide trees.
+    pub early_assembly: EarlyAssembly,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -338,6 +357,42 @@ pub enum SmallLeafBatch {
     #[default]
     Off,
     On,
+}
+
+/// Assembly scheme for contribution blocks in the sequential and
+/// Schur-complement drivers ([`NumericParams::early_assembly`]). The
+/// parallel task-graph driver ignores it and always uses the classic
+/// scheme.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EarlyAssembly {
+    /// Hold every block until its parent is assembled (the classic
+    /// multifrontal scheme).
+    #[default]
+    Off,
+    /// Hold each child's block until its parent is assembled, except
+    /// under a parent whose children's blocks outweigh its front twice
+    /// over. With `A` the parent's front area, the accumulator (the
+    /// parent's frontal-to-be) opens at the first child where the blocks
+    /// deposited so far exceed `A` and the blocks still to come are at
+    /// least `A`; later blocks are added into it as they are deposited.
+    /// Positions are fixed by the analysis. The peak live heap is
+    /// `Off`'s plus a few words per planned parent and `O(order)` words
+    /// at a planned front (proof at `symbolic::accumulate_from`), and the
+    /// retained factor is the same. Opt-in: on trees where it opens few
+    /// small accumulators its per-block bookkeeping can cost a few
+    /// percent of factorization time
+    /// (`dev/research/wide-tree-contribution-memory.md`).
+    WideParents,
+    /// Open an accumulator for every parent at its first child, so every
+    /// front is assembled through one. For parity tests only: it holds
+    /// whole fronts open across later child subtrees, which can raise
+    /// the peak well above `Off`'s. Exists only under the internal
+    /// `__early-assembly-always` feature, which the crate's own tests
+    /// enable.
+    #[cfg(feature = "__early-assembly-always")]
+    #[doc(hidden)]
+    Always,
 }
 
 /// One supernode's timing record. Phase 2.10
@@ -734,6 +789,7 @@ impl Default for NumericParams {
             // no-delay fast path by default (bit-identical to
             // `build_row_indices`). Only tests / A/B benches set false.
             use_static_row_indices: true,
+            early_assembly: EarlyAssembly::Off,
         }
     }
 }
@@ -767,6 +823,7 @@ impl NumericParams {
             pattern_reused_hint: false,
             // Issue #125: static row layout on by default.
             use_static_row_indices: true,
+            early_assembly: EarlyAssembly::Off,
         }
     }
 }
@@ -1587,7 +1644,7 @@ pub struct FactorWorkspace {
     /// are guaranteed `None` between tasks, so no clearing is needed.
     /// Pre-sized to `n_snodes` once per worker by the parallel driver;
     /// sequential drivers don't touch this field.
-    local_contribs: Vec<Option<ContribBlock>>,
+    local_contribs: Vec<Option<ContribBlock<Square>>>,
     /// Issue #13 Phase A: pooled `subdiag` + `d_panel` working buffers
     /// for `factor_frontal_blocked_in_place_with_scratch`. Reused
     /// across supernodes within a single workspace lifetime; the
@@ -1879,6 +1936,7 @@ pub fn dense_fast_factor_with_workspace(
     let recycled = ws.take_recycled(0);
     let recycled_rows = install_recycled(&mut ws.factor_scratch, recycled);
     ws.recycled.clear();
+    // The whole matrix is eliminated: there is no contribution block.
     let ff = if params.sqd_mode {
         factor_frontal_diagonal_in_place(&mut sym, n, &params.bk)?
     } else {
@@ -2138,7 +2196,14 @@ fn factorize_multifrontal_with_schur_inner(
         }
     }
 
-    let mut contrib_blocks: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
+    let mut contrib_blocks: Vec<Option<ContribBlock<Packed>>> =
+        (0..n_snodes).map(|_| None).collect();
+    let mut accumulators = Accumulators::new(symbolic, params);
+    let inputs = AssemblyInputs {
+        symbolic,
+        permuted: &permuted,
+        scaling: &scaling_pivot_order,
+    };
     let mut node_factors: Vec<NodeFactors> = Vec::with_capacity(n_snodes);
     let mut total_inertia = Inertia {
         positive: 0,
@@ -2148,6 +2213,7 @@ fn factorize_multifrontal_with_schur_inner(
     let mut needs_refinement = false;
 
     for (snode_idx, &nvschur) in nvschur_per_snode.iter().enumerate() {
+        let accumulator = accumulators.take(snode_idx);
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -2158,9 +2224,11 @@ fn factorize_multifrontal_with_schur_inner(
             params,
             ws,
             &mut contrib_blocks,
+            accumulator,
             nvschur,
             None, // Schur API: no recycling
         )?;
+        accumulators.deposit(&mut contrib_blocks, snode_idx, &inputs)?;
         total_inertia.positive += node.inertia.positive;
         total_inertia.negative += node.inertia.negative;
         total_inertia.zero += node.inertia.zero;
@@ -2189,19 +2257,12 @@ fn factorize_multifrontal_with_schur_inner(
         )));
     }
 
-    // Extract leading n_schur × n_schur subblock. ContribBlock data is
-    // col-major dim × dim with valid data in the lower triangle (per
-    // factor_frontal_blocked_in_place / factor_frontal). Mirror to a
-    // full-square output buffer.
+    // Extract the leading n_schur × n_schur subblock of the (packed
+    // lower) contribution block, mirrored to a full-square output buffer.
     let mut out = vec![0.0f64; n_schur * n_schur];
     for j in 0..n_schur {
         for i in 0..n_schur {
-            let val = if i >= j {
-                contrib.data[j * contrib.dim + i]
-            } else {
-                contrib.data[i * contrib.dim + j]
-            };
-            out[j * n_schur + i] = val;
+            out[j * n_schur + i] = contrib.get(i.max(j), i.min(j));
         }
     }
 
@@ -2397,8 +2458,17 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         }
     }
 
-    // Storage for contribution blocks (one per supernode, freed after parent assembly)
-    let mut contrib_blocks: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
+    // Storage for contribution blocks (one per supernode, freed after
+    // parent assembly), and the accumulators that take them instead
+    // under the assembly plan.
+    let mut contrib_blocks: Vec<Option<ContribBlock<Packed>>> =
+        (0..n_snodes).map(|_| None).collect();
+    let mut accumulators = Accumulators::new(symbolic, params);
+    let inputs = AssemblyInputs {
+        symbolic,
+        permuted: &permuted,
+        scaling: &scaling_pivot_order,
+    };
 
     let mut node_factors: Vec<NodeFactors> = Vec::with_capacity(n_snodes);
     let mut total_inertia = Inertia {
@@ -2454,6 +2524,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                         &mut contrib_blocks,
                         recycled,
                     )?;
+                    accumulators.deposit(&mut contrib_blocks, m, &inputs)?;
                     if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
                         let snode = &symbolic.supernodes[m];
                         let timing = SupernodeTiming {
@@ -2493,6 +2564,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         // is single-threaded so before/after differencing is exact.
         let phase_before = phase_timing::snapshot();
         let recycled = ws.take_recycled(snode_idx);
+        let accumulator = accumulators.take(snode_idx);
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -2503,9 +2575,11 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             params,
             ws,
             &mut contrib_blocks,
+            accumulator,
             0, // nvschur: standard path has no Schur tail
             recycled,
         )?;
+        accumulators.deposit(&mut contrib_blocks, snode_idx, &inputs)?;
         if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
             let snode = &symbolic.supernodes[snode_idx];
             let phase_after = phase_timing::snapshot();
@@ -2584,9 +2658,13 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
 /// task-graph driver (Step C). Preserves the exact semantics of the
 /// original loop iteration:
 ///
-/// * Takes child contribution blocks out of `contrib_blocks` (via
-///   `Option::take`) — children must have been produced by a prior
-///   call for this same `contrib_blocks`.
+/// * Takes child contribution blocks (or, with an `accumulator`, the
+///   delayed remainders its children left) out of `contrib_blocks`
+///   (via `Option::take`) — children must have been produced by a prior
+///   call for this same `contrib_blocks`, and `accumulator` taken by
+///   [`Accumulators::take`]. Blocks are held in layout `L`: packed in
+///   the sequential drivers, square in the parallel one, which never
+///   passes an accumulator.
 /// * Writes the produced contribution block (if any) into
 ///   `contrib_blocks[snode_idx]`.
 /// * Uses `ws.row_map`, `ws.frontal_values`, `ws.build_delayed`,
@@ -2597,7 +2675,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
 /// Returns the `NodeFactors` for the supernode. The caller accumulates
 /// inertia / `needs_refinement` from it.
 #[allow(clippy::too_many_arguments)]
-fn factor_one_supernode(
+fn factor_one_supernode<L: BlockLayout>(
     snode_idx: usize,
     symbolic: &SymbolicFactorization,
     permuted: &CscMatrix,
@@ -2606,7 +2684,8 @@ fn factor_one_supernode(
     is_root: &[bool],
     params: &NumericParams,
     ws: &mut FactorWorkspace,
-    contrib_blocks: &mut [Option<ContribBlock>],
+    contrib_blocks: &mut [Option<ContribBlock<L>>],
+    accumulator: Option<Accumulator>,
     nvschur: usize,
     recycled: Option<RecycledNode>,
 ) -> Result<NodeFactors, FeralError> {
@@ -2662,6 +2741,12 @@ fn factor_one_supernode(
     // in the top-left of their contribution block; these re-enter
     // pivot search at this node as additional fully-summed columns
     // on top of `snode.ncol()`.
+    //
+    // With an accumulator every child it absorbed has been assembled into
+    // it except for the delayed columns, which wait in per-child
+    // remainders; the blocks left in `contrib_blocks` are those remainders
+    // (and, only if its plan was abandoned, the whole blocks of the
+    // children after them). Either way they carry every delayed column.
     let n_delayed_in: usize = snode
         .children
         .iter()
@@ -2671,7 +2756,10 @@ fn factor_one_supernode(
     let expanded_ncol = own_ncol + n_delayed_in;
     // Issue #221 chain-cost backstop: subtree symbolic area from every
     // child, chain excess only from children still passing delays up.
-    let (mut child_sym_area, mut child_chain_excess) = (0usize, 0usize);
+    let (mut child_sym_area, mut child_chain_excess) = (
+        accumulator.as_ref().map_or(0, |acc| acc.sub_sym_area),
+        0usize,
+    );
     for &c in &snode.children {
         if let Some(cb) = contrib_blocks[c].as_ref() {
             child_sym_area = child_sym_area.saturating_add(cb.sub_sym_area);
@@ -2721,20 +2809,35 @@ fn factor_one_supernode(
     // fall back to `build_row_indices` then.
     let _pt_asm = phase_timing::start();
     let _pt_br = phase_timing::start();
+    //
+    // With an accumulator the absorbed children's rows are gone, so the
+    // layout comes from the static rows, with the remainders' delayed
+    // columns inserted after the own columns — the same layout
+    // `build_row_indices` produces, since the trailing set does not
+    // depend on delays (module docs of `numeric::contrib`).
     let static_rows = symbolic.static_rows(snode_idx);
-    let mut row_indices =
-        if params.use_static_row_indices && n_delayed_in == 0 && !static_rows.is_empty() {
-            refill_rows(recycled_rows, static_rows)
-        } else {
-            build_row_indices(
-                snode,
-                full_pattern,
-                contrib_blocks,
-                &mut ws.build_delayed,
-                &mut ws.build_trailing,
-                &mut ws.build_seen,
-            )
-        };
+    let mut row_indices = if accumulator.is_some() && n_delayed_in > 0 {
+        let mut rows = Vec::with_capacity(static_rows.len() + n_delayed_in);
+        rows.extend_from_slice(&static_rows[..own_ncol]);
+        for &c in &snode.children {
+            if let Some(cb) = contrib_blocks[c].as_ref() {
+                rows.extend_from_slice(&cb.row_indices[..cb.n_delayed]);
+            }
+        }
+        rows.extend_from_slice(&static_rows[own_ncol..]);
+        rows
+    } else if params.use_static_row_indices && n_delayed_in == 0 && !static_rows.is_empty() {
+        refill_rows(recycled_rows, static_rows)
+    } else {
+        build_row_indices(
+            snode,
+            full_pattern,
+            contrib_blocks,
+            &mut ws.build_delayed,
+            &mut ws.build_trailing,
+            &mut ws.build_seen,
+        )
+    };
     phase_timing::stop(&phase_timing::BUILDROW_NS, _pt_br);
     let actual_nrow = row_indices.len();
     debug_assert!(
@@ -2788,47 +2891,73 @@ fn factor_one_supernode(
         ws.row_map[global] = local;
     }
 
-    // Step 1: Assemble original matrix entries into frontal, applying
-    // symmetric scaling D·A·D in place. Own cols sit at frontal positions
-    // [own_col_offset, own_col_offset + own_ncol); for the standard path
-    // own_col_offset = 0, for the Schur swap path it's n_delayed_in.
-    let scaling = scaling_pivot_order;
-    let frontal_buf = std::mem::take(&mut ws.frontal_values);
-    let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
-    let _pt_sc = phase_timing::start();
-    for (k_local, &gj) in row_indices[own_col_offset..own_col_offset + own_ncol]
-        .iter()
-        .enumerate()
-    {
-        let local_j = own_col_offset + k_local;
-        let s_j = scaling[gj];
-        for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
-            let gi = permuted.row_idx[k];
-            let local_i = ws.row_map[gi];
-            if local_i != usize::MAX {
-                let val = permuted.values[k] * scaling[gi] * s_j;
-                frontal.set(local_i, local_j, val);
+    // Steps 1-2: the frontal. With an accumulator and no delays it *is*
+    // the frontal (same rows, same layout). With delays its cells move to
+    // their frontal positions. Either way the blocks its children left
+    // are added on top: remainders of the children it absorbed, and the
+    // whole blocks of any later children (a plan its deposits abandoned;
+    // `Accumulators::deposit`). Without one, the classic steps run.
+    let adopted = accumulator.is_some() && n_delayed_in == 0;
+    let mut frontal = match accumulator {
+        Some(acc) => {
+            let mut frontal = if n_delayed_in == 0 {
+                SymmetricMatrix {
+                    n: actual_nrow,
+                    data: acc.data,
+                }
+            } else {
+                let frontal_buf = std::mem::take(&mut ws.frontal_values);
+                let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
+                let n_static = static_rows.len();
+                let position = |s: usize| {
+                    if s < own_ncol {
+                        own_col_offset + s
+                    } else {
+                        expanded_ncol + (s - own_ncol)
+                    }
+                };
+                for sj in 0..n_static {
+                    let fj = position(sj);
+                    for si in sj..n_static {
+                        frontal.data[fj * actual_nrow + position(si)] =
+                            acc.data[sj * n_static + si];
+                    }
+                }
+                frontal
+            };
+            assemble_children(snode, contrib_blocks, acc.absorbed, ws, &mut frontal);
+            frontal
+        }
+        None => {
+            // Step 1: Assemble original matrix entries into frontal,
+            // applying symmetric scaling D·A·D in place. Own cols sit at
+            // frontal positions [own_col_offset, own_col_offset +
+            // own_ncol); for the standard path own_col_offset = 0, for
+            // the Schur swap path it's n_delayed_in.
+            let scaling = scaling_pivot_order;
+            let frontal_buf = std::mem::take(&mut ws.frontal_values);
+            let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
+            let _pt_sc = phase_timing::start();
+            for (k_local, &gj) in row_indices[own_col_offset..own_col_offset + own_ncol]
+                .iter()
+                .enumerate()
+            {
+                let local_j = own_col_offset + k_local;
+                let s_j = scaling[gj];
+                for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
+                    let gi = permuted.row_idx[k];
+                    let local_i = ws.row_map[gi];
+                    if local_i != usize::MAX {
+                        let val = permuted.values[k] * scaling[gi] * s_j;
+                        frontal.set(local_i, local_j, val);
+                    }
+                }
             }
+            phase_timing::stop(&phase_timing::SCATTER_NS, _pt_sc);
+            assemble_children(snode, contrib_blocks, 0, ws, &mut frontal);
+            frontal
         }
-    }
-    phase_timing::stop(&phase_timing::SCATTER_NS, _pt_sc);
-
-    // Step 2: Assemble child contribution blocks (extend-add).
-    //
-    // Phase C: once `extend_add` has consumed `contrib`, move its `data`
-    // Vec into the factor scratch's single-slot pool. The next
-    // supernode's factor kernel will take it instead of allocating a
-    // fresh Vec. If the slot is already occupied (multi-child front),
-    // the new buffer overwrites the slot — the old one is freed
-    // normally. This keeps bookkeeping to one branch per child.
-    let _pt_ea = phase_timing::start();
-    for &child_idx in &snode.children {
-        if let Some(mut contrib) = contrib_blocks[child_idx].take() {
-            extend_add(&contrib, &ws.row_map, &mut frontal);
-            ws.factor_scratch.contrib_pool = Some(std::mem::take(&mut contrib.data));
-        }
-    }
-    phase_timing::stop(&phase_timing::EXTENDADD_NS, _pt_ea);
+    };
     phase_timing::stop(&phase_timing::ASSEMBLY_NS, _pt_asm);
 
     // Step 3: Factor the frontal in place (W-3a). `frontal.data`
@@ -2909,15 +3038,17 @@ fn factor_one_supernode(
     let trace = supernode_trace_enabled();
     let t_sn = trace.then(Instant::now);
     let _pt_df = phase_timing::start();
+    // The kernel writes the contribution block in the driver's layout.
     let mut ff = if params.sqd_mode {
-        factor_frontal_diagonal_in_place(&mut frontal, eliminable, &params.bk)?
+        factor_frontal_diagonal_with_layout(&mut frontal, eliminable, &params.bk, L::KERNEL)?
     } else {
-        factor_frontal_blocked_in_place_with_scratch(
+        factor_frontal_blocked_with_layout(
             &mut frontal,
             eliminable,
             may_delay,
             bk_ref,
             &mut ws.factor_scratch,
+            L::KERNEL,
         )?
     };
     phase_timing::stop(&phase_timing::DENSEFACTOR_NS, _pt_df);
@@ -2935,36 +3066,27 @@ fn factor_one_supernode(
             ff.inertia.zero,
         );
     }
-    ws.frontal_values = frontal.data;
+    // The frontal buffer goes back to the pool. An adopted accumulator is
+    // freed instead and the idle pool's capacity grows as if it had held
+    // this front (nothing written), so the pool's capacity history is the
+    // classic scheme's.
+    if adopted {
+        drop(frontal.data);
+        grow_pooled_front(&mut ws.frontal_values, actual_nrow);
+    } else {
+        ws.frontal_values = frontal.data;
+    }
 
     let node_inertia = ff.inertia.clone();
     let node_nelim = ff.nelim;
-    let node_n_delayed = ff.n_delayed;
 
-    // Step 4: Store contribution block for parent. Move
-    // `ff.contrib` directly into `ContribBlock::data` (W-3b: avoid the
-    // 30 MB clone on CHAINWOO root). After this move,
+    // Step 4: the contribution block for the parent, which the kernel
+    // wrote packed, moved out of `ff.contrib` (W-3b: no clone). After this,
     // `frontal_factors.contrib` in the saved `NodeFactors` is empty —
     // production solve paths only read `l`, `d_diag`, `d_subdiag`,
-    // `perm`, `perm_inv` from `frontal_factors`; `contrib` is consumed
-    // by the parent supernode during assembly and is dead data
-    // afterward.
-    if ff.contrib_dim > 0 {
-        let cdim = ff.contrib_dim;
-        let mut contrib_row_indices = Vec::with_capacity(cdim);
-        for cj in 0..cdim {
-            contrib_row_indices.push(row_indices[ff.perm[node_nelim + cj]]);
-        }
-        let contrib_data = std::mem::take(&mut ff.contrib);
-        contrib_blocks[snode_idx] = Some(ContribBlock {
-            row_indices: contrib_row_indices,
-            data: contrib_data,
-            dim: cdim,
-            n_delayed: node_n_delayed,
-            sub_sym_area,
-            chain_excess,
-        });
-    }
+    // `perm`, `perm_inv` from `frontal_factors`.
+    contrib_blocks[snode_idx] =
+        ContribBlock::from_factor(&mut ff, &row_indices, sub_sym_area, chain_excess)?;
 
     // Restore the `row_map` invariant.
     for &global in &row_indices {
@@ -2982,6 +3104,52 @@ fn factor_one_supernode(
         inertia: node_inertia,
         cascade_break,
     })
+}
+
+/// Step 2 of a front's assembly: extend-add the children's blocks still
+/// in `contrib_blocks`, in children order, through `ws.row_map`. The
+/// first `absorbed` children went into an accumulator (`Accumulator::
+/// absorbed`; 0 without one): what they left is a remainder, of which
+/// only the delayed columns are added. Every later child's block is
+/// whole (the classic scheme, or a plan its deposits abandoned).
+///
+/// Phase C: each consumed whole block's storage moves into the factor
+/// scratch's single-slot pool, so the next kernel call takes it instead
+/// of allocating; an occupied slot is overwritten (the old buffer is
+/// freed normally). A remainder is freed instead, as its accumulator
+/// freed the rest of the parent's children: the pool then holds what the
+/// classic scheme would not, and the parent's own block would keep its
+/// capacity alive.
+fn assemble_children<L: BlockLayout>(
+    snode: &Supernode,
+    contrib_blocks: &mut [Option<ContribBlock<L>>],
+    absorbed: usize,
+    ws: &mut FactorWorkspace,
+    frontal: &mut SymmetricMatrix,
+) {
+    let _pt_ea = phase_timing::start();
+    for (position, &child_idx) in snode.children.iter().enumerate() {
+        if let Some(contrib) = contrib_blocks[child_idx].take() {
+            let whole = position >= absorbed;
+            let cols = if whole {
+                contrib.dim
+            } else {
+                contrib.n_delayed
+            };
+            let row_map = &ws.row_map;
+            extend_add(
+                &contrib,
+                cols,
+                |i| row_map[contrib.row_indices[i]],
+                &mut frontal.data,
+                frontal.n,
+            );
+            if whole {
+                ws.factor_scratch.contrib_pool = Some(contrib.into_buffer());
+            }
+        }
+    }
+    phase_timing::stop(&phase_timing::EXTENDADD_NS, _pt_ea);
 }
 
 /// Factor a single true-leaf supernode that was pre-qualified for the
@@ -3011,7 +3179,7 @@ fn factor_one_small_leaf(
     is_root: &[bool],
     params: &NumericParams,
     ws: &mut FactorWorkspace,
-    contrib_blocks: &mut [Option<ContribBlock>],
+    contrib_blocks: &mut [Option<ContribBlock<Packed>>],
     recycled: Option<RecycledNode>,
 ) -> Result<NodeFactors, FeralError> {
     let snode = &symbolic.supernodes[snode_idx];
@@ -3097,41 +3265,32 @@ fn factor_one_small_leaf(
     // Issue #34 phase (d): SQD fast-path; see factor_one_supernode for
     // the rationale on bypassing `may_delay` and the BK overrides.
     let mut ff = if params.sqd_mode {
-        factor_frontal_diagonal_in_place(&mut frontal, expanded_ncol, &params.bk)?
+        factor_frontal_diagonal_with_layout(
+            &mut frontal,
+            expanded_ncol,
+            &params.bk,
+            Packed::KERNEL,
+        )?
     } else {
-        factor_frontal_blocked_in_place_with_scratch(
+        factor_frontal_blocked_with_layout(
             &mut frontal,
             expanded_ncol,
             may_delay,
             &params.bk,
             &mut ws.factor_scratch,
+            Packed::KERNEL,
         )?
     };
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
     let node_nelim = ff.nelim;
-    let node_n_delayed = ff.n_delayed;
 
     // W-3b: move `ff.contrib` rather than clone (see internal variant
-    // for the full contract).
-    if ff.contrib_dim > 0 {
-        let cdim = ff.contrib_dim;
-        let mut contrib_row_indices = Vec::with_capacity(cdim);
-        for cj in 0..cdim {
-            contrib_row_indices.push(row_indices[ff.perm[node_nelim + cj]]);
-        }
-        let contrib_data = std::mem::take(&mut ff.contrib);
-        contrib_blocks[snode_idx] = Some(ContribBlock {
-            row_indices: contrib_row_indices,
-            data: contrib_data,
-            dim: cdim,
-            n_delayed: node_n_delayed,
-            // Leaf: no children, no delays in, so no chain excess.
-            sub_sym_area: own_ncol * nrow,
-            chain_excess: 0,
-        });
-    }
+    // for the full contract). Leaf: no children, no delays in, so no
+    // chain excess.
+    contrib_blocks[snode_idx] =
+        ContribBlock::from_factor(&mut ff, &row_indices, own_ncol * nrow, 0)?;
 
     for &global in &row_indices {
         ws.row_map[global] = usize::MAX;
@@ -3491,7 +3650,7 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
         .collect();
 
     // Shared state: contrib blocks, result slots, first error.
-    let contrib_blocks: Mutex<Vec<Option<ContribBlock>>> =
+    let contrib_blocks: Mutex<Vec<Option<ContribBlock<Square>>>> =
         Mutex::new((0..n_snodes).map(|_| None).collect());
     let node_factors_out: Mutex<Vec<Option<NodeFactors>>> =
         Mutex::new((0..n_snodes).map(|_| None).collect());
@@ -3918,7 +4077,7 @@ fn run_parallel_task<'a>(
     params: &'a NumericParams,
     plan: &'a TaskPlan,
     pending: &'a [std::sync::atomic::AtomicUsize],
-    contrib_blocks: &'a std::sync::Mutex<Vec<Option<ContribBlock>>>,
+    contrib_blocks: &'a std::sync::Mutex<Vec<Option<ContribBlock<Square>>>>,
     node_factors_out: &'a std::sync::Mutex<Vec<Option<NodeFactors>>>,
     first_error: &'a std::sync::Mutex<Option<FeralError>>,
     thread_ws: &'a [std::sync::Mutex<FactorWorkspace>],
@@ -4068,7 +4227,8 @@ fn run_parallel_task<'a>(
                     params,
                     ws,
                     &mut local_contribs,
-                    0, // nvschur: parallel path is not used by Schur API
+                    None, // the parallel driver holds every block (classic)
+                    0,    // nvschur: parallel path is not used by Schur API
                     recycled,
                 );
                 if let (Some(t), Some(start)) = (telemetry, factor_start) {
@@ -4592,10 +4752,10 @@ fn build_node_parents(symbolic: &SymbolicFactorization) -> Vec<Option<usize>> {
     parents
 }
 
-fn build_row_indices(
+fn build_row_indices<L: BlockLayout>(
     snode: &crate::symbolic::supernode::Supernode,
     full_pattern: &crate::sparse::csc::CscPattern,
-    contrib_blocks: &[Option<ContribBlock>],
+    contrib_blocks: &[Option<ContribBlock<L>>],
     build_delayed: &mut Vec<usize>,
     build_trailing: &mut Vec<usize>,
     build_seen: &mut Vec<bool>,
@@ -4696,81 +4856,6 @@ fn build_row_indices(
     }
 
     result
-}
-
-/// Contribution block from a child supernode.
-///
-/// Under delayed pivoting the top-left `n_delayed × n_delayed` block
-/// holds the child's un-eliminated fully-summed columns (which must
-/// re-enter pivot search at the parent as additional fully-summed
-/// columns), and the bottom-right `(dim - n_delayed) × (dim - n_delayed)`
-/// block is the classic Schur complement over the non-fully-summed
-/// trailing rows. The cross block (rows = trailing, cols = delayed)
-/// carries the mixed interactions. `row_indices[..n_delayed]` are
-/// the global row indices of the delayed columns in the parent's
-/// numbering; `row_indices[n_delayed..]` are the trailing rows.
-#[derive(Debug)]
-struct ContribBlock {
-    /// Row indices of the contribution block (global).
-    /// First `n_delayed` entries are delayed fully-summed columns;
-    /// the remainder are the trailing non-fully-summed rows (sorted).
-    row_indices: Vec<usize>,
-    /// Dense symmetric matrix data (lower triangle, column-major).
-    /// Dimension: row_indices.len() × row_indices.len()
-    data: Vec<f64>,
-    /// Dimension of the contribution block.
-    dim: usize,
-    /// Number of delayed fully-summed columns carried in this block
-    /// (top-left `n_delayed × n_delayed` sub-matrix). Zero for nodes
-    /// whose BK sweep succeeded on every attempted column. Consumed
-    /// by the parent's `build_row_indices` and the Step 5 assembly
-    /// which places these columns in the parent's fully-summed region.
-    n_delayed: usize,
-    /// Symbolic frontal area (`ncol * nrow`) summed over this node's
-    /// subtree (issue #221 chain-cost backstop).
-    sub_sym_area: usize,
-    /// Extra frontal area spent by the delay chain ending at this node
-    /// (issue #221). Only meaningful when `n_delayed > 0`.
-    chain_excess: usize,
-}
-
-/// Extend-add: assemble a child's contribution block into the parent frontal.
-///
-/// Issue #13 Phase B: bypasses `SymmetricMatrix::set`/`get` and writes
-/// directly into `frontal.data`. The lower-triangle column-major linear
-/// index for cell `(row, col)` with `row >= col` is `col * n + row`; the
-/// `parent_i >= parent_j` test below canonicalises which of the two
-/// indices is the row. This removes the redundant `i >= j` branch that
-/// `set`/`get` perform on every cell and eliminates one read+write call
-/// frame per cell. With ~38 children per medium front each contributing
-/// up to `cdim*(cdim+1)/2` cells, this trims a measurable per-front cost.
-fn extend_add(contrib: &ContribBlock, parent_row_map: &[usize], frontal: &mut SymmetricMatrix) {
-    let cdim = contrib.dim;
-    let fn_ = frontal.n;
-    let f_data: &mut [f64] = frontal.data.as_mut_slice();
-    for cj in 0..cdim {
-        let parent_j = parent_row_map[contrib.row_indices[cj]];
-        if parent_j == usize::MAX {
-            continue;
-        }
-        for ci in cj..cdim {
-            let parent_i = parent_row_map[contrib.row_indices[ci]];
-            if parent_i == usize::MAX {
-                continue;
-            }
-            let val = contrib.data[cj * cdim + ci];
-            if val == 0.0 {
-                continue;
-            }
-            // Canonicalise to lower triangle: ensure row >= col.
-            let (row, col) = if parent_i >= parent_j {
-                (parent_i, parent_j)
-            } else {
-                (parent_j, parent_i)
-            };
-            f_data[col * fn_ + row] += val;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -5058,6 +5143,7 @@ mod tests {
             warn_partial_singular: false,
             pattern_reused_hint: false,
             use_static_row_indices: true,
+            early_assembly: EarlyAssembly::Off,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -5075,6 +5161,7 @@ mod tests {
             warn_partial_singular: false,
             pattern_reused_hint: false,
             use_static_row_indices: true,
+            early_assembly: EarlyAssembly::Off,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -5135,6 +5222,7 @@ mod tests {
             warn_partial_singular: false,
             pattern_reused_hint: false,
             use_static_row_indices: true,
+            early_assembly: EarlyAssembly::Off,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -5643,6 +5731,7 @@ mod tests {
             warn_partial_singular: false,
             pattern_reused_hint: false,
             use_static_row_indices: true,
+            early_assembly: EarlyAssembly::Off,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

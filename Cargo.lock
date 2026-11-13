@@ -199,6 +199,7 @@ version = "0.22.0"
 dependencies = [
  "approx",
  "criterion",
+ "feral",
  "feral-amd",
  "feral-amf",
  "feral-kahip",
