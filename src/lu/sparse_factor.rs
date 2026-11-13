@@ -1014,7 +1014,17 @@ fn assemble(
     // increasing order, so each `u_above[c]` is sorted ascending). At factor
     // time U is upper triangular, so this is exactly the strict-upper rows;
     // it widens to all off-diagonal holders only as FT updates permute U.
-    let mut u_above: Vec<Vec<usize>> = vec![Vec::new(); m];
+    // Sized from a count pass so each list is one allocation instead of a
+    // chain of doublings (issue #232).
+    let mut u_above_cnt = vec![0usize; m];
+    for (i, row) in u_rows.iter().enumerate() {
+        for &(c, _) in row.iter() {
+            if c != i {
+                u_above_cnt[c] += 1;
+            }
+        }
+    }
+    let mut u_above: Vec<Vec<usize>> = u_above_cnt.iter().map(|&n| Vec::with_capacity(n)).collect();
     for (i, row) in u_rows.iter().enumerate() {
         for &(c, _) in row.iter() {
             if c != i {
@@ -1158,16 +1168,24 @@ fn remap_and_sort_l(
     for r in row_idx.iter_mut() {
         *r = perm_inv[*r];
     }
-    let mut order: Vec<usize> = Vec::new();
+    // One reused buffer, and columns that are already sorted (every column of
+    // length < 2 among them) are left alone: on a near-triangular LP basis most
+    // `L` columns are empty, and two fresh `Vec`s per column were ~35k
+    // allocations per factorization at m = 17 470 (issue #232). Stable sort,
+    // as before, so the result is the same permutation of the column.
+    let mut buf: Vec<(usize, f64)> = Vec::new();
     for j in 0..m {
         let (s, e) = (col_ptr[j], col_ptr[j + 1]);
-        order.clear();
-        order.extend(s..e);
-        order.sort_by_key(|&idx| row_idx[idx]);
-        let rows: Vec<usize> = order.iter().map(|&idx| row_idx[idx]).collect();
-        let vals: Vec<f64> = order.iter().map(|&idx| val[idx]).collect();
-        row_idx[s..e].copy_from_slice(&rows);
-        val[s..e].copy_from_slice(&vals);
+        if row_idx[s..e].windows(2).all(|w| w[0] <= w[1]) {
+            continue;
+        }
+        buf.clear();
+        buf.extend(row_idx[s..e].iter().copied().zip(val[s..e].iter().copied()));
+        buf.sort_by_key(|&(r, _)| r);
+        for (k, &(r, v)) in buf.iter().enumerate() {
+            row_idx[s + k] = r;
+            val[s + k] = v;
+        }
     }
 }
 
