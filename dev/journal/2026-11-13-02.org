@@ -159,3 +159,7 @@ from the input without building the active-submatrix lists, while
 reproducing the singleton order and the heap log exactly.
 cargo test --release --no-fail-fast: 1040 passed, 0 failed; clippy clean
 on 1.97 and 1.100; bench identical.
+
+* 21:41 :issue-232:correction:
+The packed-heap-keys commit cited above as d09e53c is d2a1e20 (message
+amended locally before any push to fix a test count); same change.
