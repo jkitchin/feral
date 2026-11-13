@@ -1,0 +1,33 @@
+#+TITLE: Journal 2026-11-13 session 01 — PR #231 review, clippy 1.100
+#+STARTUP: showall
+
+* 18:27 :review:wide-tree:pr231:
+Reviewed and merged PR #231 (packed contribution blocks, opt-in
+EarlyAssembly::WideParents). The first review round raised 8 points:
+a cached plan on the public SymbolicFactorization (an unlisted breaking
+change, and stale after edits), a hard error on out-of-order deposits,
+a publicly selectable Always, a harness-thread race in the
+counting-allocator test, an overstated peak_contrib_bytes doc, a
+zero-filled idle pool, and a duplicated packed-length formula. All 8
+were fixed in 14d9bc6. Evidence on x86_64 (Rust 1.100, release):
+cargo test 1,030 passed / 0 failed / 24 ignored; wide_tree_memory
+3/3 checks ok. golden_digests run on d3f7eb6 and on the PR give the
+same 16 digests, equal to the aarch64-pinned PARENT_GOLDEN, so the
+parent-release test now runs on x86 too. Merged as 675a468; CI had
+not run on 14d9bc6 (fork PR, run awaiting approval) because of the
+clippy failure below.
+
+* 18:27 :ci:clippy:toolchain:
+CI installs dtolnay/rust-toolchain@stable, now 1.100.0
+(0ef1bc386 2026-11-09). Its clippy reports needless_range_loop on
+`for k in lo..hi { let x = a[k]; ... }`. `cargo clippy --workspace
+--all-targets` on d3f7eb6 fails in feral-metis first (8 errors); 46
+sites in total across feral, feral-metis, feral-scotch, feral-kahip,
+feral-ordering-core, feral-diagnostics and two test files. None came
+from PR #231: main itself fails. Fix: rewrite each loop as a slice
+iteration (`for &x in &a[lo..hi]`, `.iter().map(|&x| x as usize)`,
+`enumerate()` where the index is used elsewhere, `fill(0.0)`). The
+same elements are read in the same order, so the numerics are
+unchanged. I chose this over allowing the lint or pinning the
+toolchain because it fixes the code rather than hiding the lint.
+35 sites were converted by a pattern script and 11 by hand.
