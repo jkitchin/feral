@@ -16,6 +16,18 @@ triangular) the factor drops from ~12.9 ms to ~5.4 ms median; QPLIB_3852
 `markowitz_max_search`, which changes some kernel pivot choices: fill moves
 by +0.27 % geomean (max +1.6 %) on 40 synthetic bases.
 
+### Added — in-place sparse LU refactorization (issue #232)
+
+`SparseLu::refactor_markowitz(&mut self, a, params)` re-factors into an
+existing factorization and reuses its memory (U rows, column index, work
+arrays). The result is bit-identical to `SparseLu::factor_markowitz`; on
+error the previous factor is left intact. `SparseLu::refactor` (and the
+Python `LuFactor.refactor`) uses it under the default Markowitz pivoting.
+On the #232 basis shape a refactor takes ~4.9 ms against ~6.3 ms for
+building a new factor and dropping the old one. Callers that create a new
+`SparseLu` per refactorization should hold one and call
+`refactor_markowitz` instead.
+
 ## [0.22.0] - 2026-10-26
 
 **Breaking.** `FactorStats` (`feral::FactorStats`) is an exhaustive public

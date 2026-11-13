@@ -57,3 +57,31 @@ before the two new tests). New: Lists vs Vec<Vec> differential, 20k
 random ops; near-triangular + filling kernel, PBQ = LU reconstructed
 from input, max|L| <= 1/u, factor_nnz > nnz asserted so the relocation
 path is exercised. bench: identical to 2026-10-23-01.
+
+* 18:55 :issue-232:profile:alloc:
+Follow-up asked "how much time can we still recover". Callgrind on the
+current code, per factor (~42M Ir incl. drop): elimination core ~21.6M;
+U-row mallocs 3.4M (17 470 per factor); SparseLu drop 4.2M; assemble
+5.4M; workspace zeroing 1.7M; U remap + L sort 2.9M; heaps/list growth
+2.9M. Estimated ~25-35 % recoverable by reusing memory across
+refactors. Also found the example's fresh timing excluded the drop of
+each factor (black_box then drop after t.elapsed()), understating what
+a caller replacing its factor pays: 5.4 ms excluded vs 6.3 ms included.
+
+* 19:05 :issue-232:refactor-inplace:api:
+SparseLu::refactor_markowitz(&mut self, a, params). assemble ->
+assemble_into on SparseLu::empty(), exhaustive destructure so a field
+not reset fails to compile. U rows recycled through row_pool (LIFO, so
+capacities mismatch on some rows: ~1.7k reserves per refactor, vs
+17 470 allocs fresh). Medians, replacing-a-held-factor vs in-place:
+6.36/6.06/6.81 -> 4.97/4.61/5.32 ms (~22 %); QPLIB_3852 0.371 ->
+0.246; bchoco06 0.261 -> 0.202; QPLIB_1157 12.75 -> 12.15. Fresh
+digests unchanged; in-place digests equal fresh on all 6 bases.
+Mutation check on tests/lu_refactor_inplace.rs: removing the L-index
+clear (1 test fails: reach route on->off), etas.clear() (3 fail),
+hyper.recycle (3 fail). SparseLu::refactor(a, symbolic) routed through
+the in-place path under Markowitz, so Python LuFactor.refactor gets it
+without an API change. cargo test --release --no-fail-fast: 1027 passed,
+0 failed. bench identical.
+Not done: pooling the Markowitz work arrays (Lists buffers, ~13
+m-length marks/counts, heaps) — estimated ~5 % more.

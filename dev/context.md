@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-13T18:47:34Z
+Generated: 2026-11-13T19:09:43Z
 
 ## Latest Session
 File: dev/sessions/2026-11-13-01.md
@@ -44,26 +44,26 @@ was recovered on the synthetic shape; the remaining cost is mostly
 m-length scratch arrays allocated, zeroed and dropped per factorization).
 The issue's real basis was not measured.
 
-## Benchmark Results
-```
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-```
+## Continuation: in-place refactor (same session)
+- 132c16e: `SparseLu::refactor_markowitz` + `assemble_into` shared fill
+  path; `SparseLu::refactor` routed through it under Markowitz.
+- c25e89b: example times fresh-replacing-held vs in-place, checks digests.
+- **Correction to the table above:** its "after" times excluded dropping
+  the factor. Including the drop (what a caller replacing its factor
+  pays), fresh is 6.36 / 6.06 / 6.81 ms; in place 4.97 / 4.61 / 5.32 ms.
+  QPLIB_3852 0.371 -> 0.246, bchoco06 0.261 -> 0.202, QPLIB_1157 12.75 ->
+  12.15 ms. Overall on the synthetic shape: ~12.9 ms -> ~5.0 ms.
+- Only callers that keep one `SparseLu` get the in-place gain. discopt
+  currently builds a new factor per refactorization.
 ```
 
 ## Git Status
 ```
+c25e89b lu_markowitz_triangular: time and verify the in-place refactor (#232)
+132c16e SparseLu::refactor_markowitz: in-place refactor reusing memory (#232)
+962ffa1 Session 2026-11-13-01 checkpoint: #232 Markowitz LU bookkeeping
 6a5afd3 Sparse LU assemble: no per-column Vecs in remap_and_sort_l, sized u_above (#232)
 dce0dc6 Markowitz LU: kernel-only count heaps, packed active submatrix (#232)
-f3d99e0 Add lu_markowitz_triangular example: #232 timing and digest harness
-d3f7eb6 Merge pull request #230 from jkitchin/ci/windows-wheel-interpreters
-31b64e9 ci(wheels): manual runs can build a given tag and publish it to PyPI
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 468 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.44s
+test result: ok. 468 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.59s
 
 ```
 
@@ -107,25 +107,6 @@ Identical to 2026-10-23-01.
 ```
 
 ## Recent Decisions
-5/10/30/75 needs 20k/23k/24k/34k/41k/39k/36k delays), so "fresh" is not
-"better". The review's rollback compared two different matrices and
-misfired (adopt at iter_078, roll back at iter_079 on the sequence's own
-1.66× drift).
-
-**Evidence.** `dev/research/issue-227-stale-analysis-reanalysis.md` §4.4
-and §7. Implementation replays (journal 2026-10-23-01): qcqp1000-2c
-init-first 0.751× `Never` flops, kkt-first 0.980×; qcqp1000-2nc 1.000× /
-0.546×; clnlbeam, NARX_CFy, pooling 1.000×. Inertia is identical to `Never`
-on every factor of all seven sequences. `Never` digests match main on
-every factor.
-
-## 2026-11-13 — Markowitz candidate search counts distinct columns (issue #232)
-
-**Decision.** The threshold-Markowitz pivot search examines each column at
-most once per step; `max_search` counts distinct columns. Previously a
-column with several live `(count, j)` copies in the lazy heap was scanned
-once per copy, each counting toward `max_search`.
-
 **Why.** Building the count heaps only over the kernel (the #232 speed fix)
 changes the heap's push history, and the copy count was a function of that
 history, not of the matrix. Without the dedup the pivot order would depend
@@ -137,6 +118,25 @@ measured, so the only behaviour change is this one, isolated and measured.
 (min -0.46 %, max +1.61 %, 36 worse / 4 better). QPLIB_1157 +0.54 %,
 QPLIB_3852 and bchoco06 unchanged. All 1022 tests pass. Journal
 2026-11-13-01.
+
+## 2026-11-13 — fresh and in-place sparse LU factors share one fill path (issue #232)
+
+**Decision.** `SparseLu` is built by `assemble_into`, which overwrites
+every field of an existing `SparseLu` and reuses its buffers. A fresh
+factor is `assemble_into` on `SparseLu::empty()`. `refactor_markowitz`
+calls it on the live factor, and `SparseLu::refactor` routes to it under
+Markowitz pivoting. `assemble_into` destructures `SparseLu` exhaustively.
+
+**Why.** The in-place path is only safe if it leaves exactly the state a
+fresh factor would, and two parallel builders drift. One code path makes
+equality hold by construction. The exhaustive destructure makes a newly
+added field a compile error until someone decides how a refactor resets
+it, rather than a stale value carried into the next factorization.
+
+**Evidence.** tests/lu_refactor_inplace.rs compares in-place against
+fresh bitwise, including under the same script of solves and FT updates
+afterwards; deleting any of three resets fails it. ~22 % faster on the
+#232 basis shape (journal 2026-11-13-01).
 
 ## Recent Tried-and-Rejected
   floored 1. The rule kept the ladder, which climbed three more rungs to
@@ -299,6 +299,7 @@ tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
 tests/lu_real_bases.rs
+tests/lu_refactor_inplace.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
 tests/lu_sparse_rhs.rs

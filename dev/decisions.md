@@ -8146,3 +8146,22 @@ measured, so the only behaviour change is this one, isolated and measured.
 (min -0.46 %, max +1.61 %, 36 worse / 4 better). QPLIB_1157 +0.54 %,
 QPLIB_3852 and bchoco06 unchanged. All 1022 tests pass. Journal
 2026-11-13-01.
+
+## 2026-11-13 — fresh and in-place sparse LU factors share one fill path (issue #232)
+
+**Decision.** `SparseLu` is built by `assemble_into`, which overwrites
+every field of an existing `SparseLu` and reuses its buffers. A fresh
+factor is `assemble_into` on `SparseLu::empty()`. `refactor_markowitz`
+calls it on the live factor, and `SparseLu::refactor` routes to it under
+Markowitz pivoting. `assemble_into` destructures `SparseLu` exhaustively.
+
+**Why.** The in-place path is only safe if it leaves exactly the state a
+fresh factor would, and two parallel builders drift. One code path makes
+equality hold by construction. The exhaustive destructure makes a newly
+added field a compile error until someone decides how a refactor resets
+it, rather than a stale value carried into the next factorization.
+
+**Evidence.** tests/lu_refactor_inplace.rs compares in-place against
+fresh bitwise, including under the same script of solves and FT updates
+afterwards; deleting any of three resets fails it. ~22 % faster on the
+#232 basis shape (journal 2026-11-13-01).
