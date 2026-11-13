@@ -129,3 +129,33 @@ identity with 0.22 depends on); the rank-1 update's column walk
 (`while k < cols.len[j]` / find of the pivot-row entry) is the largest
 line-level cost. Both need algorithmic changes (count buckets or
 entry-position index) that must be checked against the golden pivots.
+
+* 21:38 :issue-232:follow-up:markowitz:perf:pivot-order:
+Follow-up on local branch claude/issue-232-followup (from PR #234 head
+208b10c). Gate for every step: digests identical to 0.22 on 44 bases
+(40 synthetic, QPLIB_1157/3852, bchoco06, piperout-d27 basis100) and
+in-place == fresh, via scratchpad check.sh. Times are piperout-d27,
+median of 300, fresh (drop included) / in place:
+- start (PR head)                         10.4 / 9.4 ms
+- 5e91e5d column walk skipped when lvec empty or uval == 0, using the
+  pivot-row position recorded at gather (same swap_remove, same pos)
+                                           9.0 / 8.0
+- d00fdb6 row heap -> RowCounts histogram (row heap only fed minr; a
+  minimum has no multiplicity, so no hidden state)  8.6 / 7.6
+- d09e53c column heap keys packed (count<<32|col) as u64; same order
+                                           7.1-7.4 / 6.0
+- 60ce836 MarkowitzWork: elimination buffers kept on SparseLu by
+  refactor_markowitz only, reset in place  7.3 / 5.65
+44/44 digests identical at every step. 0.22 on this machine: 15.5 ms.
+Overall: fresh 2.1x, in place 2.7x.
+Tried to build HiGHS 1.15.1 here for a same-machine HFactor time:
+blocked by the session's permission check (building downloaded code).
+Not attempted further; the 2.7 ms reference stays the issue author's,
+whose 0.22 time was 17-18 ms (here 15.5).
+Remaining in-place cost (callgrind): column heap ~9 % (its multiset is
+part of the 0.22 pivot rule), buffer resets (memset) ~9 %, the rest is
+the elimination. Next lever is structural: a triangular pass that peels
+from the input without building the active-submatrix lists, while
+reproducing the singleton order and the heap log exactly.
+cargo test --release --no-fail-fast: 1040 passed, 0 failed; clippy clean
+on 1.97 and 1.100; bench identical.

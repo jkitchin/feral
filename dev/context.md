@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-13T21:24:16Z
+Generated: 2026-11-13T21:38:49Z
 
 ## Latest Session
 File: dev/sessions/2026-11-13-02.md
@@ -59,11 +59,11 @@ The issue's real basis was not measured.
 
 ## Git Status
 ```
-615e8ad lu_markowitz_triangular: read discopt's basis dump (#232)
-10be31b dev logs: record the pounce regression and the 0.22 pivot-order fix (#232)
-e8a1d59 Markowitz LU: restore the 0.22 pivot order exactly (PR #234 regression)
-dd98cb8 Merge origin/main into claude/gallant-cray-pjv1tt (PR #234)
-41e7c2b Merge pull request #233 from jkitchin/claude/eloquent-galileo-zssfkc
+60ce836 Markowitz LU: keep the elimination's buffers across in-place refactors (#232)
+d2a1e20 Markowitz LU: pack column-heap entries into one u64 key (#232)
+d00fdb6 Markowitz LU: smallest live row count from a histogram, not a heap (#232)
+5e91e5d Markowitz LU: skip the column walk when the update has nothing to subtract (#232)
+208b10c dev logs: piperout-d27 real-basis measurement (#232)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 475 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.88s
+test result: ok. 476 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.31s
 
 ```
 
