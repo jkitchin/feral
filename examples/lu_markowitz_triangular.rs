@@ -145,25 +145,54 @@ fn run(name: &str, a: &SparseColMatrix, reps: usize) {
     let params = LuParams::default();
     let mut lu = SparseLu::factor_markowitz(a, params.clone()).expect("factor");
     let d = digest(&mut lu);
+
+    // In-place path: factor a *different* matrix first (values scaled, so the
+    // same pattern but other numbers), then refactor into `a`. Any state the
+    // refill failed to reset shows up as a digest mismatch.
+    let mut other = a.clone();
+    for (k, v) in other.values.iter_mut().enumerate() {
+        *v *= 1.0 + 0.25 * ((k % 3) as f64);
+    }
+    let mut lu2 = SparseLu::factor_markowitz(&other, params.clone()).expect("factor");
+    lu2.refactor_markowitz(a, params.clone()).expect("refactor");
+    let d2 = digest(&mut lu2);
+    let same = if d == d2 { "same" } else { "DIFFERENT" };
+
     if reps == 0 {
-        println!("{name}: factor_nnz={} digest={d:016x}", lu.factor_nnz());
+        println!(
+            "{name}: factor_nnz={} digest={d:016x} refactor_digest={same}",
+            lu.factor_nnz()
+        );
         return;
     }
-    let mut times = Vec::with_capacity(reps);
+    let median_min = |mut t: Vec<f64>| {
+        t.sort_by(|x, y| x.total_cmp(y));
+        (t[t.len() / 2], t[0])
+    };
+    // Fresh factor replacing the previous one, as a caller holding one factor
+    // does: the old factor's drop is inside the timed region.
+    let mut held = SparseLu::factor_markowitz(a, params.clone()).expect("factor");
+    let mut fresh = Vec::with_capacity(reps);
     for _ in 0..reps {
         let t = Instant::now();
-        let lu = SparseLu::factor_markowitz(a, params.clone()).expect("factor");
-        times.push(t.elapsed().as_secs_f64() * 1e3);
-        std::hint::black_box(lu);
+        held = SparseLu::factor_markowitz(a, params.clone()).expect("factor");
+        fresh.push(t.elapsed().as_secs_f64() * 1e3);
     }
-    times.sort_by(|x, y| x.total_cmp(y));
+    std::hint::black_box(&held);
+    let mut inplace = Vec::with_capacity(reps);
+    for _ in 0..reps {
+        let t = Instant::now();
+        lu2.refactor_markowitz(a, params.clone()).expect("refactor");
+        inplace.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let (fm, fmin) = median_min(fresh);
+    let (im, imin) = median_min(inplace);
     println!(
-        "{name}: m={} nnz={} factor_nnz={} median={:.3} ms min={:.3} ms digest={d:016x}",
+        "{name}: m={} nnz={} factor_nnz={} fresh median={fm:.3} min={fmin:.3} ms | \
+         in-place median={im:.3} min={imin:.3} ms | digest={d:016x} refactor_digest={same}",
         a.m,
         a.values.len(),
         lu.factor_nnz(),
-        times[times.len() / 2],
-        times[0],
     );
 }
 
