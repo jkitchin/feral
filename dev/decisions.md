@@ -8128,6 +8128,71 @@ init-first 0.751× `Never` flops, kkt-first 0.980×; qcqp1000-2nc 1.000× /
 on every factor of all seven sequences. `Never` digests match main on
 every factor.
 
+## 2026-11-12 — sequential drivers hold packed blocks; `WideParents` is opt-in
+
+**Decision.** The sequential and Schur-complement drivers hold each
+contribution block as its packed lower triangle, which the dense kernel
+writes directly (crate-internal `_with_layout` kernel variants; the
+public kernels keep their 0.22.0 signatures and square output). The
+parallel task-graph driver holds square blocks and assembles
+classically. `NumericParams::early_assembly` (default `Off`) opts the
+sequential drivers in to `WideParents`: `symbolic::accumulate_from`
+names, per parent of front area `A`, the first child at which the blocks
+held so far exceed `A` and those still to come are at least `A`; from
+there the parent's frontal is an accumulator into which each child is
+extend-added on deposit, in `children` order. Buffers follow the classic
+scheme's history: absorbed blocks and remainders are freed, not pooled;
+an adopted accumulator is freed after its front is factored and the
+frontal pool grows by the one rule (`fit_pooled_front`); and an empty
+block (a root) takes no pooled buffer, in every driver, so no returned
+factor holds contribution storage. `WorkEstimate::peak_contrib_bytes`
+stays the classic square model.
+
+**Why.** Holding every child's block until the parent is assembled
+makes a wide parent's assembly cost the sum of its children's blocks.
+Packing halves that at no measurable cost. Under `WideParents` the
+peak live heap is `Off`'s plus bookkeeping (a few words per planned
+parent, one block's row map, `O(order)` words while a planned front is
+factored) and the retained factor is the same. The first version
+claimed this by construction but recycled buffers differently and broke
+it (review finding B1; `dev/tried-and-rejected.md`). It is not the
+default because its bookkeeping costs 2.6–4.1% of factorization time on
+matrices with one small planned front under thousands of tiny children
+(CRESC132, VESUVIO, sawpath). The parallel driver is left out:
+out-of-order deposits need per-parent synchronisation and a backlog
+limit, a separate change. The empty-block rule does reach the parallel
+driver, because the kernel's extract is shared; it only removes a
+buffer from the returned factor. Factors are bit-identical under every
+scheme and driver.
+
+**Evidence.** `dev/research/wide-tree-contribution-memory.md`;
+`tests/wide_tree_memory.rs` (generated trees, `WideParents` peak at most
+`Off`'s plus a bookkeeping allowance, retained factor no larger, no
+factor owns contribution storage; fails before the fix).
+
+## 2026-11-13 — `WideParents` review follow-ups
+
+**Decision.** The accumulator plan is derived by each factorization that
+uses it (`Accumulators::new`, from `SymbolicFactorization::
+wide_parent_plan`), not cached on the analysis: no private field on the
+public struct, and no stale plan after a caller edits `supernodes`. A
+deposit out of ascending order abandons the plans it passes over instead
+of failing at the parent (debug builds assert): the accumulator keeps the
+prefix of children it absorbed, the rest are assembled whole after it in
+children order, so factors are unchanged. `EarlyAssembly::Always` sits
+behind the internal `__early-assembly-always` feature, which the crate's
+tests enable through a self dev-dependency. The frontal pool's growth rule
+is explicit (`grow_pooled_front`: capacity `max(2·cap, n²)`), and an
+adopted accumulator grows the idle pool's capacity without writing it.
+
+**Why.** Maintainer review of PR #231. Deriving the plan costs one pass
+over supernodes and children (about 6 µs on the 1,501-supernode star).
+
+**Evidence.** `tests/wide_tree_memory.rs` (now `harness = false`)
+unchanged figures: star `Off` 65.73 MiB, `WideParents` 12.12 MiB; 192
+matrices, at most 7,208 B above `Off`. `tests/early_assembly_parity.rs`
+digests unchanged; the parent-release pin now runs on every target.
+
 ## 2026-11-13 — Markowitz candidate search counts distinct columns (issue #232)
 
 **Decision.** The threshold-Markowitz pivot search examines each column at
@@ -8145,7 +8210,7 @@ measured, so the only behaviour change is this one, isolated and measured.
 **Evidence.** Fill on 40 synthetic near-triangular bases: geomean +0.27 %
 (min -0.46 %, max +1.61 %, 36 worse / 4 better). QPLIB_1157 +0.54 %,
 QPLIB_3852 and bchoco06 unchanged. All 1022 tests pass. Journal
-2026-11-13-01.
+2026-11-13-02.
 
 ## 2026-11-13 — fresh and in-place sparse LU factors share one fill path (issue #232)
 
@@ -8164,4 +8229,4 @@ it, rather than a stale value carried into the next factorization.
 **Evidence.** tests/lu_refactor_inplace.rs compares in-place against
 fresh bitwise, including under the same script of solves and FT updates
 afterwards; deleting any of three resets fails it. ~22 % faster on the
-#232 basis shape (journal 2026-11-13-01).
+#232 basis shape (journal 2026-11-13-02).

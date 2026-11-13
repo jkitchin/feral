@@ -4,6 +4,38 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+**Breaking (struct literals only).** `NumericParams` gains the public
+field `early_assembly`: a literal that lists every field must add it;
+`..NumericParams::default()` and `Solver` callers are unaffected.
+
+### Changed — contribution-block memory in the sequential drivers
+
+- **Packed blocks.** The sequential multifrontal driver and the
+  Schur-complement driver hold each child's contribution block as its
+  packed lower triangle, `c·(c+1)/2` entries instead of `c²`. Factors
+  are bit-identical to 0.22.0. The parallel task-graph driver is
+  unchanged; the parallel entry point hands a tree with too little task
+  parallelism to the sequential driver, which packs.
+- **No pinned buffer in the factor.** A front that leaves an empty
+  contribution block (a root) no longer takes the recycled block buffer,
+  so a returned factor holds no contribution storage (every driver;
+  retained factor of a 3D grid k = 32: 79.3 → 69.1 MB).
+- **`EarlyAssembly::WideParents`** (opt-in via
+  `Solver::with_early_assembly` or `NumericParams::early_assembly`;
+  default `Off`). Under a parent whose
+  children's blocks add up to more than twice its front, the sequential
+  drivers assemble children into the parent's front as they finish
+  instead of holding every block until the parent is assembled. Peak
+  live heap is `Off`'s plus a few words per such parent; the retained
+  factor and the factors themselves are unchanged. It can cost a few
+  percent of factorization time on trees with small wide parents, hence
+  opt-in. The parallel task-graph driver ignores it. The test-only
+  `EarlyAssembly::Always` exists only under the internal
+  `__early-assembly-always` feature.
+
+Measurements and unfavourable results:
+`dev/research/wide-tree-contribution-memory.md`.
+
 ### Changed — faster threshold-Markowitz sparse LU on near-triangular bases (issue #232)
 
 `SparseLu::factor_markowitz` (the default `LuPivoting::Markowitz` route)

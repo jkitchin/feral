@@ -494,8 +494,7 @@ impl SparseLu {
         }
         hw.begin_reach();
         while let Some(k) = hw.stack.pop() {
-            for idx in self.l_col_ptr[k]..self.l_col_ptr[k + 1] {
-                let i = self.l_row_idx[idx];
+            for &i in &self.l_row_idx[self.l_col_ptr[k]..self.l_col_ptr[k + 1]] {
                 if hw.touch(i) {
                     hw.stack.push(i);
                 }
@@ -516,8 +515,7 @@ impl SparseLu {
         }
         hw.begin_reach();
         while let Some(i) = hw.stack.pop() {
-            for idx in self.l_row_ptr[i]..self.l_row_ptr[i + 1] {
-                let k = self.l_row_cols[idx];
+            for &k in &self.l_row_cols[self.l_row_ptr[i]..self.l_row_ptr[i + 1]] {
                 if hw.touch(k) {
                     hw.stack.push(k);
                 }

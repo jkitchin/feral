@@ -672,10 +672,8 @@ pub(crate) fn find_fundamental_supernodes(
     let mut snode_starts: Vec<usize> = Vec::new();
 
     let mut n_children = vec![0usize; n];
-    for j in 0..n {
-        if let Some(p) = etree.parent[j] {
-            n_children[p] += 1;
-        }
+    for &p in etree.parent.iter().flatten() {
+        n_children[p] += 1;
     }
 
     snode_starts.push(0);

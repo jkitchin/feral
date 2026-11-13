@@ -27,8 +27,8 @@ fn shape(label: &str, csc: &CscMatrix) {
         max_col_nnz = max_col_nnz.max(nnz);
         let mut has_diag = false;
         let mut has_offdiag = false;
-        for k in start..end {
-            if csc.row_idx[k] == j {
+        for &r in &csc.row_idx[start..end] {
+            if r == j {
                 has_diag = true;
             } else {
                 has_offdiag = true;

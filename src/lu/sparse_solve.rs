@@ -576,8 +576,8 @@ impl SparseLu {
             return false;
         }
         while let Some(i) = rw.stack.pop() {
-            for idx in self.l_row_ptr[i]..self.l_row_ptr[i + 1] {
-                if !rw.push(self.l_row_cols[idx], cap) {
+            for &k in &self.l_row_cols[self.l_row_ptr[i]..self.l_row_ptr[i + 1]] {
+                if !rw.push(k, cap) {
                     rw.abandon();
                     return false;
                 }

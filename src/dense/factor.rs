@@ -291,8 +291,10 @@ pub mod phase_timing {
 /// **Phase C**: `contrib_pool` is a stack of recyclable `Vec<f64>`
 /// buffers that the multifrontal driver feeds back after `extend_add`
 /// has consumed a child's contribution block. The kernel pops one at
-/// extract time, `clear()`+`resize()`s to `cdim*cdim`, and writes the
-/// trailing Schur block. When the pool is empty the kernel falls back
+/// extract time and writes the trailing Schur block into it, in the
+/// layout the caller asked for. A front that leaves an empty block (a
+/// root) leaves the pool in place, so the factor never pins a recycled
+/// buffer behind an empty block. When the pool is empty the kernel falls back
 /// to a fresh allocation — `FrontalFactors` always owns its `contrib`
 /// Vec, the pool is purely a malloc-amortisation channel.
 #[derive(Default, Debug, Clone)]
@@ -1529,8 +1531,11 @@ pub struct FrontalFactors {
     pub perm: Vec<usize>,
     /// Inverse permutation.
     pub perm_inv: Vec<usize>,
-    /// Schur complement / delayed-pivot block: cdim × cdim column-major
-    /// where cdim = nrow - nelim. Lower triangle only. For the first
+    /// Schur complement / delayed-pivot block of dimension
+    /// cdim = nrow - nelim, lower triangle only: cdim × cdim
+    /// column-major with a zero strict upper triangle from every public
+    /// entry; the crate's sequential multifrontal drivers ask for the
+    /// lower triangle packed column-major instead. For the first
     /// `ncol - nelim` positions this holds the un-eliminated (delayed)
     /// fully-summed columns; the remaining `nrow - ncol` positions hold
     /// the non-fully-summed trailing rows. When `nelim == ncol` the whole
@@ -1712,24 +1717,87 @@ pub fn factor_frontal(
     factor_frontal_with_profile(matrix, ncol, may_delay, params, None)
 }
 
-/// Build the contribution-block buffer for a front that eliminated nothing
-/// (`ncol == 0`): the whole `n×n` matrix is the Schur complement passed up
-/// to the parent. This mirrors the normal contribution-extraction
-/// convention used by the `factor_frontal_*` elimination paths — the strict
-/// upper triangle is zero-filled and the lower triangle (`ci >= cj`) carries
-/// the matrix values. Cloning `matrix.data` wholesale would instead carry
-/// the strict upper triangle's stale bytes, which
-/// `SymmetricMatrix::from_pooled_buf` explicitly leaves uninitialized,
-/// making full-buffer bit-compares nondeterministic (D10,
-/// dev/research/repo-review-2026-06-09.md).
-fn contrib_zeroed_upper(data: &[f64], n: usize) -> Vec<f64> {
-    let mut contrib = vec![0.0f64; n * n];
-    for cj in 0..n {
-        let col_base = cj * n;
-        // Lower triangle (ci >= cj) copies the matrix; the strict upper
-        // triangle keeps its zero initialization.
-        contrib[col_base + cj..col_base + n].copy_from_slice(&data[col_base + cj..col_base + n]);
+/// Layout of [`FrontalFactors::contrib`]: an explicit argument of every
+/// crate-internal kernel entry the multifrontal drivers call; the public
+/// entries return `Square`.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContribLayout {
+    /// `contrib_dim × contrib_dim` column-major; the lower triangle
+    /// (`ci >= cj`) carries the values, the strict upper triangle is zero.
+    #[default]
+    Square,
+    /// The lower triangle packed column-major: column `j` holds rows
+    /// `j..contrib_dim`, so [`packed_lower_len`]`(contrib_dim,
+    /// contrib_dim)` entries.
+    PackedLower,
+}
+
+/// Entries in the first `cols` columns of a lower triangle of order `dim`
+/// packed column-major (`Σ_{k<cols} (dim − k)`), which is also the offset
+/// of column `cols`; the whole triangle (`cols = dim`) has
+/// `dim·(dim+1)/2`. The one definition of the packed layout's length,
+/// shared by the kernel that writes it, the drivers that hold it and the
+/// symbolic plan that sizes it.
+#[inline]
+pub(crate) fn packed_lower_len(dim: usize, cols: usize) -> usize {
+    cols * (2 * dim - cols + 1) / 2
+}
+
+/// Extract the trailing `(n − offset)²` block of the `n × n` column-major
+/// `data` (lower triangle authoritative) in `layout`, into a buffer taken
+/// from `pool` (fresh if it is empty). An empty block takes nothing: it
+/// owns no allocation and the pool keeps its buffer. Every output cell is written exactly once
+/// (issue #56 Lever B), through the spare capacity as `MaybeUninit<f64>` before the length
+/// is grown, so `set_len` never exposes uninitialized elements (D6,
+/// dev/research/repo-review-2026-06-09.md). Never clones `data` wholesale:
+/// its strict upper triangle may hold stale bytes
+/// (`SymmetricMatrix::from_pooled_buf`), which would make full-buffer
+/// bit-compares nondeterministic (D10).
+fn extract_contrib(
+    data: &[f64],
+    n: usize,
+    offset: usize,
+    layout: ContribLayout,
+    pool: &mut Option<Vec<f64>>,
+) -> Vec<f64> {
+    let cdim = n - offset;
+    let len = match layout {
+        ContribLayout::Square => cdim * cdim,
+        ContribLayout::PackedLower => packed_lower_len(cdim, cdim),
+    };
+    if len == 0 {
+        return Vec::new();
     }
+    let mut contrib = pool.take().unwrap_or_default();
+    contrib.clear();
+    contrib.reserve(len);
+    {
+        let spare = contrib.spare_capacity_mut();
+        let mut at = 0;
+        for cj in 0..cdim {
+            if layout == ContribLayout::Square {
+                for cell in &mut spare[at..at + cj] {
+                    cell.write(0.0);
+                }
+                at += cj;
+            }
+            let column = &data[(offset + cj) * n + offset + cj..(offset + cj + 1) * n];
+            for (cell, &v) in spare[at..at + column.len()].iter_mut().zip(column) {
+                cell.write(v);
+            }
+            at += column.len();
+        }
+        debug_assert_eq!(at, len);
+    }
+    let _pt_zf = phase_timing::start();
+    // SAFETY: the loop above initialized every element in 0..len of the
+    // spare capacity that `reserve(len)` guaranteed exists; `f64` has no
+    // Drop, so growing the length exposes only initialized values.
+    // CONTRIBZEROFILL_NS brackets only this O(1) length carve-out.
+    unsafe {
+        contrib.set_len(len);
+    }
+    phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
     contrib
 }
 
@@ -1760,7 +1828,7 @@ pub fn factor_frontal_with_profile(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: contrib_zeroed_upper(&matrix.data, nrow),
+            contrib: extract_contrib(&matrix.data, nrow, 0, ContribLayout::Square, &mut None),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -1803,6 +1871,7 @@ pub fn factor_frontal_with_profile(
         may_delay,
         params,
         &mut tmp_scratch,
+        ContribLayout::Square,
         profile,
     )
 }
@@ -1827,8 +1896,17 @@ pub(crate) fn factor_frontal_in_place_with_scratch(
     may_delay: bool,
     params: &BunchKaufmanParams,
     scratch: &mut FactorScratch,
+    contrib_layout: ContribLayout,
 ) -> Result<FrontalFactors, FeralError> {
-    factor_frontal_in_place_with_scratch_impl(matrix, ncol, may_delay, params, scratch, None)
+    factor_frontal_in_place_with_scratch_impl(
+        matrix,
+        ncol,
+        may_delay,
+        params,
+        scratch,
+        contrib_layout,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1838,6 +1916,7 @@ fn factor_frontal_in_place_with_scratch_impl(
     may_delay: bool,
     params: &BunchKaufmanParams,
     scratch: &mut FactorScratch,
+    contrib_layout: ContribLayout,
     mut profile: Option<&mut FrontalProfile>,
 ) -> Result<FrontalFactors, FeralError> {
     let nrow = matrix.n;
@@ -1858,7 +1937,13 @@ fn factor_frontal_in_place_with_scratch_impl(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: contrib_zeroed_upper(&matrix.data, nrow),
+            contrib: extract_contrib(
+                &matrix.data,
+                nrow,
+                0,
+                contrib_layout,
+                &mut scratch.contrib_pool,
+            ),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -2021,55 +2106,11 @@ fn factor_frontal_in_place_with_scratch_impl(
     }
     phase_timing::stop(&phase_timing::LEXTRACT_NS, _pt_lx);
 
-    // Extract contribution block: trailing (nrow-nelim) × (nrow-nelim) of a.
-    // Issue #56 Lever B: fused single-pass write. The prior code did
-    // `resize(cdim*cdim, 0.0)` (cdim² zero-writes) followed by a
-    // lower-triangle copy (cdim·(cdim+1)/2 additional writes); every
-    // lower-triangle cell was written twice. The fused path writes
-    // each cell exactly once: zero for the upper triangle, a-value
-    // for the lower triangle. Same final contents — bit-identical
-    // — at roughly 33% fewer writes. Probe (Thomson n=200, 9 reps):
-    // contribextract drops from 1435 µs → ~970 µs.
+    // Extract the contribution block: the trailing (nrow-nelim) block of
+    // `a`, every cell written once (issue #56 Lever B), see
+    // `extract_contrib`.
     let _pt_cx = phase_timing::start();
-    let cdim = nrow - nelim;
-    let cdim2 = cdim * cdim;
-    let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
-    contrib.clear();
-    contrib.reserve(cdim2);
-    // Issue #56 Lever B (single write per cell) preserved, but the
-    // initialization now happens through the Vec's spare capacity as
-    // `MaybeUninit<f64>` *before* the length is grown. The prior code
-    // called `set_len(cdim2)` first and then wrote through a `&mut [f64]`
-    // materialized over still-uninitialized memory: that exposes
-    // uninitialized elements as live `f64`s, violating `Vec::set_len`'s
-    // documented precondition (D6, dev/research/repo-review-2026-06-09.md).
-    // "Every cell is written before read" is a real property but it is not
-    // the property `set_len` requires (the elements must be initialized
-    // *at the call*). Writing via `MaybeUninit` and calling `set_len`
-    // afterwards satisfies the contract with the same single-pass cost.
-    {
-        let spare = contrib.spare_capacity_mut();
-        for cj in 0..cdim {
-            let col_base = cj * cdim;
-            for ci in 0..cj {
-                spare[col_base + ci].write(0.0);
-            }
-            for ci in cj..cdim {
-                spare[col_base + ci].write(a[(nelim + cj) * nrow + (nelim + ci)]);
-            }
-        }
-    }
-    let _pt_zf = phase_timing::start();
-    // SAFETY: the loop above initialized every element in 0..cdim2 of the
-    // spare capacity (which `reserve(cdim2)` guaranteed exists), so
-    // growing the length to cdim2 exposes only fully-initialized values.
-    // CONTRIBZEROFILL_NS brackets only this O(1) length carve-out, as
-    // before; the O(cdim²) initialization is counted under
-    // CONTRIBEXTRACT_NS via `_pt_cx`.
-    unsafe {
-        contrib.set_len(cdim2);
-    }
-    phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
+    let contrib = extract_contrib(a, nrow, nelim, contrib_layout, &mut scratch.contrib_pool);
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = take_zeroed_usize(&mut scratch.out.perm_inv, nrow);
@@ -2089,7 +2130,7 @@ fn factor_frontal_in_place_with_scratch_impl(
         perm,
         perm_inv,
         contrib,
-        contrib_dim: cdim,
+        contrib_dim: nrow - nelim,
         n_delayed,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
@@ -2203,6 +2244,27 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     params: &BunchKaufmanParams,
     scratch: &mut FactorScratch,
 ) -> Result<FrontalFactors, FeralError> {
+    factor_frontal_blocked_with_layout(
+        matrix,
+        ncol,
+        may_delay,
+        params,
+        scratch,
+        ContribLayout::Square,
+    )
+}
+
+/// [`factor_frontal_blocked_in_place_with_scratch`] returning
+/// [`FrontalFactors::contrib`] in `contrib_layout` (the multifrontal
+/// drivers' layout of held blocks).
+pub(crate) fn factor_frontal_blocked_with_layout(
+    matrix: &mut crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+    scratch: &mut FactorScratch,
+    contrib_layout: ContribLayout,
+) -> Result<FrontalFactors, FeralError> {
     let nrow = matrix.n;
 
     // Issue #99 Lever 3: opt-in per-front FMA size gate. When
@@ -2242,7 +2304,13 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: contrib_zeroed_upper(&matrix.data, nrow),
+            contrib: extract_contrib(
+                &matrix.data,
+                nrow,
+                0,
+                contrib_layout,
+                &mut scratch.contrib_pool,
+            ),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -2290,7 +2358,12 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         && ncol == crate::dense::block_ldlt32::BLOCK_SIZE
     {
         return crate::dense::block_ldlt32::factor_block32(
-            matrix, ncol, may_delay, params, scratch,
+            matrix,
+            ncol,
+            may_delay,
+            params,
+            scratch,
+            contrib_layout,
         );
     }
 
@@ -2318,7 +2391,14 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         // place). The `_with_scratch` variant skips both and reuses
         // `scratch.subdiag`/`scratch.contrib_pool` — bit-identical
         // result on finite input.
-        return factor_frontal_in_place_with_scratch(matrix, ncol, may_delay, params, scratch);
+        return factor_frontal_in_place_with_scratch(
+            matrix,
+            ncol,
+            may_delay,
+            params,
+            scratch,
+            contrib_layout,
+        );
     }
 
     // Factor in place into the caller's buffer — the kernel reads and
@@ -2591,42 +2671,9 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     }
     phase_timing::stop(&phase_timing::LEXTRACT_NS, _pt_lx);
 
-    // Issue #56 Lever B: fused single-pass write — see the matching
-    // comment in `factor_frontal`. The pool buffer (when `take()`
-    // returned `Some`) and any newly-reserved capacity are both
-    // overwritten by the loop below; every cell in 0..cdim² is
-    // written exactly once.
+    // Issue #56 Lever B: single write per cell, see `extract_contrib`.
     let _pt_cx = phase_timing::start();
-    let cdim = nrow - nelim;
-    let cdim2 = cdim * cdim;
-    let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
-    contrib.clear();
-    contrib.reserve(cdim2);
-    // Initialize through the spare capacity as `MaybeUninit<f64>` before
-    // growing the length, so `set_len` never exposes uninitialized
-    // elements. See the matching long-form safety comment in
-    // `factor_frontal_in_place_with_scratch_impl` (D6,
-    // dev/research/repo-review-2026-06-09.md).
-    {
-        let spare = contrib.spare_capacity_mut();
-        for cj in 0..cdim {
-            let col_base = cj * cdim;
-            for ci in 0..cj {
-                spare[col_base + ci].write(0.0);
-            }
-            for ci in cj..cdim {
-                spare[col_base + ci].write(a[(nelim + cj) * nrow + (nelim + ci)]);
-            }
-        }
-    }
-    let _pt_zf = phase_timing::start();
-    // SAFETY: the loop above initialized every element in 0..cdim2 of the
-    // spare capacity that `reserve(cdim2)` guaranteed exists; `f64` has no
-    // Drop, so growing the length exposes only initialized values.
-    unsafe {
-        contrib.set_len(cdim2);
-    }
-    phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
+    let contrib = extract_contrib(a, nrow, nelim, contrib_layout, &mut scratch.contrib_pool);
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = take_zeroed_usize(&mut scratch.out.perm_inv, nrow);
@@ -2649,7 +2696,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         perm,
         perm_inv,
         contrib,
-        contrib_dim: cdim,
+        contrib_dim: nrow - nelim,
         n_delayed,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
@@ -2759,6 +2806,17 @@ pub fn factor_frontal_diagonal_in_place(
     ncol: usize,
     params: &BunchKaufmanParams,
 ) -> Result<FrontalFactors, FeralError> {
+    factor_frontal_diagonal_with_layout(matrix, ncol, params, ContribLayout::Square)
+}
+
+/// [`factor_frontal_diagonal_in_place`] returning
+/// [`FrontalFactors::contrib`] in `contrib_layout`.
+pub(crate) fn factor_frontal_diagonal_with_layout(
+    matrix: &mut crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    params: &BunchKaufmanParams,
+    contrib_layout: ContribLayout,
+) -> Result<FrontalFactors, FeralError> {
     let nrow = matrix.n;
 
     if ncol > nrow {
@@ -2777,7 +2835,7 @@ pub fn factor_frontal_diagonal_in_place(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: contrib_zeroed_upper(&matrix.data, nrow),
+            contrib: extract_contrib(&matrix.data, nrow, 0, contrib_layout, &mut None),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -2862,12 +2920,7 @@ pub fn factor_frontal_diagonal_in_place(
     }
 
     let cdim = nrow - nelim;
-    let mut contrib = vec![0.0; cdim * cdim];
-    for cj in 0..cdim {
-        for ci in cj..cdim {
-            contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
-        }
-    }
+    let contrib = extract_contrib(a, nrow, nelim, contrib_layout, &mut None);
 
     let perm: Vec<usize> = (0..nrow).collect();
     let perm_inv = perm.clone();
@@ -5272,8 +5325,7 @@ fn try_reject_1x1_with_rook_rescue(
     };
     if let Some(pivot) = rescued {
         *n_rook_rescues += 1;
-        for idx in 0..pivot.n_swaps {
-            let (p, q) = pivot.swaps[idx];
+        for &(p, q) in &pivot.swaps[..pivot.n_swaps] {
             swap_rows_cols(a, nrow, p, q, perm);
         }
         match pivot.kind {
@@ -7249,5 +7301,102 @@ mod issue_213_perturb_band_tests {
         assert_eq!(ff.d_diag[0], 3e-16);
         assert_eq!(ff.inertia.positive, 1);
         assert_eq!(ff.n_threshold_fail_accepts, 1);
+    }
+}
+
+#[cfg(test)]
+mod contrib_layout_tests {
+    use super::*;
+    use crate::dense::matrix::SymmetricMatrix;
+
+    /// Deterministic dense front: an indefinite lower triangle (so the
+    /// BK kernel pivots, and with `may_delay` delays some columns) or,
+    /// with `dominant`, a positive diagonally dominant one the SQD
+    /// kernel accepts.
+    fn front(n: usize, dominant: bool) -> SymmetricMatrix {
+        let mut data = vec![0.0f64; n * n];
+        for j in 0..n {
+            for i in j..n {
+                let k = (i * n + j) as u64;
+                let h = (k.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 11) as f64 / (1u64 << 53) as f64
+                    - 0.5;
+                data[j * n + i] = if i != j {
+                    h
+                } else if dominant {
+                    n as f64
+                } else {
+                    1e-3 * h
+                };
+            }
+        }
+        SymmetricMatrix { n, data }
+    }
+
+    /// The packed block holds the square block's lower triangle bit for
+    /// bit, the square block's strict upper triangle is zero, and the
+    /// layout changes nothing else the kernel returns.
+    fn assert_layouts_agree(square: &FrontalFactors, packed: &FrontalFactors) {
+        let c = square.contrib_dim;
+        assert_eq!(packed.contrib_dim, c);
+        assert_eq!(square.contrib.len(), c * c);
+        assert_eq!(packed.contrib.len(), c * (c + 1) / 2);
+        let mut at = 0;
+        for j in 0..c {
+            for i in 0..j {
+                assert_eq!(square.contrib[j * c + i].to_bits(), 0);
+            }
+            for i in j..c {
+                assert_eq!(
+                    packed.contrib[at].to_bits(),
+                    square.contrib[j * c + i].to_bits()
+                );
+                at += 1;
+            }
+        }
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&packed.l), bits(&square.l));
+        assert_eq!(bits(&packed.d_diag), bits(&square.d_diag));
+        assert_eq!(bits(&packed.d_subdiag), bits(&square.d_subdiag));
+        assert_eq!(packed.perm, square.perm);
+        assert_eq!(packed.n_delayed, square.n_delayed);
+        assert_eq!(packed.inertia, square.inertia);
+    }
+
+    #[test]
+    fn packed_contribution_is_the_square_lower_triangle() {
+        // Without delays the kernel must accept the small pivots.
+        let params = BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            ..BunchKaufmanParams::default()
+        };
+        let mut delayed = 0;
+        for (n, ncol) in [(1, 0), (5, 0), (6, 2), (40, 3), (90, 70), (300, 260)] {
+            for may_delay in [false, true] {
+                let run = |layout| {
+                    let mut m = front(n, false);
+                    factor_frontal_blocked_with_layout(
+                        &mut m,
+                        ncol,
+                        may_delay,
+                        &params,
+                        &mut FactorScratch::new(),
+                        layout,
+                    )
+                    .unwrap()
+                };
+                let square = run(ContribLayout::Square);
+                delayed += square.n_delayed;
+                assert_layouts_agree(&square, &run(ContribLayout::PackedLower));
+            }
+            let run = |layout| {
+                let mut m = front(n, true);
+                factor_frontal_diagonal_with_layout(&mut m, ncol, &params, layout).unwrap()
+            };
+            assert_layouts_agree(
+                &run(ContribLayout::Square),
+                &run(ContribLayout::PackedLower),
+            );
+        }
+        assert!(delayed > 0, "the corpus must exercise delayed columns");
     }
 }

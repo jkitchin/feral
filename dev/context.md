@@ -1,11 +1,11 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-13T19:09:43Z
+Generated: 2026-11-13T19:26:38Z
 
 ## Latest Session
-File: dev/sessions/2026-11-13-01.md
+File: dev/sessions/2026-11-13-02.md
 ```
-# Session 2026-11-13-01
+# Session 2026-11-13-02
 
 ## Goal
 Issue #232: `SparseLu::factor_markowitz` ~6.5x slower than HiGHS HFactor
@@ -59,11 +59,11 @@ The issue's real basis was not measured.
 
 ## Git Status
 ```
+cae166d Session 2026-11-13-01 checkpoint: in-place refactor follow-up (#232)
 c25e89b lu_markowitz_triangular: time and verify the in-place refactor (#232)
 132c16e SparseLu::refactor_markowitz: in-place refactor reusing memory (#232)
 962ffa1 Session 2026-11-13-01 checkpoint: #232 Markowitz LU bookkeeping
 6a5afd3 Sparse LU assemble: no per-column Vecs in remap_and_sort_l, sized u_above (#232)
-dce0dc6 Markowitz LU: kernel-only count heaps, packed active submatrix (#232)
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 468 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.59s
+test result: ok. 475 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.64s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-13-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-13-02.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -117,7 +117,7 @@ measured, so the only behaviour change is this one, isolated and measured.
 **Evidence.** Fill on 40 synthetic near-triangular bases: geomean +0.27 %
 (min -0.46 %, max +1.61 %, 36 worse / 4 better). QPLIB_1157 +0.54 %,
 QPLIB_3852 and bchoco06 unchanged. All 1022 tests pass. Journal
-2026-11-13-01.
+2026-11-13-02.
 
 ## 2026-11-13 — fresh and in-place sparse LU factors share one fill path (issue #232)
 
@@ -136,29 +136,29 @@ it, rather than a stale value carried into the next factorization.
 **Evidence.** tests/lu_refactor_inplace.rs compares in-place against
 fresh bitwise, including under the same script of solves and FT updates
 afterwards; deleting any of three resets fails it. ~22 % faster on the
-#232 basis shape (journal 2026-11-13-01).
+#232 basis shape (journal 2026-11-13-02).
 
 ## Recent Tried-and-Rejected
-  floored 1. The rule kept the ladder, which climbed three more rungs to
-  2.9e-3 with the inertia count unchanged: 165 s against 74 s with the
-  shipped rule. pounce confirmed it is deterministic and bisected it.
-
-An a-posteriori-pivoting (APP) blocked kernel for cheaper delays was also
-considered and set aside, not tried: it would break the blocked/scalar
-bit-parity contract (`tests/blocked_ldlt.rs`, `tests/golden_bits.rs`),
-which the maintainer chose to keep.
-
-## 2026-10-22 — #224 Step 1: memoising the failed 2×2 gate pair in the rook walk
-
-Tried on top of the per-call row-max memo (`src/dense/rook.rs`): remember
-the last `(p, q)` whose `passes_2x2_gates` failed and skip re-testing it
-when an oscillating walk proposes the same pair again. Bit-safe (the gate
-is a pure function of the pair within one search) but no gain: harness
-medians (iter_000 symbolic, 5 reps, qcqp1000-2c 0.21 trajectory) went
-iter_083 0.479 → 0.485 s, iter_120 0.477 → 0.483 s, iter_135 0.493 →
-0.493 s, i.e. noise to slightly slower. The walk reaches the 2×2 test
-less often than it rescans rows. Dropped; the shipped Step 1 is the row
-memo plus BK-scan hints. Journal: 2026-10-22-01.org.
+  (`dense::matrix::fit_pooled_front`).
+- **Recycling absorbed blocks' buffers through the contribution pool.**
+  The kernel reuses a pooled buffer with `reserve`, so a buffer grows
+  along a chain of siblings up to twice the largest block, and the
+  parent's small block then pins it until the grandparent assembles: 19
+  of 2,000 random trees more than 2% above `Off` (worst 1.128×), and the
+  retained factor larger in 1,126 (review finding). Pooling only
+  delayed-pivot remainders still grew one delaying tree's retained
+  factor by 32 B. Absorbed blocks and remainders are now freed; `Off`
+  already pays one allocation per leaf block.
+- **Counting packed blocks in `WorkEstimate::peak_contrib_bytes`.** The
+  default `Solver` runs the parallel task graph when the tree has task
+  parallelism, which holds square blocks, so a packed figure understated
+  that path's contribution memory by about half (review finding). The
+  estimate stays the classic square one, an upper bound for every driver
+  and scheme.
+- **A `ContribLayout` argument on the public dense kernels.** Only the
+  crate's own drivers pass anything but `Square`. The public signatures
+  stay as in 0.22.0; the drivers call crate-internal `_with_layout`
+  variants.
 
 ## Source Files
 ```
@@ -199,6 +199,7 @@ src/lu/sparse_symbolic.rs
 src/lu/sparse_triangular.rs
 src/lu/sparse_update.rs
 src/numeric/condition.rs
+src/numeric/contrib.rs
 src/numeric/factorize.rs
 src/numeric/mod.rs
 src/numeric/reanalysis.rs
@@ -241,6 +242,7 @@ tests/d7_block32_dispatch_pooled.rs
 tests/delayed_pivoting.rs
 tests/dense_fast_path.rs
 tests/dense_ldlt.rs
+tests/early_assembly_parity.rs
 tests/env_knob_parsing.rs
 tests/env_knob_scan.rs
 tests/factor_output_recycling.rs
@@ -333,4 +335,6 @@ tests/symbolic_profiler.rs
 tests/task_plan_parity.rs
 tests/threshold_consistency.rs
 tests/tiny_fast_path.rs
+tests/wide_star/mod.rs
+tests/wide_tree_memory.rs
 ```

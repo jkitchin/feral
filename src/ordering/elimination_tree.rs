@@ -32,8 +32,7 @@ impl EliminationTree {
 
         for j in 0..n {
             ancestor[j] = j; // j is its own root initially
-            for k in pattern.col_ptr[j]..pattern.col_ptr[j + 1] {
-                let i = pattern.row_idx[k];
+            for &i in &pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]] {
                 if i >= j {
                     continue; // only process entries with i < j
                 }
@@ -65,8 +64,8 @@ impl EliminationTree {
     /// Compute children lists from parent pointers.
     pub fn children(&self) -> Vec<Vec<usize>> {
         let mut ch = vec![Vec::new(); self.n];
-        for j in 0..self.n {
-            if let Some(p) = self.parent[j] {
+        for (j, &parent) in self.parent.iter().enumerate() {
+            if let Some(p) = parent {
                 ch[p].push(j);
             }
         }

@@ -8,6 +8,34 @@ pub struct SymmetricMatrix {
     pub data: Vec<f64>,
 }
 
+/// Size the pooled frontal buffer `buf` for an `n × n` front: grow its
+/// capacity by [`grow_pooled_front`], then `resize`, which fills the tail
+/// with zeros or truncates. It does NOT re-zero entries
+/// `[0, min(old_len, n²))`, which is where the bandwidth saving of
+/// [`SymmetricMatrix::from_pooled_buf`] comes from in steady state
+/// (capacity already reached after the first few large supernodes; later
+/// calls only re-zero the lower triangle).
+pub(crate) fn fit_pooled_front(buf: &mut Vec<f64>, n: usize) {
+    grow_pooled_front(buf, n);
+    buf.resize(n * n, 0.0);
+}
+
+/// The one growth rule of the multifrontal drivers' frontal pool,
+/// whichever way a front is assembled, so the pool's capacity history
+/// depends only on the sequence of fronts: when an `n × n` front does not
+/// fit, the capacity becomes `max(2 · capacity, n²)` (amortised doubling),
+/// exactly — the rule is spelled out rather than left to `Vec`'s own
+/// growth strategy. Capacity only: the length and contents are unchanged,
+/// so a front that never uses the pool (an adopted accumulator) grows it
+/// without writing it.
+pub(crate) fn grow_pooled_front(buf: &mut Vec<f64>, n: usize) {
+    let needed = n * n;
+    if buf.capacity() < needed {
+        let target = needed.max(2 * buf.capacity());
+        buf.reserve_exact(target - buf.len());
+    }
+}
+
 impl SymmetricMatrix {
     /// Create a new n×n symmetric matrix initialized to zero.
     pub fn zeros(n: usize) -> Self {
@@ -37,14 +65,7 @@ impl SymmetricMatrix {
     /// `extend_add` normalises to lower (`numeric/factorize.rs:2371`),
     /// `symv` and `validate` iterate only `i >= j`.
     pub fn from_pooled_buf(n: usize, mut buf: Vec<f64>) -> Self {
-        let needed = n * n;
-        // `resize` grows the tail with zeros or truncates. It does
-        // NOT re-zero entries `[0, min(old_len, needed))`, which is
-        // where the bandwidth saving comes from in steady state
-        // (capacity already reached after the first few large
-        // supernodes; subsequent calls only re-zero the lower
-        // triangle).
-        buf.resize(needed, 0.0);
+        fit_pooled_front(&mut buf, n);
         // Zero only the lower triangle of the n×n column-major layout:
         // for each column j, positions `[j*n + j, j*n + n)`.
         for j in 0..n {

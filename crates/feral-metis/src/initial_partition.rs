@@ -82,8 +82,8 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
     for (v, wt) in wtot.iter_mut().enumerate() {
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
-        for k in lo..hi {
-            *wt = wt.saturating_add(graph.adjwgt[k]);
+        for &w in &graph.adjwgt[lo..hi] {
+            *wt = wt.saturating_add(w);
         }
     }
 
@@ -180,8 +180,7 @@ pub fn initial_bisect_bfs(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
         a_weight += graph.vwgt[v] as i64;
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
-        for k in lo..hi {
-            let u = graph.adjncy[k] as usize;
+        for u in graph.adjncy[lo..hi].iter().map(|&x| x as usize) {
             if !visited[u] {
                 visited[u] = true;
                 queue.push_back(u);
