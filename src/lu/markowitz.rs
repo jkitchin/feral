@@ -168,6 +168,59 @@ impl<T: Copy + Default> Lists<T> {
     }
 }
 
+/// How many live rows have each count: the smallest live row count in O(1)
+/// amortised, without a heap (issue #232).
+///
+/// The search only needs `min_i r_i` over live rows (as a lower bound), and
+/// duplicates cannot change a minimum, so unlike the column heap this one
+/// has no hidden state to preserve: it reports exactly what the lazy row heap
+/// it replaces reported. Each live row is registered under the count it had
+/// when last [`Self::set`]; the caller re-registers every row whose count
+/// changed before the next query, and [`Self::remove`]s a row as it is
+/// eliminated.
+struct RowCounts {
+    hist: Vec<usize>,
+    reg: Vec<usize>,
+    /// No live row has a count below this.
+    lo: usize,
+}
+
+impl RowCounts {
+    fn new(rcnt: &[usize]) -> Self {
+        let mut hist = vec![0usize; rcnt.len() + 1];
+        for &c in rcnt {
+            hist[c] += 1;
+        }
+        Self {
+            hist,
+            reg: rcnt.to_vec(),
+            lo: 0,
+        }
+    }
+
+    fn set(&mut self, i: usize, c: usize) {
+        self.hist[self.reg[i]] -= 1;
+        if c >= self.hist.len() {
+            self.hist.resize(c + 1, 0);
+        }
+        self.hist[c] += 1;
+        self.reg[i] = c;
+        self.lo = self.lo.min(c);
+    }
+
+    fn remove(&mut self, i: usize) {
+        self.hist[self.reg[i]] -= 1;
+    }
+
+    /// Smallest count among live rows, `None` when no row is live.
+    fn min(&mut self) -> Option<usize> {
+        while self.lo < self.hist.len() && self.hist[self.lo] == 0 {
+            self.lo += 1;
+        }
+        (self.lo < self.hist.len()).then_some(self.lo)
+    }
+}
+
 /// Right-looking threshold-Markowitz LU of `a`.
 ///
 /// `u_thresh` is the relative pivot threshold (`0 < u ≤ 1`; `1.0` degenerates to
@@ -237,7 +290,8 @@ pub(super) fn markowitz_factor(
     let mut col_singletons: Vec<usize> = (0..m).filter(|&j| ccnt[j] == 1).collect();
     let mut row_singletons: Vec<usize> = (0..m).filter(|&i| rcnt[i] == 1).collect();
 
-    // Lazy min-heaps over the counts; stale pairs are discarded on pop.
+    // Lazy min-heap over the column counts; stale pairs are discarded on pop.
+    // (The row side only needs the smallest live row count: `RowCounts`.)
     //
     // **The heap contents are part of the pivot rule.** The heap can hold
     // several live copies of `(c, j)` (a column re-pushed without its count
@@ -249,23 +303,22 @@ pub(super) fn markowitz_factor(
     // declared dependent and made QGFRDXPN cycle to the iteration cap
     // (PR #234). So the multiset is reproduced exactly, not approximated.
     //
-    // Nothing pops either heap until the first step with no singleton pivot,
-    // so up to that step the heap is just "initial entries + every push", in
-    // order-free form. During the singleton peel those entries go into plain
-    // logs (an append, not a sift), and the heaps are built from the logs by
+    // Nothing pops the heap until the first step with no singleton pivot, so
+    // up to that step it is just "initial entries + every push", in
+    // order-free form. During the singleton peel those entries go into a
+    // plain log (an append, not a sift), and the heap is built from the log by
     // one heapify when the stacks first run dry. A min-heap's sequence of
     // popped values depends only on its multiset (equal entries are equal
     // values), so the search then sees exactly what the eagerly maintained
-    // heaps would have held. Entries for rows and columns already eliminated
-    // are left out of the build: they are discarded on every pop and a dead
-    // row or column never comes back, so dropping them changes nothing but
-    // cost. On a near-triangular LP basis that is ~17k entries the eager
-    // heaps sifted in and then popped one at a time (issue #232).
+    // heap would have held. Entries for columns already eliminated are left
+    // out of the build: they are discarded on every pop and a dead column
+    // never comes back, so dropping them changes nothing but cost. On a
+    // near-triangular LP basis that is ~17k entries the eager heap sifted in
+    // and then popped one at a time (issue #232).
     let mut heaps_built = false;
     let mut cheap_log: Vec<(usize, usize)> = (0..m).map(|j| (ccnt[j], j)).collect();
-    let mut rheap_log: Vec<(usize, usize)> = (0..m).map(|i| (rcnt[i], i)).collect();
+    let mut row_counts = RowCounts::new(&rcnt);
     let mut cheap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
-    let mut rheap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
 
     // ---- workspaces ------------------------------------------------------
     let mut lscat = vec![0.0_f64; m];
@@ -345,12 +398,6 @@ pub(super) fn markowitz_factor(
                 .map(Reverse)
                 .collect::<Vec<_>>()
                 .into();
-            rheap = rheap_log
-                .drain(..)
-                .filter(|&(_, i)| alive_r[i])
-                .map(Reverse)
-                .collect::<Vec<_>>()
-                .into();
             heaps_built = true;
         }
 
@@ -359,17 +406,7 @@ pub(super) fn markowitz_factor(
         let minr = if fast.is_some() {
             1
         } else {
-            loop {
-                match rheap.peek() {
-                    Some(&Reverse((c, i))) => {
-                        if alive_r[i] && rcnt[i] == c {
-                            break c.max(1);
-                        }
-                        rheap.pop();
-                    }
-                    None => break 1,
-                }
-            }
+            row_counts.min().map_or(1, |c| c.max(1))
         };
 
         let mut best: Option<(usize, f64, usize, usize)> = None; // cost, |v|, i, j
@@ -463,7 +500,7 @@ pub(super) fn markowitz_factor(
                                 // Reached only with no fast pivot, so the
                                 // heaps are built.
                                 cheap.push(Reverse((ccnt[col], col)));
-                                rheap.push(Reverse((rcnt[row], row)));
+                                row_counts.set(row, rcnt[row]);
                             }
                         }
                         (row, col)
@@ -504,6 +541,7 @@ pub(super) fn markowitz_factor(
         }
 
         alive_r[pi] = false;
+        row_counts.remove(pi);
         alive_c[pj] = false;
         perm.push(pi);
         qcol.push(pj);
@@ -627,11 +665,7 @@ pub(super) fn markowitz_factor(
                 if rcnt[i] == 1 {
                     row_singletons.push(i);
                 }
-                if heaps_built {
-                    rheap.push(Reverse((rcnt[i], i)));
-                } else {
-                    rheap_log.push((rcnt[i], i));
-                }
+                row_counts.set(i, rcnt[i]);
             }
         }
     }
@@ -649,7 +683,39 @@ pub(super) fn markowitz_factor(
 
 #[cfg(test)]
 mod tests {
-    use super::Lists;
+    use super::{Lists, RowCounts};
+
+    /// `RowCounts::min` against a brute-force minimum over the live rows,
+    /// under random re-registrations and removals.
+    #[test]
+    fn row_counts_min_matches_brute_force() {
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let n = 50;
+        let mut cnt: Vec<usize> = (0..n).map(|_| next(8)).collect();
+        let mut live = vec![true; n];
+        let mut rc = RowCounts::new(&cnt);
+        for step in 0..5_000 {
+            let i = next(n);
+            if live[i] {
+                if next(25) == 0 {
+                    live[i] = false;
+                    rc.remove(i);
+                } else {
+                    // Counts can exceed the initial histogram length.
+                    cnt[i] = next(n + 20);
+                    rc.set(i, cnt[i]);
+                }
+            }
+            let brute = (0..n).filter(|&r| live[r]).map(|r| cnt[r]).min();
+            assert_eq!(rc.min(), brute, "step {step}");
+        }
+    }
 
     /// `Lists` must behave exactly like `Vec<Vec<T>>` under the operations the
     /// elimination uses — element order included, since the pivot search's
