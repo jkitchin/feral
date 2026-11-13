@@ -277,6 +277,10 @@ pub(super) fn markowitz_factor(
     let mut dirty_mark = vec![false; m];
     let mut lvec: Vec<(usize, f64)> = Vec::new();
     let mut uvec: Vec<(usize, f64)> = Vec::new();
+    // `upos[t]`: position of the pivot-row entry in column `uvec[t].0`, found
+    // by the gather. Still valid when that column's update runs: each column
+    // is updated once per step and only its own update moves its entries.
+    let mut upos: Vec<usize> = Vec::new();
     let mut scanned: Vec<usize> = Vec::new();
 
     // ---- output ----------------------------------------------------------
@@ -484,13 +488,15 @@ pub(super) fn markowitz_factor(
             }
         }
         uvec.clear();
+        upos.clear();
         for &j in row_cols.get(pi).iter() {
             if j == pj || !alive_c[j] || row_seen[j] {
                 continue;
             }
             row_seen[j] = true;
-            if let Some(&(_, v)) = cols.get(j).iter().find(|&&(i, _)| i == pi) {
-                uvec.push((j, v));
+            if let Some(k) = cols.get(j).iter().position(|&(i, _)| i == pi) {
+                uvec.push((j, cols.get(j)[k].1));
+                upos.push(k);
             }
         }
         for &j in row_cols.get(pi).iter() {
@@ -539,53 +545,63 @@ pub(super) fn markowitz_factor(
             lscat[i] = lv;
             lmark[i] = true;
         }
-        for &(j, uval) in uvec.iter() {
-            let mut k = 0;
-            while k < cols.len[j] {
-                let (i, v) = cols.get(j)[k];
-                if i == pi {
-                    cols.swap_remove(j, k); // consumed into the U row
-                    continue;
-                }
-                if uval != 0.0 && lmark[i] {
-                    let nv = v - uval * lscat[i];
-                    seen_mark[i] = true;
-                    seen_list.push(i);
-                    if nv == 0.0 {
-                        // Exact cancellation: drop it, and keep the counts exact.
-                        rcnt[i] -= 1;
-                        if !dirty_mark[i] {
-                            dirty_mark[i] = true;
-                            dirty_rows.push(i);
-                        }
-                        cols.swap_remove(j, k);
+        for (&(j, uval), &pos) in uvec.iter().zip(upos.iter()) {
+            if lvec.is_empty() || uval == 0.0 {
+                // Nothing to subtract: the walk below would only take out the
+                // pivot-row entry (every other entry fails its `lmark` test),
+                // and it would do so with this same `swap_remove` at this same
+                // position. Every column-singleton pivot lands here, so on a
+                // near-triangular basis this skips most column walks
+                // (issue #232).
+                cols.swap_remove(j, pos);
+            } else {
+                let mut k = 0;
+                while k < cols.len[j] {
+                    let (i, v) = cols.get(j)[k];
+                    if i == pi {
+                        cols.swap_remove(j, k); // consumed into the U row
                         continue;
                     }
-                    cols.get_mut(j)[k].1 = nv;
-                }
-                k += 1;
-            }
-            if uval != 0.0 {
-                for &(i, lv) in lvec.iter() {
-                    if seen_mark[i] {
-                        continue;
+                    if uval != 0.0 && lmark[i] {
+                        let nv = v - uval * lscat[i];
+                        seen_mark[i] = true;
+                        seen_list.push(i);
+                        if nv == 0.0 {
+                            // Exact cancellation: drop it, and keep the counts exact.
+                            rcnt[i] -= 1;
+                            if !dirty_mark[i] {
+                                dirty_mark[i] = true;
+                                dirty_rows.push(i);
+                            }
+                            cols.swap_remove(j, k);
+                            continue;
+                        }
+                        cols.get_mut(j)[k].1 = nv;
                     }
-                    let nv = -uval * lv;
-                    if nv != 0.0 {
-                        cols.push(j, (i, nv));
-                        rcnt[i] += 1;
-                        row_cols.push(i, j);
-                        if !dirty_mark[i] {
-                            dirty_mark[i] = true;
-                            dirty_rows.push(i);
+                    k += 1;
+                }
+                if uval != 0.0 {
+                    for &(i, lv) in lvec.iter() {
+                        if seen_mark[i] {
+                            continue;
+                        }
+                        let nv = -uval * lv;
+                        if nv != 0.0 {
+                            cols.push(j, (i, nv));
+                            rcnt[i] += 1;
+                            row_cols.push(i, j);
+                            if !dirty_mark[i] {
+                                dirty_mark[i] = true;
+                                dirty_rows.push(i);
+                            }
                         }
                     }
                 }
+                for &i in seen_list.iter() {
+                    seen_mark[i] = false;
+                }
+                seen_list.clear();
             }
-            for &i in seen_list.iter() {
-                seen_mark[i] = false;
-            }
-            seen_list.clear();
             ccnt[j] = cols.len[j];
             // Into the heap as well (or its log, before it exists): the stack
             // is a fast path, not an alternative index. A column that stops
