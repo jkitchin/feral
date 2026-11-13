@@ -1,0 +1,59 @@
+#+TITLE: Journal 2026-11-13 session 01 — #232 Markowitz LU bookkeeping
+#+STARTUP: showall
+
+Entries written at session end from the session's measurements (not in
+real time, contrary to protocol); times are approximate.
+
+* 18:34 :issue-232:lu:markowitz:setup:
+Issue #232: SparseLu::factor_markowitz 17-18 ms vs HiGHS HFactor 2.7 ms
+on discopt's piperout-d27 basis (m = 17 470, 91.6 % peeled by
+singletons, 1 459-col kernel, ~no fill). Stack samples: BinaryHeap::pop
+and malloc. The basis itself is in the discopt repo; attaching discopt
+to this session was denied, so a synthetic basis of the same shape is
+used instead (examples/lu_markowitz_triangular.rs: upper-triangular
+peel + near-lower-triangular kernel, scrambled). First kernel draft was
+fully random and gave 2.6x fill (factor_nnz 109k / 41k nnz), which is
+not the issue's regime; made the kernel 97 % sub-diagonal -> factor_nnz
+43k / 41k. Baseline medians: 12.4 / 12.9 / 13.4 ms (seeds 1-3).
+
+* 18:38 :issue-232:markowitz:pivot-order:determinism:
+Lazy heap holds duplicate *live* (c, j) copies (re-push without a count
+change, or count returning to an earlier value). The search pops each
+copy, rescans the column and counts it again against max_search = 8.
+So "build heaps over the kernel only" cannot be bit-identical to the
+old code: multiplicity is push-history dependent. Measured: adding only
+a per-step scan_mark dedup to the old code changes digests on 5/6 bases
+(all but QPLIB_3852). Decision: dedup (count distinct columns, as the
+Suhl cutoff is meant), then require the refactor be bit-identical to
+"old + dedup". Fill cost of the dedup, 40 synthetic seeds: geomean
++0.27 %, min -0.46 %, max +1.61 %, 36 worse / 4 better. QPLIB_1157
+51254 -> 51532 (+0.54 %); QPLIB_3852 and bchoco06 unchanged.
+Consistent small direction, not explained; plausibly tie-breaks
+(cost-equal candidates prefer larger |v|, which is not fill-aware).
+
+* 18:41 :issue-232:markowitz:perf:alloc:
+Implemented: heaps built at first stack exhaustion over alive cols/rows,
+no pushes before; cols / row_cols in packed Lists<T> (relocate with
+doubling, Vec-identical push/swap_remove order). Digests identical to
+"old + dedup" on all 6 bases. Medians: piperout-shape 5.8 / 6.0 / 6.7 ms
+(2.1x); QPLIB_3852 0.78 -> 0.39; bchoco06 0.47 -> 0.31; QPLIB_1157
+unchanged (fill-bound, 12.9 ms).
+
+* 18:43 :issue-232:profile:callgrind:
+No perf on this box; callgrind on 12 factorizations: markowitz_factor
+357M Ir, assemble 65M, remap_and_sort_l 60M (almost all malloc/free:
+two fresh Vecs per L column, most columns empty), drop of SparseLu 50M,
+heap pop now ~1 %. remap_and_sort_l -> one reused buffer, skip sorted
+columns: 60.4M -> 12.6M Ir. u_above pre-sized from a count pass.
+Medians 5.4 / 4.9 / 5.8 ms; digests unchanged.
+What remains is SparseLu's own shape: one Vec per U row (the FT update
+rewrites rows in place), u_above Vec<Vec>, ~12 m-length scratch arrays
+allocated and zeroed per factor and freed on drop. Not touched here —
+that is a SparseLu storage redesign, not #232's bookkeeping.
+
+* 18:46 :issue-232:tests:
+cargo test --release --no-fail-fast: 1022 passed, 0 failed (1020
+before the two new tests). New: Lists vs Vec<Vec> differential, 20k
+random ops; near-triangular + filling kernel, PBQ = LU reconstructed
+from input, max|L| <= 1/u, factor_nnz > nnz asserted so the relocation
+path is exercised. bench: identical to 2026-10-23-01.

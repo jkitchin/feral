@@ -8127,3 +8127,22 @@ init-first 0.751× `Never` flops, kkt-first 0.980×; qcqp1000-2nc 1.000× /
 0.546×; clnlbeam, NARX_CFy, pooling 1.000×. Inertia is identical to `Never`
 on every factor of all seven sequences. `Never` digests match main on
 every factor.
+
+## 2026-11-13 — Markowitz candidate search counts distinct columns (issue #232)
+
+**Decision.** The threshold-Markowitz pivot search examines each column at
+most once per step; `max_search` counts distinct columns. Previously a
+column with several live `(count, j)` copies in the lazy heap was scanned
+once per copy, each counting toward `max_search`.
+
+**Why.** Building the count heaps only over the kernel (the #232 speed fix)
+changes the heap's push history, and the copy count was a function of that
+history, not of the matrix. Without the dedup the pivot order would depend
+on an implementation detail of when the heap was built. With it, the
+bookkeeping refactor is bit-identical to "old code + dedup" on every basis
+measured, so the only behaviour change is this one, isolated and measured.
+
+**Evidence.** Fill on 40 synthetic near-triangular bases: geomean +0.27 %
+(min -0.46 %, max +1.61 %, 36 worse / 4 better). QPLIB_1157 +0.54 %,
+QPLIB_3852 and bchoco06 unchanged. All 1022 tests pass. Journal
+2026-11-13-01.

@@ -4,6 +4,18 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — faster threshold-Markowitz sparse LU on near-triangular bases (issue #232)
+
+`SparseLu::factor_markowitz` (the default `LuPivoting::Markowitz` route)
+builds its pivot-search heaps only over the kernel left after the singleton
+peel, stores the active submatrix in packed buffers instead of one `Vec`
+per column and row, and no longer allocates per column when sorting `L`.
+On a synthetic basis shaped like the issue's LP basis (m = 17 470, ~92 %
+triangular) the factor drops from ~12.9 ms to ~5.4 ms median; QPLIB_3852
+0.78 -> 0.35 ms. The candidate search now counts each column once against
+`markowitz_max_search`, which changes some kernel pivot choices: fill moves
+by +0.27 % geomean (max +1.6 %) on 40 synthetic bases.
+
 ## [0.22.0] - 2026-10-26
 
 **Breaking.** `FactorStats` (`feral::FactorStats`) is an exhaustive public
