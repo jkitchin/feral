@@ -24,7 +24,7 @@ use feral::symbolic::{
     symbolic_factorize, symbolic_factorize_with_method, OrderingMethod, SupernodeParams,
     SymbolicFactorization,
 };
-use feral::CscMatrix;
+use feral::{CscMatrix, FactorStatus, Solver};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
@@ -105,6 +105,36 @@ fn off_and_wide_parents(a: &CscMatrix, symbolic: &SymbolicFactorization) -> [(us
         measure(a, symbolic, EarlyAssembly::Off),
         measure(a, symbolic, EarlyAssembly::WideParents),
     ]
+}
+
+/// `Solver::with_early_assembly` reaches the sequential driver: on the
+/// star, a `Solver` factorization (analysis included) peaks far lower
+/// with `WideParents` than with `Off`.
+#[test]
+fn solver_setter_reaches_the_sequential_driver() {
+    let _measuring = MEASURING.lock().unwrap_or_else(|e| e.into_inner());
+    let matrix = star_kkt(Star {
+        groups: 1500,
+        local: 4,
+        shared: 96,
+        zero_local_diagonal: false,
+    });
+    let peak = |mode: EarlyAssembly| {
+        let mut solver = Solver::new().with_parallel(false).with_early_assembly(mode);
+        let before = LIVE.load(Relaxed);
+        PEAK.store(before, Relaxed);
+        let status = solver.factor(&matrix, None);
+        assert!(
+            matches!(status, FactorStatus::Success),
+            "{mode:?}: {status:?}"
+        );
+        PEAK.load(Relaxed) - before
+    };
+    let (off, wide) = (peak(EarlyAssembly::Off), peak(EarlyAssembly::WideParents));
+    assert!(
+        wide * 2 < off,
+        "Solver peak: Off {off} B, WideParents {wide} B"
+    );
 }
 
 #[test]

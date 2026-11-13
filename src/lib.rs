@@ -47,7 +47,8 @@ pub use numeric::condition::{
     HagerHighamOperator,
 };
 pub use numeric::factorize::{
-    factorize_multifrontal_with_schur, LdltExport, NumericParams, ProfileReport, SchurBlock,
+    factorize_multifrontal_with_schur, EarlyAssembly, LdltExport, NumericParams, ProfileReport,
+    SchurBlock,
 };
 pub use numeric::reanalysis::{
     AnalysisOrigin, DeclineReason, OnStaleParams, ReanalysisEvent, ReanalysisPolicy,

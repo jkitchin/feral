@@ -4,9 +4,9 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-**Breaking.** `NumericParams` gains the public field `early_assembly`
-(struct literals must add it; `..NumericParams::default()` is
-unaffected).
+**Breaking (struct literals only).** `NumericParams` gains the public
+field `early_assembly`: a literal that lists every field must add it;
+`..NumericParams::default()` and `Solver` callers are unaffected.
 
 ### Changed — contribution-block memory in the sequential drivers
 
@@ -20,8 +20,9 @@ unaffected).
   contribution block (a root) no longer takes the recycled block buffer,
   so a returned factor holds no contribution storage (every driver;
   retained factor of a 3D grid k = 32: 79.3 → 69.1 MB).
-- **`EarlyAssembly::WideParents`** (opt-in,
-  `NumericParams::early_assembly`; default `Off`). Under a parent whose
+- **`EarlyAssembly::WideParents`** (opt-in via
+  `Solver::with_early_assembly` or `NumericParams::early_assembly`;
+  default `Off`). Under a parent whose
   children's blocks add up to more than twice its front, the sequential
   drivers assemble children into the parent's front as they finish
   instead of holding every block until the parent is assembled. Peak

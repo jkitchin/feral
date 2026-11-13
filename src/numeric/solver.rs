@@ -15,7 +15,7 @@ use crate::inertia::Inertia;
 use crate::numeric::condition::estimate_condition_1norm;
 use crate::numeric::factorize::{
     factorize_multifrontal_parallel_with_workspace, factorize_multifrontal_with_workspace,
-    FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
+    EarlyAssembly, FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
 };
 use crate::numeric::reanalysis::{
     cheaper_by_margin, cost_ratio_fires, effective, is_probe_index, pick, probes_allowed,
@@ -891,6 +891,21 @@ impl Solver {
     /// tasks of their own keeps the classic memory profile under `true`.
     pub fn with_parallel(mut self, parallel: bool) -> Self {
         self.use_parallel = parallel;
+        self
+    }
+
+    /// Choose when the sequential drivers assemble children's contribution
+    /// blocks into their parent's front. Default [`EarlyAssembly::Off`]
+    /// holds every block until the parent is assembled;
+    /// [`EarlyAssembly::WideParents`] assembles children into a wide
+    /// parent's front as they finish, lowering peak memory on trees where
+    /// one small front has many children, at a few percent of
+    /// factorization time. Factors are bit-identical either way. Sets
+    /// [`NumericParams::early_assembly`]; see there for the rule, and
+    /// [`Solver::with_parallel`] for when the parallel task-graph driver
+    /// runs instead and ignores it.
+    pub fn with_early_assembly(mut self, mode: EarlyAssembly) -> Self {
+        self.numeric_params.early_assembly = mode;
         self
     }
 
@@ -3217,7 +3232,7 @@ mod tests {
             warn_partial_singular: false,
             pattern_reused_hint: false,
             use_static_row_indices: true,
-            early_assembly: crate::numeric::factorize::EarlyAssembly::Off,
+            early_assembly: EarlyAssembly::Off,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
