@@ -1,0 +1,223 @@
+#+TITLE: Journal 2026-11-12 session 01 — wide-tree contribution memory
+#+STARTUP: showall
+
+* 09:38 :wide-tree:contrib-memory:setup:
+Feature branch from main d3f7eb6. Problem: a many-row
+QP's KKT (n = 22,176) analyses to a star, supernode 11368 with 10,982
+children under a 112-row front; 0.22.0 holds every child's square
+block until the parent is assembled (862.5 MiB of blocks,
+peak_contrib_bytes 904,518,320 B against factor_bytes 21,549,192 B;
+peak live heap of the whole POUNCE solve 1233.2 MiB). Research note
+and plan: dev/research|plans/wide-tree-contribution-memory.md. These
+entries were written during the session after a first implementation
+round and an external review; they record that round's findings too.
+
+* 09:38 :wide-tree:packed:perf:rejected:
+Pack-at-deposit (kernel writes square, driver packs with copy_within
+and shrink_to_fit) measured 1.026× the parent on grid:40 (paired
+medians, 8 rounds). Replaced by the kernel writing the packed triangle
+(ContribLayout::PackedLower). Recorded in tried-and-rejected.
+
+* 09:38 :wide-tree:review:accumulators:
+Review items addressed: the layout became an explicit kernel argument
+(no sticky FactorScratch field); FERAL_EARLY_ASSEMBLY env knob replaced
+by NumericParams::early_assembly (EarlyAssembly::{Planned,Off,Always});
+accumulate_from derived in symbolic (no public field), None at the last
+child; compute_peak_contrib counts the packed deposited block;
+ContribBlock::from_factor checks the length and returns FeralError;
+extract_contrib returns an empty Vec for an empty block (dead pool
+capacity no longer kept in NodeFactors: 3D grid k=30 retained
+69.56 → 49.87 MiB).
+
+* 09:38 :wide-tree:parallel:perf:pivot:
+Ticketed design (release decided under the global contrib mutex,
+extend-add outside it in ticket order under a per-parent Mutex+Condvar)
+measured on forests of stars at 4 threads, 6 interleaved rounds × 15
+runs, medians: 16×2000 leaves 1.064× and 64×400 leaves 1.214× the
+parent. Single thread: Planned ≈ parent, Off 0.93× (packing). Cause:
+global hold 1.2 → 4.5 ms and wait 40 → 65 ms summed (allocation of the
+released run inside the critical section). Pivot: membership is fixed
+per factorization, so deposit, prefix and extend-adds now run under the
+parent's own lock in numeric::contrib::Accumulators; planned children
+never touch the global mutex. Remeasured: 0.858× and 0.834× the parent
+(Off 0.976×, 0.982×); global wait 4.8–6.5 ms. Machine load average
+10–30 from other work throughout.
+
+* 09:38 :wide-tree:tests:mutant:
+Unit tests: every permutation of three deposits with values
+(1, 1e16, −1e16) equals in-order bit for bit; reverse-order deposits
+from three threads likewise. Parity: weak 3D grid k=24 on 4 workers
+under Always deposits out of order (telemetry out_of_order_deposits > 0)
+with Off's digest. Completion-order mutant (absorb every held block in
+deposit order, ignore the prefix) fails all three
+(deposits_in_any_order…, concurrent_deposits…,
+out_of_order_deposits_assemble_in_children_order).
+
+* 09:38 :wide-tree:memory:grids:
+mem-probe (counting allocator), parent → this, peak live heap above
+inputs: 3D grid k=30 seq 106.60 → 96.14 MiB, par4 138.29 → 123.26;
+2D grid k=300 seq 57.27 → 56.89, par4 76.14 → 76.38 (+0.24 MiB,
+unfavourable, not attributed). 2D transient +0.63 seq / +1.24 par
+(an earlier per-supernode staging version: +1.48 / +4.54). Neither grid
+opens an accumulator.
+
+* 09:49 :wide-tree:pounce:measurement:
+POUNCE b0328335 scratch build, [patch.crates-io] at d3f7eb65+staged:9f78432f.
+Rust probe (counting allocator), scaled tol=1e-12: before 1233.2 MiB,
+39 iters, 15.91 s; after 401.2 MiB, 39 iters, 14.93 s. Unscaled
+tol=1e-9: 1286.8 -> 450.8 MiB, 35 iters, 142.0 -> 128.1 s. Python
+phys_footprint solve peak (scaled, 2 reps): 1479.9/1487.4 -> 506.9/509.8
+MiB. x identical by sha1 for every before/after pair (py and probe,
+scaled and unscaled). Machine loaded (other work plus my gate runs).
+
+* 09:49 :wide-tree:gates:split:
+Final tree: fmt, clippy x3, cargo test -- --nocapture 1031 passed,
+0 failed, 24 ignored; examples ok. Change 1 alone (packed blocks, on
+d3f7eb6): same gates, 1023 passed, 0 failed, 24 ignored.
+
+* 09:49 :wide-tree:perf:bench:
+grid:40 paired, 8 rounds x 7 reps: 0.965x the parent (0.960-0.996).
+cargo run --bin bench --release: inertia/residual lines identical to the
+parent; microsecond factor times differ within noise.
+
+* 10:20 :wide-tree:review:parallel:contention:
+Review round 2, B2: with every leaf its own task (FERAL_PAR_TASK_MIN_FLOPS=1)
+the per-parent deposit sorted all held blocks on each deposit and ran the
+extend-adds under the parent's lock. 20,000x1x40 star at 4 threads: Off
+56.5 ms, Planned 935 ms. The parity and timing fixtures never contended
+(default cutoff inlines small leaves into one task).
+Fix: held blocks in a BTreeMap by position; deposit records itself and
+returns unless it releases blocks and nobody is absorbing; one absorber
+takes the accumulator out, extend-adds batches outside the lock, re-locks
+to collect what siblings released meanwhile. Same star: 46.3 ms (0.82x
+Off). 1,500x4x96: 8.3 ms vs Off 10.8. Unfavourable: depositors no longer
+wait, so more blocks are held: 3,000x4x200 at 8 threads 84 -> 324 MiB
+transient (Off 480). Backlog bound not built.
+
+* 10:25 :wide-tree:review:tests:mutant:
+take() now returns an error if a child is not deposited and absorbed.
+New: sub_sym_area unit test; delay chain (100 delays, 220 links) with 340
+dense 20-var leaves under link 100: cascade-break at 191 in every scheme,
+166 when the accumulator drops the leaves' area, never when it doubles it
+(both mutants fail). Digest now covers row_indices, n_delayed_in,
+cascade_break. Planned out-of-order deposits on dense_star(64,120,60).
+Golden digests computed on d3f7eb6 with the same fixture code (scratch
+test, removed) pinned for aarch64. VALUES changed to 1e16, 1, -1e16:
+the old set did not catch a mutant that absorbs past the prefix when the
+first child goes first; the new one does (unit tests and parity).
+
+* 10:30 :wide-tree:review:peak-model:
+peak_bytes = factor_bytes + peak_contrib_bytes + max_front_bytes: the
+model counts no frontal and releases children before the parent's block,
+so peak_contrib fell on every tree (3D grid 40.70 -> 12.72 MiB). KKT:
+peak_bytes 21,885,992 B.
+
+* 10:43 :wide-tree:pounce:measurement:
+Stamp d3f7eb65+staged:866b77bb. Probe live heap 1233.2 -> 400.9 MiB
+(scaled 1e-12), 1286.8 -> 450.5 MiB (unscaled 1e-9). x SHA-1 equal for
+all four before/after pairs (logs/x-sha1-866b77bb.txt in the measurement
+workspace). Grids/forests re-run, load 18-46: 64-star forest sequential
+1.04x the parent (unfavourable), parallel 0.85x.
+
+* 19:20 :wide-tree:review:backlog:
+Round 3, B1: depositors wait on a per-parent Condvar while more than 32
+released blocks (held.range(..prefix)) are queued behind a running
+absorber; the absorber notify_all at every re-lock. Out-of-order holds
+are never waited on (their depositor may run the earlier sibling).
+AbsorberTurn drop guard: on error or panic clears absorbing, sets
+failed, notify_all; deposit/take then return InvalidInput. Unit tests:
+an absorb error fails the parent; a failed absorber wakes a waiter
+(limit 0). Removing the guard's notify hangs the waiter test.
+
+* 19:40 :wide-tree:review:backlog:measurement:
+b2_contention, 2 rounds x 9 runs, load 24 -> 7, FERAL_PAR_TASK_MIN_FLOPS=1.
+3,000x4x200 transient, Off / under lock / unbounded / bounded:
+4 threads 477 / 138-141 / 167-170 / 168 MiB; 8 threads 480 / 82-86 /
+333-336 / 92-93; 16 threads 485 / 67 / 398 / 72-98. Time 49.6-51.6 ms
+bounded vs 48.0-51.1 unbounded, Off 57-70. Unfavourable: 4-thread
+transient above the under-lock version (limit never binds), 16-thread
+3,000 star 72-98 vs 67, 1,500 star 0.3-0.5 ms slower than unbounded at
+8 and 16 threads, one round of 20,000 leaves at 4 threads 47.7 vs 42.2.
+Round 2's "324 MiB" was the mean of 314 and 334, not a maximum.
+
+* 19:50 :wide-tree:review:tests:mutant:
+N3: early_assembly_task_leaves (strong, delaying and narrow stars, every
+leaf its own task, 8 threads, 10-200 repeats). no-collect mutant fails it
+3/3 (stranded blocks, take error); second-section mutant fails it. N2:
+prefix advanced in new past children outside the analysis.
+
+* 19:55 :wide-tree:pounce:measurement:gates:
+Stamp d3f7eb65+staged:d2574625. CI gates (every ci.yml step) pass on the
+final tree (cargo test 1,036 passed / 0 failed / 24 ignored) and on
+change 1 alone (1,023 / 0 / 24). POUNCE probe live heap 1233.2 -> 401.2
+MiB (scaled 1e-12; round 2 400.9), 1286.8 -> 450.9 MiB (unscaled 1e-9;
+round 2 450.5). x SHA-1 equal for all four pairs. Solve footprint
+1479 -> 512-513 MiB (round 2 507-509). Unscaled "before" footprint
+1498.7 / 3413.2 MiB this time vs 2378.5 / 4292.7 in round 2 for the
+same 0.22.0 build: not repeatable. kkt-probe --tree output identical to
+round 2.
+
+* 21:00 :wide-tree:rescope:design:
+Rescope (owner): sequential drivers only; parallel task-graph driver as
+in d3f7eb6. Removed parallel accumulators, locks, condvars, backlog
+limit, telemetry fields, task-leaf test, digest module, planned peak
+model and max_front_bytes in peak_bytes; restored the empty-block pool
+behaviour. ContribBlock<L: BlockLayout>: Square (parallel), Packed
+(sequential, Schur). Plan rule made two-sided (held > A and to come >= A)
+so the contribution-plus-frontal peak cannot exceed Off's. Membership
+table (+12.5 KB on MUONSINE) replaced by a min-heap of each plan's next
+expected child (+112 B). Default Off: Planned 2.6-4.1% slower on
+CRESC132 / VESUVIO / sawpath (21 x 9 focused runs).
+
+* 21:50 :wide-tree:rescope:measurement:
+101-matrix corpus, 5 rounds x 7, load 40-68. Off vs parent: 0 digest
+diffs, peak 0.673-1.000, geomean time 0.940. Planned vs Off: 0 diffs,
+peak min 0.477, +112 B on MUONSINE. Parallel 1 thread: peak sets equal
+on 46/48 task-graph matrices, subset on 2; 4 threads kkt227:0 +64 B over
+the parent's observed max. Always: 5.5x on nuffield2. bench binary:
+identical validation lines to the parent.
+
+* 22:10 :wide-tree:rescope:gates:pounce:
+Stamp b79d502a: every ci.yml gate passes (cargo test 1,045 / 0 / 24);
+change 1 alone (addc1fa3) 1,035 / 0 / 24. POUNCE b0328335: live heap
+1233.2 -> 805.8 (Off) -> 401.3 MiB (Planned) scaled; 1286.8 -> 859.5 ->
+450.9 unscaled; x SHA-1 equal for all 12 vectors. Unfavourable: under
+Off the scaled solve's phys_footprint rose 1478-1479 -> 1593-1596 MiB
+(two runs) while live heap fell; not attributed. Planned 506-510 MiB.
+
+* 23:30 :wide-tree:review:fix:
+Review (Planned peak above Off) fixed. B1a: dense::matrix::fit_pooled_front
+owns the frontal pool's growth rule; an adopted accumulator is dropped
+after its front is factored and the pool grown by that rule. B1b:
+absorbed blocks and delayed-pivot remainders are freed, only whole
+blocks pooled (pooling remainders grew one delaying tree's retained
+factor by 32 B). Retained factor still larger on 6 of 2,000 random trees
+(worst +9,640 B): the root's empty block took the pooled buffer, whose
+capacity history differs between schemes. extract_contrib now returns
+an empty Vec for an empty block (all drivers); no returned factor owns
+contribution storage. The earlier rejection of that rule rested on
+peak minus retained, which it moves by construction. Review harness
+(cache warmed, BIG=80): random 2,000 above Off 58, worst +1,488 B;
+delays 2,000 above 66, worst +2,168 B; none >2%; retained above 0; 0
+digest mismatches; hand tree +560 B. Property test: 192 matrices, 113
+below Off, worst +7,208 B; each fix reverted fails it. Renamed Planned to
+WideParents (non_exhaustive; Always doc(hidden)); plan cached on the
+analysis; public kernels restored with _with_layout variants;
+peak_contrib_bytes back to the square model.
+
+* 23:45 :wide-tree:review:measurement:
+Corpus 3 rounds x 7, load 16-26, stamp 2419dac0 (docs edited since).
+Off vs parent: 0 digest diffs, peak 0.673-1.000, geomean 0.978 on the 22
+matrices >= 0.5 ms; retained grid3:32 79.3 -> 69.1 MB, nuffield2 63.5 ->
+60.2 MB. WideParents vs Off: 0 diffs, peak 0.476-1.000, MUONSINE +96 B;
+time >= 0.5 ms 1.019 (was 1.004). Parallel 1 thread: no peak above.
+4 threads grid3:32 one 188.6 MB round; 20 runs each, parent 175-193,
+this 175-190 MB. Foot sweep (FERAL only, phys_footprint): Off 0.36-0.78x,
+WideParents 0.11-0.45x parent. POUNCE live heap 1233.2 -> 806.2 (Off) ->
+401.3 MiB (WideParents), x SHA-1 equal.
+
+* 23:25 :wide-tree:review:gates:
+Stamp 63fbcc4d: every ci.yml gate passes (tests 1,046 / 0 / 24); change 1
+alone (7b4843e0) 1,035 / 0 / 24. Measurements above ran on stamps
+2419dac0 / 2fa0aa68, which differ from 63fbcc4d only in doc comments and
+a test rename.

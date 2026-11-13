@@ -4,15 +4,34 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Changed — packed contribution blocks in the sequential drivers
+**Breaking.** `NumericParams` gains the public field `early_assembly`
+(struct literals must add it; `..NumericParams::default()` is
+unaffected).
 
-The sequential multifrontal driver and the Schur-complement driver hold
-each child's contribution block as its packed lower triangle,
-`c·(c+1)/2` entries instead of `c²`, so a parent's assembly holds about
-half the block memory. Factors are bit-identical to 0.22.0. The parallel
-task-graph driver is unchanged (square blocks); the parallel entry point
-hands a tree with too little task parallelism to the sequential driver,
-which packs. Public kernel signatures are unchanged.
+### Changed — contribution-block memory in the sequential drivers
+
+- **Packed blocks.** The sequential multifrontal driver and the
+  Schur-complement driver hold each child's contribution block as its
+  packed lower triangle, `c·(c+1)/2` entries instead of `c²`. Factors
+  are bit-identical to 0.22.0. The parallel task-graph driver is
+  unchanged; the parallel entry point hands a tree with too little task
+  parallelism to the sequential driver, which packs.
+- **No pinned buffer in the factor.** A front that leaves an empty
+  contribution block (a root) no longer takes the recycled block buffer,
+  so a returned factor holds no contribution storage (every driver;
+  retained factor of a 3D grid k = 32: 79.3 → 69.1 MB).
+- **`EarlyAssembly::WideParents`** (opt-in,
+  `NumericParams::early_assembly`; default `Off`). Under a parent whose
+  children's blocks add up to more than twice its front, the sequential
+  drivers assemble children into the parent's front as they finish
+  instead of holding every block until the parent is assembled. Peak
+  live heap is `Off`'s plus a few words per such parent; the retained
+  factor and the factors themselves are unchanged. It can cost a few
+  percent of factorization time on trees with small wide parents, hence
+  opt-in. The parallel task-graph driver ignores it.
+
+Measurements and unfavourable results:
+`dev/research/wide-tree-contribution-memory.md`.
 
 ## [0.22.0] - 2026-10-26
 

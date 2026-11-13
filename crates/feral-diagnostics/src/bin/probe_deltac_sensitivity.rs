@@ -179,6 +179,7 @@ fn ldlt_params() -> NumericParams {
         warn_partial_singular: false,
         pattern_reused_hint: false,
         use_static_row_indices: true,
+        early_assembly: feral::numeric::factorize::EarlyAssembly::Off,
     }
 }
 

@@ -500,6 +500,12 @@ pub struct SymbolicFactorization {
     /// to enforce the per-front NPIV ≤ NASS − NVSCHUR stopping rule
     /// (F3.2b).
     pub is_schur_tail: Option<usize>,
+
+    /// `(parent, child position)` of every accumulator
+    /// `EarlyAssembly::WideParents` opens (`accumulate_from`), ascending by
+    /// parent: computed by the first factorization that asks for it
+    /// ([`Self::planned_accumulators`]), so other callers pay nothing.
+    pub(crate) planned_accumulators: std::sync::OnceLock<Vec<(usize, usize)>>,
 }
 
 impl SymbolicFactorization {
@@ -517,6 +523,41 @@ impl SymbolicFactorization {
         } else {
             &[]
         }
+    }
+
+    /// The accumulators `EarlyAssembly::WideParents` opens: `(parent, child
+    /// position)` pairs ascending by parent, as [`Self::accumulator_plan`]
+    /// computes them with `accumulate_from`; computed once per analysis.
+    pub(crate) fn planned_accumulators(&self) -> &[(usize, usize)] {
+        self.planned_accumulators.get_or_init(|| {
+            self.accumulator_plan(|p| {
+                accumulate_from(&self.supernodes, |s| self.static_rows(s).len(), p)
+            })
+        })
+    }
+
+    /// `(parent, child position)` for every parent `open_at` gives a
+    /// position, ascending by parent. A parent qualifies only if the
+    /// analysis has its static rows (an accumulator's layout) and its
+    /// children are ascending supernodes below it, so the sequential
+    /// drivers deposit them in `children` order.
+    pub(crate) fn accumulator_plan(
+        &self,
+        open_at: impl Fn(usize) -> Option<usize>,
+    ) -> Vec<(usize, usize)> {
+        let mut plan: Vec<(usize, usize)> = self
+            .supernodes
+            .iter()
+            .enumerate()
+            .filter(|(p, sn)| {
+                sn.children.windows(2).all(|w| w[0] < w[1])
+                    && sn.children.last().is_some_and(|&c| c < *p)
+                    && !self.static_rows(*p).is_empty()
+            })
+            .filter_map(|(p, _)| open_at(p).map(|at| (p, at)))
+            .collect();
+        plan.shrink_to_fit();
+        plan
     }
 }
 
@@ -894,7 +935,10 @@ pub struct WorkEstimate {
     /// over the postorder traversal with children freed as they are
     /// assembled. This is the multifrontal working set that sits on top
     /// of the resident factor and is invisible to a caller who only
-    /// measures the factor.
+    /// measures the factor. Blocks are counted square under the classic
+    /// scheme: without delayed pivots this bounds every driver and
+    /// `EarlyAssembly` scheme (the sequential drivers hold packed blocks,
+    /// about half as large).
     pub peak_contrib_bytes: usize,
     /// `factor_bytes + peak_contrib_bytes` — the headline number to
     /// compare against a memory budget.
@@ -1652,6 +1696,7 @@ fn symbolic_finish(prefix: SymbolicPrefix) -> SymbolicFactorization {
         resolved_amalgamation: snode_params.amalgamation_strategy,
         resolved_preprocess,
         is_schur_tail: None,
+        planned_accumulators: std::sync::OnceLock::new(),
     }
 }
 
@@ -1874,6 +1919,7 @@ pub fn symbolic_factorize_with_schur(
         resolved_amalgamation: effective_params.amalgamation_strategy,
         resolved_preprocess: OrderingPreprocess::None,
         is_schur_tail: Some(n_schur),
+        planned_accumulators: std::sync::OnceLock::new(),
     })
 }
 
@@ -2149,6 +2195,72 @@ fn split_straddling_supernode(
     Ok(())
 }
 
+/// Entries of the packed lower triangle of supernode `s`'s contribution
+/// block, given its front `order`.
+fn packed_block(supernodes: &[Supernode], order: usize, s: usize) -> usize {
+    let c = order.saturating_sub(supernodes[s].ncol());
+    c * (c + 1) / 2
+}
+
+/// The position in supernode `p`'s `children` at which the sequential
+/// numeric drivers open an accumulator for `p` under
+/// `EarlyAssembly::WideParents`: a buffer in `p`'s frontal layout, over its
+/// static rows (`order(p)²` entries), into which that child and the
+/// siblings held before it are extend-added, and every later sibling as
+/// it is deposited, instead of every block being held until `p` is
+/// assembled. `None` keeps the classic scheme. `order(s)` is supernode
+/// `s`'s front order without delays.
+///
+/// It is the first child `j` at which both hold, with `B(i)` the packed
+/// block of child `i` and `A = order(p)²`:
+///
+/// - `Σ_{i≤j} B(i) > A`: the blocks held for `p` would outgrow its
+///   accumulator, so from `j` on every moment holds less with it;
+/// - `Σ_{i>j} B(i) ≥ A`: the blocks still to come are at least the
+///   accumulator, so even the moment it opens (the accumulator, the
+///   blocks held so far and the idle frontal pool, all live) holds no
+///   more than the classic scheme holds when `p` is assembled (every
+///   block, and the frontal pool grown to `p`'s front).
+///
+/// The drivers keep everything else as the classic scheme has it: the
+/// frontal pool grows by one rule (`dense::matrix::fit_pooled_front`)
+/// whether or not a front was an accumulator, and an absorbed block is
+/// freed, not pooled. While `p`'s own front is factored the adopted
+/// accumulator, the idle pool and the kernel's outputs (`L`, the
+/// packed block: at most `A + O(order(p))` entries) are live together,
+/// which the classic assembly moment (`≥ 2A` of blocks) covers to within
+/// `O(order(p))` words. So the plan's peak live heap is the classic
+/// scheme's plus its bookkeeping (a few words per planned parent, cached
+/// on the analysis), a scratch map of one block's rows and those
+/// `O(order)` words; delayed pivots only enlarge the classic scheme's
+/// blocks. A parent whose children's blocks add up to less than `2A`
+/// stays classic. Time is not bounded by construction: the same
+/// extend-adds, one per child cell, plus `O(A)` to lay out the
+/// accumulator and a binary search per block row to place it
+/// (`numeric::contrib`).
+pub(crate) fn accumulate_from(
+    supernodes: &[Supernode],
+    order: impl Fn(usize) -> usize,
+    p: usize,
+) -> Option<usize> {
+    let n = order(p);
+    let accumulator = n.checked_mul(n)?;
+    if accumulator == 0 {
+        return None;
+    }
+    let children = &supernodes[p].children;
+    let block = |&c: &usize| packed_block(supernodes, order(c), c);
+    let total = children
+        .iter()
+        .map(block)
+        .fold(0usize, usize::saturating_add);
+    let mut held = 0usize;
+    children.iter().map(block).position(|b| {
+        held = held.saturating_add(b);
+        held > accumulator && total - held >= accumulator
+    })
+}
+
 /// Compute the peak contribution pool size needed during postorder traversal.
 ///
 /// At any point during traversal, the live contribution blocks are those
@@ -2385,6 +2497,41 @@ mod tests {
             assert_eq!(sym.perm[sym.perm_inv[i]], i);
             assert_eq!(sym.perm_inv[sym.perm[i]], i);
         }
+    }
+
+    /// A star of `leaves` one-column leaves, each passing a block of
+    /// order 4 (10 packed entries) to a root front of order 4 (an
+    /// accumulator of 16 entries). Front orders are passed explicitly.
+    fn star_tree(leaves: usize) -> (Vec<Supernode>, Vec<usize>) {
+        let node = |first_col, ncol, children| Supernode {
+            first_col,
+            ncol,
+            nrow: 0,
+            row_indices: Vec::new(),
+            children,
+            delayed_capacity: usize::MAX,
+        };
+        let mut tree: Vec<Supernode> = (0..leaves).map(|i| node(i, 1, Vec::new())).collect();
+        tree.push(node(leaves, 4, (0..leaves).collect()));
+        let mut order = vec![5; leaves];
+        order.push(4);
+        (tree, order)
+    }
+
+    /// The plan opens where the held blocks outgrow the accumulator and
+    /// the blocks still to come are at least the accumulator, and not at
+    /// all when no such child exists.
+    #[test]
+    fn accumulator_plan_on_a_star() {
+        let (five, order5) = star_tree(5);
+        // Held 10, 20 > 16 at child 1; still to come 30 >= 16. With the
+        // accumulator open, at most 36 entries are live (leaves 0 and 1
+        // held, the accumulator); the classic scheme holds all 50.
+        assert_eq!(accumulate_from(&five, |s| order5[s], 5), Some(1));
+
+        let (three, order3) = star_tree(3);
+        // Held 20 > 16 at child 1, but only 10 still to come: classic.
+        assert_eq!(accumulate_from(&three, |s| order3[s], 3), None);
     }
 
     #[test]

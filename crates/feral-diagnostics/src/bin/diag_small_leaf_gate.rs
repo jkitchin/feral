@@ -56,6 +56,7 @@ fn ldlt_params(gate: SmallLeafBatch, profiler: Arc<Mutex<Profiler>>) -> NumericP
         warn_partial_singular: false,
         pattern_reused_hint: false,
         use_static_row_indices: true,
+        early_assembly: feral::numeric::factorize::EarlyAssembly::Off,
     }
 }
 

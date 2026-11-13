@@ -482,6 +482,7 @@ fn solver_identity_scaling() -> Solver {
         warn_partial_singular: false,
         pattern_reused_hint: false,
         use_static_row_indices: true,
+        early_assembly: feral::numeric::factorize::EarlyAssembly::Off,
     };
     Solver::with_params(np, SupernodeParams::default())
 }

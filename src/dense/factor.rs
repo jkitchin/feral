@@ -291,9 +291,10 @@ pub mod phase_timing {
 /// **Phase C**: `contrib_pool` is a stack of recyclable `Vec<f64>`
 /// buffers that the multifrontal driver feeds back after `extend_add`
 /// has consumed a child's contribution block. The kernel pops one at
-/// extract time — every front, even one that leaves an empty block —
-/// and writes the trailing Schur block into it, in the layout the
-/// caller asked for. When the pool is empty the kernel falls back
+/// extract time and writes the trailing Schur block into it, in the
+/// layout the caller asked for. A front that leaves an empty block (a
+/// root) leaves the pool in place, so the factor never pins a recycled
+/// buffer behind an empty block. When the pool is empty the kernel falls back
 /// to a fresh allocation — `FrontalFactors` always owns its `contrib`
 /// Vec, the pool is purely a malloc-amortisation channel.
 #[derive(Default, Debug, Clone)]
@@ -1732,7 +1733,8 @@ pub(crate) enum ContribLayout {
 
 /// Extract the trailing `(n − offset)²` block of the `n × n` column-major
 /// `data` (lower triangle authoritative) in `layout`, into a buffer taken
-/// from `pool` (fresh if it is empty). Every output cell is written exactly once
+/// from `pool` (fresh if it is empty). An empty block takes nothing: it
+/// owns no allocation and the pool keeps its buffer. Every output cell is written exactly once
 /// (issue #56 Lever B), through the spare capacity as `MaybeUninit<f64>` before the length
 /// is grown, so `set_len` never exposes uninitialized elements (D6,
 /// dev/research/repo-review-2026-06-09.md). Never clones `data` wholesale:
@@ -1751,6 +1753,9 @@ fn extract_contrib(
         ContribLayout::Square => cdim * cdim,
         ContribLayout::PackedLower => cdim * (cdim + 1) / 2,
     };
+    if len == 0 {
+        return Vec::new();
+    }
     let mut contrib = pool.take().unwrap_or_default();
     contrib.clear();
     contrib.reserve(len);

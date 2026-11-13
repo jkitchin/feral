@@ -12,11 +12,61 @@
 //!   parallel entry point also uses for a tree with too little task
 //!   parallelism, and the Schur one) hold blocks this way; the dense
 //!   kernel writes them so (`ContribLayout::PackedLower`).
+//!
+//! **Accumulators** (sequential drivers only, opt-in
+//! `EarlyAssembly::WideParents`; `dev/research/wide-tree-contribution-memory.md`).
+//! Under a parent whose children's blocks add up to more than twice its
+//! own front — a wide star, thousands of children whose blocks land in
+//! one small front — holding every block until the parent is assembled
+//! costs all of them at once.
+//! At the child position `symbolic::accumulate_from` names, the parent
+//! gets an *accumulator*: its frontal over its static rows `[own |
+//! trailing]`, seeded with its original entries. That child and the
+//! siblings held before it are extend-added into it, and so is every later
+//! sibling as it is deposited. When the parent is assembled the
+//! accumulator becomes its frontal.
+//!
+//! **Memory.** Everything else stays as the classic scheme has it, so the
+//! peak live heap is the classic one plus bookkeeping
+//! (`symbolic::accumulate_from`): an absorbed block, or a remainder, is
+//! freed rather than pooled for the next kernel output (a pooled buffer
+//! only grows, and the parent's own block would keep its capacity
+//! alive), and once an adopted accumulator's front is factored it is
+//! freed and the idle frontal pool grows by the same rule
+//! (`dense::matrix::fit_pooled_front`) as if it had held that front.
+//! No returned factor keeps a contribution buffer (a root's empty block
+//! takes none from the pool), so the retained factor is the same.
+//!
+//! **Bit-identity.** Assembly is unchanged arithmetic in an unchanged
+//! order. Every frontal cell receives its original entry by assignment,
+//! then one `+=` per child that reaches it, children in `children`
+//! order, zeros skipped. The classic scheme extend-adds the children in
+//! that order after the original entries are scattered. An accumulator
+//! is seeded with the original entries when it opens, and the sequential
+//! drivers deposit children in ascending supernode order, which is
+//! `children` order (a parent whose children are not ascending gets no
+//! accumulator, and one whose children arrive out of order fails at its
+//! assembly). Columns a child
+//! *delays* stay behind in a packed remainder (the leading `n_delayed`
+//! columns of the packed block hold exactly the cells with a delayed
+//! index): a delayed column belongs to one child, and the original matrix
+//! (lower triangle, own columns only) has no entries in it, so those
+//! cells are zero until that one remainder adds into them — `0.0 + v`,
+//! as in the classic scheme. The parent's trailing rows are its static
+//! trailing rows whether or not pivots were delayed (a delayed column is
+//! a descendant's column, below the parent's first column, so it never
+//! joins the trailing set), which is what lets the accumulator be laid
+//! out before the delays are known.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::marker::PhantomData;
 
 use crate::dense::factor::{ContribLayout, FrontalFactors};
 use crate::error::FeralError;
+use crate::numeric::factorize::{EarlyAssembly, NumericParams};
+use crate::sparse::csc::CscMatrix;
+use crate::symbolic::SymbolicFactorization;
 
 /// Entries in the first `cols` columns of a packed lower triangle of
 /// order `dim` (`Σ_{k<cols} (dim − k)`); also the offset of column `cols`.
@@ -154,18 +204,28 @@ impl<L: BlockLayout> ContribBlock<L> {
     }
 }
 
-/// Add `block` into the lower triangle of the `dest_n × dest_n`
-/// column-major `dest`: block-local index `i` lands at position
-/// `dest_of(i)` (`usize::MAX`: not in `dest`, skipped). Zeros are
+impl ContribBlock<Packed> {
+    /// Drop the columns already assembled into an accumulator, keeping
+    /// the delayed ones.
+    fn keep_delayed_columns(&mut self) {
+        self.data.truncate(packed_len(self.dim, self.n_delayed));
+        self.data.shrink_to_fit();
+    }
+}
+
+/// Add the first `cols` columns of `block` into the lower triangle of the
+/// `dest_n × dest_n` column-major `dest`: block-local index `i` lands at
+/// position `dest_of(i)` (`usize::MAX`: not in `dest`, skipped). Zeros are
 /// skipped, as they always were.
 #[inline]
 pub(crate) fn extend_add<L: BlockLayout>(
     block: &ContribBlock<L>,
+    cols: usize,
     dest_of: impl Fn(usize) -> usize,
     dest: &mut [f64],
     dest_n: usize,
 ) {
-    for cj in 0..block.dim {
+    for cj in 0..cols {
         let dest_j = dest_of(cj);
         if dest_j == usize::MAX {
             continue;
@@ -185,9 +245,493 @@ pub(crate) fn extend_add<L: BlockLayout>(
     }
 }
 
+/// A parent's frontal under construction, over its static rows
+/// `[own | trailing]` (`SymbolicFactorization::static_rows`), in the
+/// `SymmetricMatrix` layout so it can become the frontal unchanged.
+#[derive(Debug)]
+pub(crate) struct Accumulator {
+    /// `n × n` column-major, lower triangle authoritative.
+    pub(crate) data: Vec<f64>,
+    /// `sub_sym_area` of the children absorbed whole (a child that left
+    /// a remainder keeps its own).
+    pub(crate) sub_sym_area: usize,
+}
+
+/// Position of global row `r` in a supernode's static rows `[own |
+/// sorted trailing]`; `None` for a row outside them (a delayed column).
+#[inline]
+fn static_position(
+    static_rows: &[usize],
+    first_col: usize,
+    own_ncol: usize,
+    r: usize,
+) -> Option<usize> {
+    if r < first_col {
+        return None;
+    }
+    if r < first_col + own_ncol {
+        return Some(r - first_col);
+    }
+    static_rows[own_ncol..]
+        .binary_search(&r)
+        .ok()
+        .map(|t| own_ncol + t)
+}
+
+/// Read-only inputs to assembling into an accumulator.
+pub(crate) struct AssemblyInputs<'a> {
+    pub(crate) symbolic: &'a SymbolicFactorization,
+    /// `P·A·Pᵀ`, lower triangle.
+    pub(crate) permuted: &'a CscMatrix,
+    /// Symmetric scaling in pivot order.
+    pub(crate) scaling: &'a [f64],
+}
+
+/// A parent with an accumulator in this factorization's scheme.
+#[derive(Debug)]
+struct Plan {
+    parent: usize,
+    /// Child position at which the accumulator opens.
+    open_at: usize,
+    /// `children.len()` of the parent.
+    n_children: usize,
+    /// Children deposited so far (a prefix of `children`).
+    deposited: usize,
+    /// Opened by the child at `open_at`.
+    accumulator: Option<Accumulator>,
+}
+
+/// The accumulators of one sequential factorization: which parents get
+/// one under its [`EarlyAssembly`] scheme, and how far each has got. Its
+/// bookkeeping is a few words per planned parent; nothing per child.
+#[derive(Debug)]
+pub(crate) struct Accumulators {
+    /// Ascending by parent.
+    plans: Vec<Plan>,
+    /// `(child, plan)`: the child each unfinished plan expects next, least
+    /// first. The sequential drivers deposit in ascending supernode order
+    /// and a planned parent's children ascend, so a deposit that belongs
+    /// to a plan is the least expected child.
+    expected: BinaryHeap<Reverse<(usize, usize)>>,
+    /// Scratch: the positions of an absorbed block's rows in its parent's
+    /// static rows.
+    map: Vec<usize>,
+}
+
+impl Accumulators {
+    /// The accumulators `params.early_assembly` opens on `symbolic`
+    /// ([`SymbolicFactorization::planned_accumulators`]). An accumulator
+    /// is laid out over its parent's static rows, so none opens when
+    /// `params.use_static_row_indices` is off.
+    pub(crate) fn new(symbolic: &SymbolicFactorization, params: &NumericParams) -> Self {
+        let always;
+        let pairs: &[(usize, usize)] = match params.early_assembly {
+            _ if !params.use_static_row_indices => &[],
+            EarlyAssembly::Off => &[],
+            EarlyAssembly::WideParents => symbolic.planned_accumulators(),
+            EarlyAssembly::Always => {
+                always = symbolic.accumulator_plan(|_| Some(0));
+                &always
+            }
+        };
+        let supernodes = &symbolic.supernodes;
+        // The bookkeeping lives for the whole factorization: exact
+        // capacity, nothing per child.
+        let mut plans = Vec::with_capacity(pairs.len());
+        let mut expected = Vec::with_capacity(pairs.len());
+        for &(parent, open_at) in pairs {
+            let children = &supernodes[parent].children;
+            if let Some(&first) = children.first() {
+                expected.push(Reverse((first, plans.len())));
+                plans.push(Plan {
+                    parent,
+                    open_at,
+                    n_children: children.len(),
+                    deposited: 0,
+                    accumulator: None,
+                });
+            }
+        }
+        Self {
+            plans,
+            expected: BinaryHeap::from(expected),
+            map: Vec::new(),
+        }
+    }
+
+    /// Record that `child` has been factored, its block (if any) in
+    /// `blocks[child]`. Under no plan, or before its parent's opening
+    /// child, the block stays there until the parent is assembled. At the
+    /// opening child the parent's accumulator opens and absorbs the
+    /// siblings held so far and the block; after it, the block is
+    /// absorbed at once. A block with delayed columns leaves its
+    /// remainder in `blocks`; a block absorbed whole is freed (not pooled:
+    /// a pooled buffer only grows, and a later block of the parent would
+    /// keep its capacity alive). A child deposited out of ascending order
+    /// counts as under no plan, and its parent's [`Self::take`] fails.
+    pub(crate) fn deposit(
+        &mut self,
+        blocks: &mut [Option<ContribBlock<Packed>>],
+        child: usize,
+        inputs: &AssemblyInputs<'_>,
+    ) -> Result<(), FeralError> {
+        let Some(&Reverse((expected, plan_index))) = self.expected.peek() else {
+            return Ok(());
+        };
+        if expected != child {
+            return Ok(());
+        }
+        self.expected.pop();
+        let plan = &mut self.plans[plan_index];
+        let parent = plan.parent;
+        let children = &inputs.symbolic.supernodes[parent].children;
+        let position = plan.deposited;
+        plan.deposited += 1;
+        if let Some(&next) = children.get(plan.deposited) {
+            self.expected.push(Reverse((next, plan_index)));
+        }
+        if position < plan.open_at {
+            return Ok(());
+        }
+        let first = if position == plan.open_at {
+            0
+        } else {
+            position
+        };
+        let accumulator = plan
+            .accumulator
+            .get_or_insert_with(|| open_accumulator(parent, inputs));
+        for &c in &children[first..=position] {
+            if let Some(held) = blocks[c].take() {
+                absorb(parent, c, held, inputs, &mut self.map, accumulator, blocks)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Supernode `p`'s accumulator, if its scheme opened one, once all
+    /// its children are deposited. The remainders its children left are
+    /// in `blocks`, where `p`'s assembly finds them as it finds held
+    /// blocks. A child not yet deposited is a driver error: assembling
+    /// without it would drop its block.
+    pub(crate) fn take(&mut self, p: usize) -> Result<Option<Accumulator>, FeralError> {
+        let Ok(plan) = self.plans.binary_search_by_key(&p, |pl| pl.parent) else {
+            return Ok(None);
+        };
+        let plan = &mut self.plans[plan];
+        if plan.deposited < plan.n_children {
+            return Err(FeralError::InvalidInput(format!(
+                "early assembly: supernode {p} assembled after {} of its {} children",
+                plan.deposited, plan.n_children
+            )));
+        }
+        Ok(plan.accumulator.take())
+    }
+}
+
+/// Extend-add child `c`'s `block` into `p`'s accumulator `acc`. A block
+/// with delayed columns stays behind in `blocks` as its remainder;
+/// otherwise it is freed.
+fn absorb(
+    p: usize,
+    c: usize,
+    mut block: ContribBlock<Packed>,
+    inputs: &AssemblyInputs<'_>,
+    map: &mut Vec<usize>,
+    acc: &mut Accumulator,
+    blocks: &mut [Option<ContribBlock<Packed>>],
+) -> Result<(), FeralError> {
+    let sn = &inputs.symbolic.supernodes[p];
+    let rows = inputs.symbolic.static_rows(p);
+    map.clear();
+    map.extend(
+        block
+            .row_indices
+            .iter()
+            .map(|&r| static_position(rows, sn.first_col, sn.ncol(), r).unwrap_or(usize::MAX)),
+    );
+    if map[block.n_delayed..].contains(&usize::MAX) {
+        return Err(FeralError::InvalidInput(format!(
+            "early assembly: a trailing row of supernode {c} is not a static row of its parent {p}"
+        )));
+    }
+    extend_add(&block, block.dim, |i| map[i], &mut acc.data, rows.len());
+    if block.n_delayed == 0 {
+        acc.sub_sym_area = acc.sub_sym_area.saturating_add(block.sub_sym_area);
+        return Ok(());
+    }
+    block.keep_delayed_columns();
+    blocks[c] = Some(block);
+    Ok(())
+}
+
+/// A fresh accumulator for supernode `p`, holding its scaled original
+/// entries — assigned exactly as a classic front's step 1 assigns them.
+fn open_accumulator(p: usize, inputs: &AssemblyInputs<'_>) -> Accumulator {
+    let sn = &inputs.symbolic.supernodes[p];
+    let rows = inputs.symbolic.static_rows(p);
+    let n = rows.len();
+    let own_ncol = sn.ncol();
+    let (permuted, scaling) = (inputs.permuted, inputs.scaling);
+    let mut data = vec![0.0f64; n * n];
+    for k in 0..own_ncol {
+        let gj = sn.first_col + k;
+        let s_j = scaling[gj];
+        for idx in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
+            let gi = permuted.row_idx[idx];
+            if let Some(i) = static_position(rows, sn.first_col, own_ncol, gi) {
+                let val = permuted.values[idx] * scaling[gi] * s_j;
+                let (row, col) = if i >= k { (i, k) } else { (k, i) };
+                data[col * n + row] = val;
+            }
+        }
+    }
+    Accumulator {
+        data,
+        sub_sym_area: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::{symbolic_factorize, SupernodeParams};
+
+    /// A star of two-variable leaves (coupled to each other, one to each
+    /// of two shared variables), analysed without amalgamation. Returns
+    /// the analysis and the supernode with the most children (at least
+    /// as many as [`VALUES`]).
+    fn star() -> (SymbolicFactorization, usize) {
+        let leaves = 4;
+        let n = 2 + 2 * leaves;
+        let (mut r, mut c, mut v) = (vec![0, 1], vec![0, 1], vec![1.0, 1.0]);
+        for leaf in 0..leaves {
+            let (a, b) = (2 + 2 * leaf, 3 + 2 * leaf);
+            r.extend([a, b, b, a, b]);
+            c.extend([a, b, a, 0, 1]);
+            v.extend([4.0, 4.0, 0.5, 0.5, 0.5]);
+        }
+        let a = CscMatrix::from_triplets(n, &r, &c, &v).unwrap();
+        let params = SupernodeParams {
+            nemin: 1,
+            ..SupernodeParams::default()
+        };
+        let symbolic = symbolic_factorize(&a, &params).unwrap();
+        let root = (0..symbolic.supernodes.len())
+            .max_by_key(|&p| symbolic.supernodes[p].children.len())
+            .unwrap();
+        assert!(symbolic.supernodes[root].children.len() >= VALUES.len());
+        (symbolic, root)
+    }
+
+    /// A packed block over `rows`, the first `n_delayed` delayed, every
+    /// cell `value`.
+    fn packed(rows: Vec<usize>, n_delayed: usize, value: f64) -> ContribBlock<Packed> {
+        let dim = rows.len();
+        ContribBlock {
+            row_indices: rows,
+            data: vec![value; packed_len(dim, dim)],
+            dim,
+            n_delayed,
+            sub_sym_area: 0,
+            chain_excess: 0,
+            layout: PhantomData,
+        }
+    }
+
+    /// Every parent accumulates (`EarlyAssembly::Always`).
+    fn always() -> NumericParams {
+        NumericParams {
+            early_assembly: EarlyAssembly::Always,
+            ..NumericParams::default()
+        }
+    }
+
+    /// The first children's values. Absorbing the third before the
+    /// second changes the sum even when the first goes first:
+    /// `(1e16 + 1) − 1e16 = 0` but `(1e16 − 1e16) + 1 = 1`.
+    const VALUES: [f64; 3] = [1e16, 1.0, -1e16];
+
+    /// Inputs to assembling into the star's root (no original entries).
+    struct Fixture {
+        symbolic: SymbolicFactorization,
+        root: usize,
+        permuted: CscMatrix,
+        scaling: Vec<f64>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let (symbolic, root) = star();
+            let permuted = CscMatrix::from_triplets(symbolic.n, &[], &[], &[]).unwrap();
+            let scaling = vec![1.0; symbolic.n];
+            Self {
+                symbolic,
+                root,
+                permuted,
+                scaling,
+            }
+        }
+
+        fn inputs(&self) -> AssemblyInputs<'_> {
+            AssemblyInputs {
+                symbolic: &self.symbolic,
+                permuted: &self.permuted,
+                scaling: &self.scaling,
+            }
+        }
+
+        fn child(&self, k: usize) -> usize {
+            self.symbolic.supernodes[self.root].children[k]
+        }
+
+        fn n_children(&self) -> usize {
+            self.symbolic.supernodes[self.root].children.len()
+        }
+
+        /// A block over the root's static rows, every cell `value`.
+        fn block(&self, value: f64) -> ContribBlock<Packed> {
+            packed(self.symbolic.static_rows(self.root).to_vec(), 0, value)
+        }
+
+        /// [`Self::block`] led by child `k`'s first column, delayed.
+        fn delaying_block(&self, k: usize, value: f64) -> ContribBlock<Packed> {
+            let mut rows = vec![self.symbolic.supernodes[self.child(k)].first_col];
+            rows.extend_from_slice(self.symbolic.static_rows(self.root));
+            packed(rows, 1, value)
+        }
+
+        fn blocks(&self) -> Vec<Option<ContribBlock<Packed>>> {
+            (0..self.symbolic.supernodes.len()).map(|_| None).collect()
+        }
+
+        /// Deposit supernodes `0..=last` in ascending order, as the
+        /// sequential drivers do: `make(k)` gives the root's child `k`'s
+        /// block, every other supernode leaves none.
+        fn deposit_through(
+            &self,
+            accumulators: &mut Accumulators,
+            blocks: &mut [Option<ContribBlock<Packed>>],
+            last: usize,
+            make: impl Fn(usize) -> Option<ContribBlock<Packed>>,
+        ) -> Result<(), FeralError> {
+            let children = &self.symbolic.supernodes[self.root].children;
+            for s in 0..=last {
+                blocks[s] = children.iter().position(|&c| c == s).and_then(&make);
+                accumulators.deposit(blocks, s, &self.inputs())?;
+            }
+            Ok(())
+        }
+
+        /// Deposit every supernode below the root, `make(k)` giving the
+        /// root's child `k`'s block, then take the root's accumulator.
+        fn assemble(
+            &self,
+            make: impl Fn(usize) -> Option<ContribBlock<Packed>>,
+        ) -> (Accumulator, Vec<Option<ContribBlock<Packed>>>) {
+            let mut accumulators = Accumulators::new(&self.symbolic, &always());
+            let mut blocks = self.blocks();
+            self.deposit_through(&mut accumulators, &mut blocks, self.root - 1, make)
+                .unwrap();
+            let acc = accumulators.take(self.root).unwrap().unwrap();
+            (acc, blocks)
+        }
+    }
+
+    /// The children enter the accumulator in children order: every cell
+    /// is the in-order sum of [`VALUES`], bit for bit, which a different
+    /// order would not give.
+    #[test]
+    fn children_accumulate_in_children_order() {
+        let fixture = Fixture::new();
+        let (acc, _) = fixture.assemble(|k| VALUES.get(k).map(|&v| fixture.block(v)));
+        let in_order = VALUES.iter().fold(0.0, |s, &v| s + v);
+        let swapped = (VALUES[0] + VALUES[2]) + VALUES[1];
+        assert_ne!(in_order.to_bits(), swapped.to_bits());
+        let n = fixture.symbolic.static_rows(fixture.root).len();
+        for j in 0..n {
+            for i in j..n {
+                assert_eq!(acc.data[j * n + i].to_bits(), in_order.to_bits());
+            }
+        }
+    }
+
+    /// Children deposited out of children order make the parent's
+    /// assembly an error, not a silently reordered sum.
+    #[test]
+    fn a_deposit_out_of_children_order_fails() {
+        let fixture = Fixture::new();
+        let mut accumulators = Accumulators::new(&fixture.symbolic, &always());
+        let mut blocks = fixture.blocks();
+        for k in (0..fixture.n_children()).rev() {
+            blocks[fixture.child(k)] = Some(fixture.block(1.0));
+            accumulators
+                .deposit(&mut blocks, fixture.child(k), &fixture.inputs())
+                .unwrap();
+        }
+        assert!(matches!(
+            accumulators.take(fixture.root),
+            Err(FeralError::InvalidInput(_))
+        ));
+    }
+
+    /// The accumulator carries the `sub_sym_area` of the children it
+    /// absorbed whole (the issue-#221 chain backstop reads it); a child
+    /// that delayed keeps its own on its remainder, which holds its one
+    /// delayed column.
+    #[test]
+    fn accumulator_sums_the_area_of_children_absorbed_whole() {
+        let fixture = Fixture::new();
+        let areas = [3, 5, 7];
+        let (acc, blocks) = fixture.assemble(|k| {
+            let mut b = if k == 1 {
+                fixture.delaying_block(k, 1.0)
+            } else {
+                fixture.block(1.0)
+            };
+            b.sub_sym_area = areas.get(k).copied()?;
+            Some(b)
+        });
+        assert_eq!(acc.sub_sym_area, areas[0] + areas[2]);
+        let remainder = blocks[fixture.child(1)].as_ref().unwrap();
+        assert_eq!(remainder.sub_sym_area, areas[1]);
+        assert_eq!(remainder.data.len(), packed_len(remainder.dim, 1));
+    }
+
+    /// Taking an accumulator before every child is deposited is an error,
+    /// not a silently dropped block.
+    #[test]
+    fn take_before_every_child_is_deposited_fails() {
+        let fixture = Fixture::new();
+        let mut accumulators = Accumulators::new(&fixture.symbolic, &always());
+        let mut blocks = fixture.blocks();
+        fixture
+            .deposit_through(&mut accumulators, &mut blocks, fixture.child(0), |_| {
+                Some(fixture.block(1.0))
+            })
+            .unwrap();
+        assert!(matches!(
+            accumulators.take(fixture.root),
+            Err(FeralError::InvalidInput(_))
+        ));
+    }
+
+    /// A block whose trailing row is not one of the parent's static rows
+    /// cannot be absorbed: an error.
+    #[test]
+    fn a_trailing_row_outside_the_parent_fails() {
+        let fixture = Fixture::new();
+        let mut accumulators = Accumulators::new(&fixture.symbolic, &always());
+        let mut blocks = fixture.blocks();
+        let bad = || {
+            let mut bad = fixture.block(1.0);
+            bad.row_indices[0] = fixture.symbolic.supernodes[fixture.child(0)].first_col;
+            Some(bad)
+        };
+        let deposited =
+            fixture.deposit_through(&mut accumulators, &mut blocks, fixture.child(0), |_| bad());
+        assert!(matches!(deposited, Err(FeralError::InvalidInput(_))));
+    }
 
     /// A square and a packed block with the same values extend-add the
     /// same cells.
@@ -196,30 +740,31 @@ mod tests {
         let dim = 4;
         let value = |i: usize, j: usize| (1 + i * dim + j) as f64;
         let mut square = vec![0.0; dim * dim];
-        let mut packed = Vec::new();
+        let mut packed_data = Vec::new();
         for j in 0..dim {
             for i in j..dim {
                 square[j * dim + i] = value(i, j);
-                packed.push(value(i, j));
+                packed_data.push(value(i, j));
             }
         }
-        fn block<L: BlockLayout>(dim: usize, data: Vec<f64>) -> ContribBlock<L> {
-            ContribBlock {
-                row_indices: (0..dim).collect(),
-                data,
-                dim,
-                n_delayed: 0,
-                sub_sym_area: 0,
-                chain_excess: 0,
-                layout: PhantomData,
-            }
-        }
-        let sq: ContribBlock<Square> = block(dim, square);
-        let pk: ContribBlock<Packed> = block(dim, packed);
+        let rows: Vec<usize> = (0..dim).collect();
+        let sq = ContribBlock::<Square> {
+            row_indices: rows.clone(),
+            data: square,
+            dim,
+            n_delayed: 0,
+            sub_sym_area: 0,
+            chain_excess: 0,
+            layout: PhantomData,
+        };
+        let pk = ContribBlock::<Packed> {
+            data: packed_data,
+            ..packed(rows, 0, 0.0)
+        };
         let dest_of = |i: usize| [2, usize::MAX, 0, 4][i];
         let (mut a, mut b) = (vec![0.0; 25], vec![0.0; 25]);
-        extend_add(&sq, dest_of, &mut a, 5);
-        extend_add(&pk, dest_of, &mut b, 5);
+        extend_add(&sq, dim, dest_of, &mut a, 5);
+        extend_add(&pk, dim, dest_of, &mut b, 5);
         assert_eq!(a, b);
         assert!(a.iter().any(|&x| x != 0.0));
     }

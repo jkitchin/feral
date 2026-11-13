@@ -881,6 +881,14 @@ impl Solver {
     /// where threads genuinely cannot be spawned is safe but wasted:
     /// pool construction fails and every dispatch falls back to the
     /// sequential driver.
+    ///
+    /// Memory: the parallel task-graph driver holds every contribution
+    /// block square and ignores `NumericParams::early_assembly`, so
+    /// `EarlyAssembly::WideParents` takes effect only where the sequential
+    /// driver runs: with `false`, or when the tree has too little task
+    /// parallelism and the parallel entry point hands it to the
+    /// sequential driver. A wide tree whose leaves are heavy enough to be
+    /// tasks of their own keeps the classic memory profile under `true`.
     pub fn with_parallel(mut self, parallel: bool) -> Self {
         self.use_parallel = parallel;
         self
@@ -3209,6 +3217,7 @@ mod tests {
             warn_partial_singular: false,
             pattern_reused_hint: false,
             use_static_row_indices: true,
+            early_assembly: crate::numeric::factorize::EarlyAssembly::Off,
         };
         Solver::with_params(np, SupernodeParams::default())
     }

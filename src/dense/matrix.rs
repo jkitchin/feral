@@ -8,6 +8,19 @@ pub struct SymmetricMatrix {
     pub data: Vec<f64>,
 }
 
+/// Size the pooled frontal buffer `buf` for an `n × n` front: the one
+/// growth rule of the multifrontal drivers' frontal pool, whichever way a
+/// front is assembled, so its capacity history depends only on the
+/// sequence of fronts. `resize` grows the tail with zeros (amortised:
+/// at least double the capacity when it must grow) or truncates. It does
+/// NOT re-zero entries `[0, min(old_len, n²))`, which is where the
+/// bandwidth saving of [`SymmetricMatrix::from_pooled_buf`] comes from
+/// in steady state (capacity already reached after the first few large
+/// supernodes; later calls only re-zero the lower triangle).
+pub(crate) fn fit_pooled_front(buf: &mut Vec<f64>, n: usize) {
+    buf.resize(n * n, 0.0);
+}
+
 impl SymmetricMatrix {
     /// Create a new n×n symmetric matrix initialized to zero.
     pub fn zeros(n: usize) -> Self {
@@ -37,14 +50,7 @@ impl SymmetricMatrix {
     /// `extend_add` normalises to lower (`numeric/factorize.rs:2371`),
     /// `symv` and `validate` iterate only `i >= j`.
     pub fn from_pooled_buf(n: usize, mut buf: Vec<f64>) -> Self {
-        let needed = n * n;
-        // `resize` grows the tail with zeros or truncates. It does
-        // NOT re-zero entries `[0, min(old_len, needed))`, which is
-        // where the bandwidth saving comes from in steady state
-        // (capacity already reached after the first few large
-        // supernodes; subsequent calls only re-zero the lower
-        // triangle).
-        buf.resize(needed, 0.0);
+        fit_pooled_front(&mut buf, n);
         // Zero only the lower triangle of the n×n column-major layout:
         // for each column j, positions `[j*n + j, j*n + n)`.
         for j in 0..n {
