@@ -274,8 +274,7 @@ impl CscMatrix {
         // Count entries per column in the full pattern
         let mut col_counts = vec![0usize; self.n];
         for j in 0..self.n {
-            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
-                let i = self.row_idx[k];
+            for &i in &self.row_idx[self.col_ptr[j]..self.col_ptr[j + 1]] {
                 col_counts[j] += 1; // lower triangle entry in column j
                 if i != j {
                     col_counts[i] += 1; // transpose entry in column i
@@ -294,8 +293,7 @@ impl CscMatrix {
         // Place entries
         let mut offsets = pat_col_ptr[..self.n].to_vec();
         for j in 0..self.n {
-            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
-                let i = self.row_idx[k];
+            for &i in &self.row_idx[self.col_ptr[j]..self.col_ptr[j + 1]] {
                 // (i, j) in lower triangle
                 pat_row_idx[offsets[j]] = i;
                 offsets[j] += 1;

@@ -1,110 +1,52 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-12T23:22:05Z
+Generated: 2026-11-13T18:31:50Z
 
 ## Latest Session
-File: dev/sessions/2026-11-12-01.md
+File: dev/sessions/2026-11-13-01.md
 ```
-# Session 2026-11-12-01
+# Session 2026-11-13-01
 
 ## Unfavourable results (read first)
 
-Timings are from a shared machine (load average 16–80 from other work).
-
-- **The first `WideParents` (then `Planned`) version broke its own memory
-  claim** (review finding B1): adopting the exact-size accumulator as the
-  frontal pool and recycling absorbed blocks left larger pooled buffers
-  than `Off` — a hand-built tree 1.117× `Off`, 19 of 2,000 random trees
-  more than 2% above, retained factor larger on 1,126. Fixed (buffers
-  follow the classic history; an empty block takes no pooled buffer).
-- **`WideParents` is 2.6–4.1% slower than `Off`** on corpus matrices
-  with one small planned front under 1,000–2,600 tiny children (21 runs
-  × 9 rounds, before the buffer fixes: CRESC132 1.041×, VESUVIO_0021
-  1.031×, sawpath 1.026×). After the fixes its geomean against `Off` on
-  the 22 corpus matrices ≥ 0.5 ms rose 1.004 → 1.019 (multistar:8
-  1.093×, saddle_rankdef_100 1.053×, multistar:64 1.050×); freed blocks
-  are no longer recycled. Opt-in.
-- **`WideParents` adds 96 B of peak on MUONSINE_0019/0027** over `Off`
-  (+64 B over 0.22.0; plan bookkeeping, the plan saves nothing). On
-  generated trees it is up to 7,208 B above `Off` (within the test's
-  bookkeeping allowance); review harness worst +2,168 B.
-- **The empty-block rule reaches the parallel driver** (shared kernel
-  extract), against the rescope's "parallel driver as in d3f7eb6": its
-  digests and 1-thread peaks are unchanged, only the retained factor
-  shrinks.
-- **POUNCE end to end under `Off`: live heap 805.8 → 806.2 MiB** against
-  the previous round (the pooled buffer now stays in the solver's
-  workspace instead of the replaced factor).
-- **Default (`Off`) vs the parent:** MUONSINE 0.997× in a focused run,
-  1.02× in an earlier 6 × 401-run comparison; a 16-leaf star 1.038× with
-  range 0.85–1.30.
-- **Parallel, 4 threads:** peaks depend on scheduling; grid3:32 reached
-  188.6 MB against the parent's 175.2 in one corpus round; 20 runs each
-  give the same distribution (parent 175–193, this 175–190 MB).
-- **The parent-digest pin covers aarch64 only**; it is ignored on x86_64
-  (CI), since the digests need an x86 machine.
-- **`Always`** (hidden, tests only) raises the peak 1.6–2.0× on 3D grids
-  and 5.5× on nuffield2.
+- **Bench factor times are 2–3× the previous checkpoint's** (spd_200
+  409 → 1253 µs, kkt_100_30 207 → 475 µs). That checkpoint ran on
+  Apple Silicon; this one ran in a shared x86_64 cloud container, and
+  no source change in this session touches the dense kernel paths
+  timed here (loop rewrites only). Treat this as a machine difference,
+  not a regression; it was not re-measured on the earlier machine.
 
 ## Goal
-Bound the transient contribution-block memory of the sequential
-multifrontal driver on wide elimination trees, bit-identically, with
-the parallel task-graph driver as in `d3f7eb6`, every default justified
-on general grounds and FERAL's own corpus as evidence; then fix the
-review of the staged change (`Planned` peak above `Off`).
+Review PR #231 (packed contribution blocks, opt-in
+`EarlyAssembly::WideParents`), merge it, and fix the CI clippy
+failure under Rust 1.100.
 
 ## Accomplished
-- Change 1, packed blocks in the sequential and Schur drivers
-```
+- Reviewed PR #231 and posted 8 inline findings. The author fixed all
+  of them in 14d9bc6, and the PR was merged as 675a468. Verified on
+  x86_64: `golden_digests` on d3f7eb6 and on the PR give the same 16
+  digests, equal to the aarch64-pinned `PARENT_GOLDEN` (so the
+  parent-release test now runs on x86 too); `cargo test --release` on
+  14d9bc6 gave 1,030 passed / 0 failed; wide_tree_memory 3/3.
+- CI's `dtolnay/rust-toolchain@stable` is now 1.100.0, whose clippy
+  flags `needless_range_loop`: main (d3f7eb6) fails
+  `cargo clippy -- -D warnings` in feral-metis. Rewrote 46 index
+  loops as slice iterations across the workspace (same reads, same
+  order). Rust 1.100: fmt and clippy (workspace + feral-diagnostics)
+  clean; cargo test, examples, feral-diagnostics and ordering-crate
+  tests: 1,288 passed, 0 failed, 26 ignored.
 
-## Git Status
+## Benchmark Results
 ```
-d3f7eb6 Merge pull request #230 from jkitchin/ci/windows-wheel-interpreters
-31b64e9 ci(wheels): manual runs can build a given tag and publish it to PyPI
-a9ee74c ci(wheels): install all four Python interpreters before maturin
-4bfd444 Merge pull request #229 from jkitchin/release/0.22.0
-b207999 release: feral 0.22.0
-```
-
-## Test Status
-```
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
-test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::solve::tests::cb_coarsening_threshold_is_arithmetically_inert ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test numeric::solver::tests::warm_refactor_recycles_output_buffers_issue_153 ... ok
-test dense::rook::tests::rook_rescue_matches_uncached_walk ... ok
-test dense::factor::row_offdiag_tests::rook_row_argmax_matches_bk_row_scans ... ok
-test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test dense::factor::contrib_layout_tests::packed_contribution_is_the_square_lower_triangle ... ok
-test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
-test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
-
-test result: ok. 477 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.76s
-
-```
-
-## Benchmark
-```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-12-01.md)
-
 name                n   factor(μs)    solve(μs)        inertia
---------------------------------------------------------------
-spd_10             10           37            9     (10, 0, 0)
-spd_50             50           20            1     (50, 0, 0)
-spd_100           100           79            6    (100, 0, 0)
-spd_200           200          409           16    (200, 0, 0)
-kkt_10_3           13            3            0     (10, 3, 0)
-kkt_30_10          40           20            1    (30, 10, 0)
-kkt_50_15          65           50            2    (50, 15, 0)
-kkt_100_30        130          207            7   (100, 30, 0)
-
+spd_10             10           18            3     (10, 0, 0)
+spd_50             50           62            4     (50, 0, 0)
+spd_100           100          271            8    (100, 0, 0)
+spd_200           200         1253           26    (200, 0, 0)
+kkt_10_3           13            8            1     (10, 3, 0)
+kkt_30_10          40           45            2    (30, 10, 0)
+kkt_50_15          65          101            3    (50, 15, 0)
+kkt_100_30        130          475           11   (100, 30, 0)
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
@@ -113,35 +55,67 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical inertia, residual and validation lines to the parent
-(`d3f7eb6`); factor times are single runs of microsecond problems.
+```
+
+## Git Status
+```
+39ea596 Fix clippy needless_range_loop under Rust 1.100
+675a468 Merge pull request #231 from firstprinciples/wide-parent-contrib-memory
+14d9bc6 Address review: per-factorization plan, out-of-order fallback, gated Always
+0d29668 Add Solver::with_early_assembly
+34494d5 Opt-in accumulators for wide parents (sequential drivers)
+```
+
+## Test Status
+```
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
+test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
+
+test result: ok. 474 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.98s
+
+```
+
+## Benchmark
+```
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-13-01.md)
+
+name                n   factor(μs)    solve(μs)        inertia
+spd_10             10           18            3     (10, 0, 0)
+spd_50             50           62            4     (50, 0, 0)
+spd_100           100          271            8    (100, 0, 0)
+spd_200           200         1253           26    (200, 0, 0)
+kkt_10_3           13            8            1     (10, 3, 0)
+kkt_30_10          40           45            2    (30, 10, 0)
+kkt_50_15          65          101            3    (50, 15, 0)
+kkt_100_30        130          475           11   (100, 30, 0)
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+Inertia, residual and validation lines are identical to 2026-11-12-01.
 
 ```
 
 ## Recent Decisions
-there the parent's frontal is an accumulator into which each child is
-extend-added on deposit, in `children` order. Buffers follow the classic
-scheme's history: absorbed blocks and remainders are freed, not pooled;
-an adopted accumulator is freed after its front is factored and the
-frontal pool grows by the one rule (`fit_pooled_front`); and an empty
-block (a root) takes no pooled buffer, in every driver, so no returned
-factor holds contribution storage. `WorkEstimate::peak_contrib_bytes`
-stays the classic square model.
-
-**Why.** Holding every child's block until the parent is assembled
-makes a wide parent's assembly cost the sum of its children's blocks.
-Packing halves that at no measurable cost. Under `WideParents` the
-peak live heap is `Off`'s plus bookkeeping (a few words per planned
-parent, one block's row map, `O(order)` words while a planned front is
-factored) and the retained factor is the same. The first version
-claimed this by construction but recycled buffers differently and broke
-it (review finding B1; `dev/tried-and-rejected.md`). It is not the
-default because its bookkeeping costs 2.6–4.1% of factorization time on
-matrices with one small planned front under thousands of tiny children
-(CRESC132, VESUVIO, sawpath). The parallel driver is left out:
-out-of-order deposits need per-parent synchronisation and a backlog
-limit, a separate change. The empty-block rule does reach the parallel
-driver, because the kernel's extract is shared; it only removes a
 buffer from the returned factor. Factors are bit-identical under every
 scheme and driver.
 
@@ -149,6 +123,29 @@ scheme and driver.
 `tests/wide_tree_memory.rs` (generated trees, `WideParents` peak at most
 `Off`'s plus a bookkeeping allowance, retained factor no larger, no
 factor owns contribution storage; fails before the fix).
+
+## 2026-11-13 — `WideParents` review follow-ups
+
+**Decision.** The accumulator plan is derived by each factorization that
+uses it (`Accumulators::new`, from `SymbolicFactorization::
+wide_parent_plan`), not cached on the analysis: no private field on the
+public struct, and no stale plan after a caller edits `supernodes`. A
+deposit out of ascending order abandons the plans it passes over instead
+of failing at the parent (debug builds assert): the accumulator keeps the
+prefix of children it absorbed, the rest are assembled whole after it in
+children order, so factors are unchanged. `EarlyAssembly::Always` sits
+behind the internal `__early-assembly-always` feature, which the crate's
+tests enable through a self dev-dependency. The frontal pool's growth rule
+is explicit (`grow_pooled_front`: capacity `max(2·cap, n²)`), and an
+adopted accumulator grows the idle pool's capacity without writing it.
+
+**Why.** Maintainer review of PR #231. Deriving the plan costs one pass
+over supernodes and children (about 6 µs on the 1,501-supernode star).
+
+**Evidence.** `tests/wide_tree_memory.rs` (now `harness = false`)
+unchanged figures: star `Off` 65.73 MiB, `WideParents` 12.12 MiB; 192
+matrices, at most 7,208 B above `Off`. `tests/early_assembly_parity.rs`
+digests unchanged; the parent-release pin now runs on every target.
 
 ## Recent Tried-and-Rejected
   (`dense::matrix::fit_pooled_front`).
@@ -348,5 +345,4 @@ tests/threshold_consistency.rs
 tests/tiny_fast_path.rs
 tests/wide_star/mod.rs
 tests/wide_tree_memory.rs
-
-(truncated from      351 lines to 350 line budget)
+```

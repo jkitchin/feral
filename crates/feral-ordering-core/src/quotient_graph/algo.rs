@@ -1715,8 +1715,8 @@ mod tests {
         assert_eq!(ws.nel, 5);
         // Every var was pivoted exactly once ⇒ nv[i] > 0 everywhere
         // (the pivot restores nv to +nvpiv).
-        for i in 0..5 {
-            assert!(ws.nv[i] >= 0, "nv[{}] = {}", i, ws.nv[i]);
+        for (i, &nv) in ws.nv[..5].iter().enumerate() {
+            assert!(nv >= 0, "nv[{}] = {}", i, nv);
         }
     }
 

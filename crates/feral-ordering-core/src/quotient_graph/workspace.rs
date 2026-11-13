@@ -343,8 +343,8 @@ mod tests {
             assert_eq!(ws.w[i], 0);
             assert_eq!(ws.degree[i], 0);
         }
-        for d in 0..4 {
-            assert_eq!(ws.head[d], NONE, "degree {d} bucket empty");
+        for (d, &head) in ws.head[..4].iter().enumerate() {
+            assert_eq!(head, NONE, "degree {d} bucket empty");
         }
     }
 

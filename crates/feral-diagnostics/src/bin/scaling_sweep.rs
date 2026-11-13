@@ -214,8 +214,8 @@ fn csv_row(family: &str, name: &str, csc: &CscMatrix, scaling: &str, m: &Metrics
         m.sym_total_us,
         m.sym_overhead_pct_milli as f64 / 1000.0,
     );
-    for s in 0..17 {
-        row.push_str(&format!(",{}", m.sym_stage_us[s]));
+    for us in &m.sym_stage_us {
+        row.push_str(&format!(",{us}"));
     }
     row.push_str(&format!(
         ",{},{},{},{},{},{},{},{},{},{},{},{},{}",

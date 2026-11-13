@@ -90,8 +90,7 @@ pub(super) fn triangularize(a: &SparseColMatrix) -> Triangularization {
     {
         let mut fill = row_ptr.clone();
         for j in 0..m {
-            for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let i = a.row_idx[idx];
+            for &i in &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]] {
                 row_cols[fill[i]] = j;
                 fill[i] += 1;
             }
@@ -140,8 +139,7 @@ pub(super) fn triangularize(a: &SparseColMatrix) -> Triangularization {
             // Column j died: every live row holding an entry in column j loses
             // one. (Only dead rows remain, but rows can also be live-but-later
             // if `col_nnz` was stale; the guard keeps the counts exact.)
-            for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let ii = a.row_idx[idx];
+            for &ii in &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]] {
                 if !row_dead[ii] {
                     row_nnz[ii] -= 1;
                     if row_nnz[ii] == 1 {
@@ -164,8 +162,7 @@ pub(super) fn triangularize(a: &SparseColMatrix) -> Triangularization {
             row_dead[i] = true;
             col_dead[j] = true;
             back.push(j);
-            for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
-                let ii = a.row_idx[idx];
+            for &ii in &a.row_idx[a.col_ptr[j]..a.col_ptr[j + 1]] {
                 if !row_dead[ii] {
                     row_nnz[ii] -= 1;
                     if row_nnz[ii] == 1 {

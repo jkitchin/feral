@@ -246,8 +246,7 @@ fn reference_static_rows(sym: &SymbolicFactorization) -> Vec<Vec<usize>> {
         let mut trailing: BTreeSet<usize> = BTreeSet::new();
         // Own columns' reach in the symmetric pattern.
         for j in first_col..own_last {
-            for k in pat.col_ptr[j]..pat.col_ptr[j + 1] {
-                let r = pat.row_idx[k];
+            for &r in &pat.row_idx[pat.col_ptr[j]..pat.col_ptr[j + 1]] {
                 if r >= own_last {
                     trailing.insert(r);
                 }

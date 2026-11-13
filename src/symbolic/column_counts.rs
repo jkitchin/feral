@@ -34,8 +34,7 @@ pub fn column_counts(pattern: &CscPattern, _etree: &EliminationTree) -> Vec<usiz
     // Build adjacency: for each column j, the set of rows > j
     let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (j, col_j) in col_rows.iter_mut().enumerate() {
-        for k in pattern.col_ptr[j]..pattern.col_ptr[j + 1] {
-            let i = pattern.row_idx[k];
+        for &i in &pattern.row_idx[pattern.col_ptr[j]..pattern.col_ptr[j + 1]] {
             if i > j {
                 col_j.push(i);
             }
@@ -130,8 +129,7 @@ pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<u
         let fi = first[i] as i64;
         let row_start = pattern.col_ptr[i];
         let row_end = pattern.col_ptr[i + 1];
-        for k in row_start..row_end {
-            let partner = pattern.row_idx[k];
+        for &partner in &pattern.row_idx[row_start..row_end] {
             if partner <= i {
                 continue;
             }

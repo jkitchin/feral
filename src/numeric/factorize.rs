@@ -4810,8 +4810,7 @@ fn build_row_indices<L: BlockLayout>(
     let own_last = first_col + own_ncol;
     build_trailing.clear();
     for j in first_col..first_col + own_ncol {
-        for k in full_pattern.col_ptr[j]..full_pattern.col_ptr[j + 1] {
-            let r = full_pattern.row_idx[k];
+        for &r in &full_pattern.row_idx[full_pattern.col_ptr[j]..full_pattern.col_ptr[j + 1]] {
             if r < own_last {
                 continue;
             }

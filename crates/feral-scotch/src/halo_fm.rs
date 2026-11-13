@@ -206,8 +206,10 @@ fn compute_pass_state(
     // if it itself is *not* on the boundary.
     for (v, hslot) in halo_cnt.iter_mut().enumerate().take(n) {
         let mut hcnt: i32 = 0;
-        for k in graph.xadj[v] as usize..graph.xadj[v + 1] as usize {
-            let u = graph.adjncy[k] as usize;
+        for u in graph.adjncy[graph.xadj[v] as usize..graph.xadj[v + 1] as usize]
+            .iter()
+            .map(|&x| x as usize)
+        {
             if boundary_cnt[u] > 0 {
                 hcnt += 1;
             }

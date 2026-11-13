@@ -128,8 +128,7 @@ fn restrict_pattern_to_subgraph(full: &CscPattern, sub_of: &[usize], n_f: usize)
         if j_loc == usize::MAX {
             continue;
         }
-        for k in full.col_ptr[j_orig]..full.col_ptr[j_orig + 1] {
-            let i_orig = full.row_idx[k];
+        for &i_orig in &full.row_idx[full.col_ptr[j_orig]..full.col_ptr[j_orig + 1]] {
             if sub_of[i_orig] != usize::MAX {
                 col_counts[j_loc] += 1;
             }
@@ -150,8 +149,7 @@ fn restrict_pattern_to_subgraph(full: &CscPattern, sub_of: &[usize], n_f: usize)
         if j_loc == usize::MAX {
             continue;
         }
-        for k in full.col_ptr[j_orig]..full.col_ptr[j_orig + 1] {
-            let i_orig = full.row_idx[k];
+        for &i_orig in &full.row_idx[full.col_ptr[j_orig]..full.col_ptr[j_orig + 1]] {
             let i_loc = sub_of[i_orig];
             if i_loc != usize::MAX {
                 row_idx[offsets[j_loc]] = i_loc;
