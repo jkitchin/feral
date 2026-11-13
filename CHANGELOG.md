@@ -39,26 +39,27 @@ Measurements and unfavourable results:
 ### Changed — faster threshold-Markowitz sparse LU on near-triangular bases (issue #232)
 
 `SparseLu::factor_markowitz` (the default `LuPivoting::Markowitz` route)
-logs its pivot-search heap entries during the singleton peel and builds the
-heaps once at the kernel, stores the active submatrix in packed buffers
-instead of one `Vec` per column and row, and no longer allocates per column
-when sorting `L`. **Pivots and factor values are bit-identical to 0.22**
-(pinned by `tests/lu_markowitz_golden.rs`). On a synthetic basis shaped like
-the issue's LP basis (m = 17 470, ~92 % triangular) a new factor, including
-dropping the old one, takes ~6.4 ms against ~12.9 ms; QPLIB_3852
-0.78 -> 0.40 ms.
+spends far less time on bookkeeping. It skips the elimination's column walk
+when a pivot has nothing to subtract, takes the smallest live row count from
+a histogram instead of a heap, packs the column heap's entries into one
+`u64` and builds that heap once at the kernel from a log of the singleton
+peel, stores the active submatrix in packed buffers instead of one `Vec` per
+column and row, and no longer allocates per column when sorting `L`.
+**Pivots and factor values are bit-identical to 0.22** (pinned by
+`tests/lu_markowitz_golden.rs`). On the issue's LP basis (piperout-d27,
+m = 17 470) a new factor, including dropping the old one, takes 7.3 ms
+against 15.5 ms in 0.22.
 
 ### Added — in-place sparse LU refactorization (issue #232)
 
 `SparseLu::refactor_markowitz(&mut self, a, params)` re-factors into an
 existing factorization and reuses its memory (U rows, column index, work
-arrays). The result is bit-identical to `SparseLu::factor_markowitz`; on
-error the previous factor is left intact. `SparseLu::refactor` (and the
-Python `LuFactor.refactor`) uses it under the default Markowitz pivoting.
-On the #232 basis shape a refactor takes ~5.3 ms against ~6.4 ms for
-building a new factor and dropping the old one. Callers that create a new
-`SparseLu` per refactorization should hold one and call
-`refactor_markowitz` instead.
+arrays, and the elimination's own buffers). The result is bit-identical to
+`SparseLu::factor_markowitz`; on error the previous factor is left intact.
+`SparseLu::refactor` (and the Python `LuFactor.refactor`) uses it under the
+default Markowitz pivoting. On the piperout-d27 basis a refactor takes
+5.65 ms against 15.5 ms in 0.22. Callers that create a new `SparseLu` per
+refactorization should hold one and call `refactor_markowitz` instead.
 
 ## [0.22.0] - 2026-10-26
 
