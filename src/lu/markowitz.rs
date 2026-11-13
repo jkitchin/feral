@@ -168,6 +168,24 @@ impl<T: Copy + Default> Lists<T> {
     }
 }
 
+/// Column-heap entry `(count, column)` as one `u64`: `count << 32 | column`.
+/// Ordering equals the tuple's while both are below 2^32, which
+/// `markowitz_factor` checks (`count <= m` always).
+#[inline]
+fn ckey(count: usize, col: usize) -> u64 {
+    ((count as u64) << 32) | col as u64
+}
+
+#[inline]
+fn ckey_count(key: u64) -> usize {
+    (key >> 32) as usize
+}
+
+#[inline]
+fn ckey_col(key: u64) -> usize {
+    (key & 0xFFFF_FFFF) as usize
+}
+
 /// How many live rows have each count: the smallest live row count in O(1)
 /// amortised, without a heap (issue #232).
 ///
@@ -316,9 +334,18 @@ pub(super) fn markowitz_factor(
     // near-triangular LP basis that is ~17k entries the eager heap sifted in
     // and then popped one at a time (issue #232).
     let mut heaps_built = false;
-    let mut cheap_log: Vec<(usize, usize)> = (0..m).map(|j| (ccnt[j], j)).collect();
+    // Entries are `(count, column)` packed as `count << 32 | column`
+    // (`ckey`), which orders exactly like the tuple for values below 2^32 and
+    // makes each heap comparison and move one `u64` (issue #232).
+    if m > u32::MAX as usize {
+        return Err(FeralError::InvalidInput(format!(
+            "threshold-Markowitz LU supports dimension up to {}, got {m}",
+            u32::MAX
+        )));
+    }
+    let mut cheap_log: Vec<u64> = (0..m).map(|j| ckey(ccnt[j], j)).collect();
     let mut row_counts = RowCounts::new(&rcnt);
-    let mut cheap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    let mut cheap: BinaryHeap<Reverse<u64>> = BinaryHeap::new();
 
     // ---- workspaces ------------------------------------------------------
     let mut lscat = vec![0.0_f64; m];
@@ -394,7 +421,7 @@ pub(super) fn markowitz_factor(
         if fast.is_none() && !heaps_built {
             cheap = cheap_log
                 .drain(..)
-                .filter(|&(_, j)| alive_c[j])
+                .filter(|&k| alive_c[ckey_col(k)])
                 .map(Reverse)
                 .collect::<Vec<_>>()
                 .into();
@@ -414,9 +441,10 @@ pub(super) fn markowitz_factor(
         scanned.clear();
         let mut examined = 0usize;
         while fast.is_none() {
-            let Some(&Reverse((c, j))) = cheap.peek() else {
+            let Some(&Reverse(key)) = cheap.peek() else {
                 break;
             };
+            let (c, j) = (ckey_count(key), ckey_col(key));
             if !alive_c[j] || ccnt[j] != c {
                 cheap.pop();
                 continue;
@@ -466,7 +494,7 @@ pub(super) fn markowitz_factor(
         }
         for &j in scanned.iter() {
             if alive_c[j] {
-                cheap.push(Reverse((ccnt[j], j)));
+                cheap.push(Reverse(ckey(ccnt[j], j)));
             }
         }
 
@@ -499,7 +527,7 @@ pub(super) fn markowitz_factor(
                                 ccnt[col] += 1;
                                 // Reached only with no fast pivot, so the
                                 // heaps are built.
-                                cheap.push(Reverse((ccnt[col], col)));
+                                cheap.push(Reverse(ckey(ccnt[col], col)));
                                 row_counts.set(row, rcnt[row]);
                             }
                         }
@@ -647,9 +675,9 @@ pub(super) fn markowitz_factor(
             // in `cheap` too it would be invisible to the general search and
             // reported singular.
             if heaps_built {
-                cheap.push(Reverse((ccnt[j], j)));
+                cheap.push(Reverse(ckey(ccnt[j], j)));
             } else {
-                cheap_log.push((ccnt[j], j));
+                cheap_log.push(ckey(ccnt[j], j));
             }
             if ccnt[j] == 1 {
                 col_singletons.push(j);
