@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-14
+
 **Breaking (struct literals only).** `NumericParams` gains the public
 field `early_assembly`: a literal that lists every field must add it;
 `..NumericParams::default()` and `Solver` callers are unaffected.
@@ -60,6 +62,13 @@ arrays, and the elimination's own buffers). The result is bit-identical to
 default Markowitz pivoting. On the piperout-d27 basis a refactor takes
 5.65 ms against 15.5 ms in 0.22. Callers that create a new `SparseLu` per
 refactorization should hold one and call `refactor_markowitz` instead.
+
+### Changed — ordering crates re-released
+
+`feral-ordering-core` 0.2.3, `feral-metis` 0.3.1, `feral-scotch` 0.3.1 and
+`feral-kahip` 0.3.1. Their only change since 0.22.0 is the Rust 1.100 clippy
+fix (`needless_range_loop` loops rewritten as iterators); behaviour is
+unchanged. Bumped so the published source matches the repository.
 
 ## [0.22.0] - 2026-10-26
 
