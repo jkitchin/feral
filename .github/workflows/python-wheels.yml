@@ -103,7 +103,10 @@ jobs:
             target: aarch64
             manylinux: "2_28"
           - os: macos
-            runner: macos-14
+            # macos-14 stopped getting a runner by v0.23.0 (2026-11-14): the
+            # job was cancelled within a second of creation, twice, with no
+            # runner assigned, which skipped the PyPI publish.
+            runner: macos-15
             target: universal2-apple-darwin
           - os: windows
             runner: windows-latest
