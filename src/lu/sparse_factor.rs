@@ -245,9 +245,67 @@ pub struct SparseLu {
     /// [`LuParams::update_pivot_search`] is enabled; issue #112). Zero after
     /// factor/refactor.
     pub(super) pivot_search_swaps: usize,
+    /// The threshold-Markowitz elimination's working storage, kept only by
+    /// [`SparseLu::refactor_markowitz`] so the next in-place refactor reuses
+    /// it (issue #232). Empty after a fresh factor, so a factor that is only
+    /// held does not carry it. Never read across calls: it is a source of
+    /// buffers, not state.
+    pub(super) markowitz_work: super::markowitz::MarkowitzWork,
 }
 
 impl SparseLu {
+    /// A 0x0 factorization holding no memory: the shell [`assemble_into`]
+    /// fills. Never handed to a caller as-is.
+    fn empty() -> Self {
+        SparseLu {
+            m: 0,
+            l_col_ptr: Vec::new(),
+            l_row_idx: Vec::new(),
+            l_val: Vec::new(),
+            u_rows: Vec::new(),
+            perm: Vec::new(),
+            perm_inv: Vec::new(),
+            uperm_inv: Vec::new(),
+            uperm: Vec::new(),
+            qcol: Vec::new(),
+            qcol_inv: Vec::new(),
+            u_above: Vec::new(),
+            etas: Vec::new(),
+            growth: 1.0,
+            u_max0: f64::MIN_POSITIVE,
+            a_max: 0.0,
+            l_row_ptr: Vec::new(),
+            l_row_cols: Vec::new(),
+            hyper: super::sparse_hyper::HyperWork::default(),
+            reach: super::sparse_solve::ReachWork::disabled(),
+            reach_visits: 0,
+            used_dense_bump: false,
+            used_markowitz: false,
+            bump_dim: 0,
+            params: LuParams::default(),
+            scale: LuScale::identity(0),
+            scale_rperm_inv: Vec::new(),
+            scratch: Vec::new(),
+            scratch_mark: Vec::new(),
+            ft_work: Vec::new(),
+            scratch_b: Vec::new(),
+            scratch_c: Vec::new(),
+            scratch_d: Vec::new(),
+            ft_rw: Vec::new(),
+            ft_rw_comp: Vec::new(),
+            targets_scratch: Vec::new(),
+            ft_touch_mark: Vec::new(),
+            row_pool: Vec::new(),
+            saved_scratch: Vec::new(),
+            saved_pool: Vec::new(),
+            last_update_work: 0,
+            update_work_total: 0,
+            last_refactor: None,
+            pivot_search_swaps: 0,
+            markowitz_work: super::markowitz::MarkowitzWork::default(),
+        }
+    }
+
     /// Factor `a` using the column ordering in `symbolic`.
     pub fn factor(
         a: &SparseColMatrix,
@@ -669,6 +727,48 @@ impl SparseLu {
     /// special case of this rule rather than a preliminary step: a column
     /// singleton has cost 0 and is taken first.
     pub fn factor_markowitz(a: &SparseColMatrix, params: LuParams) -> Result<Self, FeralError> {
+        let mut lu = SparseLu::empty();
+        lu.markowitz_into(a, params, false)?;
+        Ok(lu)
+    }
+
+    /// Re-factor in place with threshold-Markowitz pivoting, reusing this
+    /// factorization's memory (issue #232).
+    ///
+    /// On success `self` is exactly what [`Self::factor_markowitz`]`(a, params)`
+    /// returns: same pivots, same `L`/`U` bits, pending updates discarded, every
+    /// counter reset. Both run the same code, a fresh factor being this call on
+    /// an empty `SparseLu`. What differs is where the memory comes from: the
+    /// outgoing `U` rows, the `u_above` lists and the length-`m` work arrays are
+    /// cleared and refilled instead of freed and allocated again. On a
+    /// near-triangular LP basis with m = 17 470 that is ~35k allocations and
+    /// frees per factorization, about a third of its time.
+    ///
+    /// `a` may have a different dimension from the previous factor.
+    ///
+    /// On `Err` (a singular basis under `LuSingularAction::Fail`, invalid
+    /// `params`, a scaling failure) `self` is left as it was: the previous
+    /// factorization, updates included, is still valid and can still solve.
+    pub fn refactor_markowitz(
+        &mut self,
+        a: &SparseColMatrix,
+        params: LuParams,
+    ) -> Result<(), FeralError> {
+        self.markowitz_into(a, params, true)
+    }
+
+    /// Shared body of [`Self::factor_markowitz`] and
+    /// [`Self::refactor_markowitz`]. Nothing in `self` is modified until the
+    /// elimination has succeeded, except that `U`-row buffers may be taken
+    /// from `row_pool` and `markowitz_work` may be emptied (buffer sources
+    /// whose contents are never read). `keep_work` keeps the elimination's
+    /// storage on `self` for the next call.
+    fn markowitz_into(
+        &mut self,
+        a: &SparseColMatrix,
+        params: LuParams,
+        keep_work: bool,
+    ) -> Result<(), FeralError> {
         params.validate()?;
         let m = a.m;
 
@@ -688,13 +788,24 @@ impl SparseLu {
             params.markowitz_max_search,
             params.zero_pivot_tol,
             params.on_singular,
+            &mut self.row_pool,
+            self.l_val.len(),
+            &mut self.markowitz_work,
         )?;
+        if !keep_work {
+            self.markowitz_work = super::markowitz::MarkowitzWork::default();
+        }
 
-        let mut perm_inv = vec![0usize; m];
+        // ---- success: from here on `self` is overwritten ------------------
+        let mut perm_inv = std::mem::take(&mut self.perm_inv);
+        perm_inv.clear();
+        perm_inv.resize(m, 0);
         for (k, &i) in mk.perm.iter().enumerate() {
             perm_inv[i] = k;
         }
-        let mut qcol_inv = vec![0usize; m];
+        let mut qcol_inv = std::mem::take(&mut self.qcol_inv);
+        qcol_inv.clear();
+        qcol_inv.resize(m, 0);
         for (k, &j) in mk.qcol.iter().enumerate() {
             qcol_inv[j] = k;
         }
@@ -707,16 +818,19 @@ impl SparseLu {
         // pivot's own column is eliminated at its own step and every other entry
         // in the row sits in a column eliminated later, so position `k` is the
         // smallest in row `k` and sorting puts the diagonal first — which is the
-        // storage contract the Forrest-Tomlin update reads.
-        let mut u_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
-        for (k, row) in mk.u_rows_orig.into_iter().enumerate() {
-            let mut r: Vec<(usize, f64)> = row.into_iter().map(|(j, v)| (qcol_inv[j], v)).collect();
+        // storage contract the Forrest-Tomlin update reads. Remapped in place:
+        // each row keeps its buffer.
+        let mut u_rows = mk.u_rows_orig;
+        for (k, r) in u_rows.iter_mut().enumerate() {
+            for e in r.iter_mut() {
+                e.0 = qcol_inv[e.0];
+            }
             r.sort_unstable_by_key(|&(c, _)| c);
             debug_assert_eq!(r.first().map(|&(c, _)| c), Some(k));
-            u_rows.push(r);
         }
 
-        Ok(assemble(
+        assemble_into(
+            self,
             m,
             mk.l_col_ptr,
             l_row_idx,
@@ -733,7 +847,8 @@ impl SparseLu {
             false,
             true,
             0,
-        ))
+        );
+        Ok(())
     }
 
     /// Convenience: analyze + factor from dense columns.
@@ -997,24 +1112,140 @@ fn assemble(
     used_markowitz: bool,
     reach_visits: usize,
 ) -> SparseLu {
+    let mut lu = SparseLu::empty();
+    assemble_into(
+        &mut lu,
+        m,
+        l_col_ptr,
+        l_row_idx,
+        l_val,
+        u_rows,
+        perm,
+        perm_inv,
+        qcol,
+        qcol_inv,
+        params,
+        scale,
+        a_max,
+        bump_dim,
+        used_dense_bump,
+        used_markowitz,
+        reach_visits,
+    );
+    lu
+}
+
+/// [`assemble`] into an existing `SparseLu`, overwriting every field and
+/// reusing allocations where it can (issue #232). Fresh factors call this on
+/// [`SparseLu::empty`], so a fresh factor and an in-place refactor run the
+/// same code and cannot drift. The destructuring below is exhaustive on
+/// purpose: a field added to `SparseLu` and not reset here is a compile
+/// error, not a stale value carried into the next factorization.
+#[allow(clippy::too_many_arguments)]
+fn assemble_into(
+    lu: &mut SparseLu,
+    m: usize,
+    l_col_ptr: Vec<usize>,
+    l_row_idx: Vec<usize>,
+    l_val: Vec<f64>,
+    u_rows: Vec<Vec<(usize, f64)>>,
+    perm: Vec<usize>,
+    perm_inv: Vec<usize>,
+    qcol: Vec<usize>,
+    qcol_inv: Vec<usize>,
+    params: LuParams,
+    scale: LuScale,
+    a_max: f64,
+    bump_dim: usize,
+    used_dense_bump: bool,
+    used_markowitz: bool,
+    reach_visits: usize,
+) {
+    let SparseLu {
+        m: f_m,
+        l_col_ptr: f_l_col_ptr,
+        l_row_idx: f_l_row_idx,
+        l_val: f_l_val,
+        u_rows: f_u_rows,
+        perm: f_perm,
+        perm_inv: f_perm_inv,
+        uperm_inv,
+        uperm,
+        qcol: f_qcol,
+        qcol_inv: f_qcol_inv,
+        u_above,
+        etas,
+        growth,
+        u_max0: f_u_max0,
+        a_max: f_a_max,
+        l_row_ptr,
+        l_row_cols,
+        hyper,
+        reach,
+        reach_visits: f_reach_visits,
+        used_dense_bump: f_used_dense_bump,
+        used_markowitz: f_used_markowitz,
+        bump_dim: f_bump_dim,
+        params: f_params,
+        scale: f_scale,
+        scale_rperm_inv,
+        scratch,
+        scratch_mark,
+        ft_work,
+        scratch_b,
+        scratch_c,
+        scratch_d,
+        ft_rw,
+        ft_rw_comp,
+        targets_scratch,
+        ft_touch_mark,
+        row_pool,
+        saved_scratch,
+        saved_pool,
+        last_update_work,
+        update_work_total,
+        last_refactor,
+        pivot_search_swaps,
+        // Elimination scratch, not factor state: `markowitz_into` decides
+        // whether it stays.
+        markowitz_work: _,
+    } = lu;
+
     // Row-wise index of L and the reach workspace: built only when the
     // reach-limited solve route is enabled, so the off path is byte-for-byte
-    // the pre-#161 allocation profile.
-    let (l_row_ptr, l_row_cols, reach) = if params.hyper_sparse_max_density > 0.0 {
-        let (ptr, cols) = build_l_row_index(&l_col_ptr, &l_row_idx, m);
-        (ptr, cols, super::sparse_solve::ReachWork::new(m))
+    // the pre-#161 allocation profile. When off, the index is emptied so
+    // `ensure_l_row_index` rebuilds it for *this* L rather than reading the
+    // previous factor's.
+    let hyper_on = params.hyper_sparse_max_density > 0.0;
+    if hyper_on {
+        build_l_row_index_into(&l_col_ptr, &l_row_idx, m, l_row_ptr, l_row_cols);
     } else {
-        (
-            Vec::new(),
-            Vec::new(),
-            super::sparse_solve::ReachWork::disabled(),
-        )
-    };
+        l_row_ptr.clear();
+        l_row_cols.clear();
+    }
+    reach.recycle(m, hyper_on);
+    hyper.recycle(m);
+
     // Column-wise index of U's off-diagonal entries (rows added in
     // increasing order, so each `u_above[c]` is sorted ascending). At factor
     // time U is upper triangular, so this is exactly the strict-upper rows;
     // it widens to all off-diagonal holders only as FT updates permute U.
-    let mut u_above: Vec<Vec<usize>> = vec![Vec::new(); m];
+    // Lists are cleared and refilled, keeping their buffers; a count pass
+    // sizes each one up front.
+    u_above.truncate(m);
+    u_above.resize_with(m, Vec::new);
+    let mut u_above_cnt = vec![0usize; m];
+    for (i, row) in u_rows.iter().enumerate() {
+        for &(c, _) in row.iter() {
+            if c != i {
+                u_above_cnt[c] += 1;
+            }
+        }
+    }
+    for (list, &n) in u_above.iter_mut().zip(u_above_cnt.iter()) {
+        list.clear();
+        list.reserve(n);
+    }
     for (i, row) in u_rows.iter().enumerate() {
         for &(c, _) in row.iter() {
             if c != i {
@@ -1024,7 +1255,8 @@ fn assemble(
     }
 
     // Inverse of the scaling row permutation, for sparse-spike seeding.
-    let mut scale_rperm_inv = vec![0usize; m];
+    scale_rperm_inv.clear();
+    scale_rperm_inv.resize(m, 0);
     for (i, &o) in scale.rperm.iter().enumerate() {
         scale_rperm_inv[o] = i;
     }
@@ -1036,54 +1268,62 @@ fn assemble(
             u_max0 = u_max0.max(v.abs());
         }
     }
-    let u_max0 = u_max0.max(f64::MIN_POSITIVE);
+    *f_u_max0 = u_max0.max(f64::MIN_POSITIVE);
 
-    SparseLu {
-        m,
-        l_col_ptr,
-        l_row_idx,
-        l_val,
-        u_rows,
-        perm,
-        perm_inv,
-        uperm_inv: (0..m).collect(),
-        uperm: (0..m).collect(),
-        qcol,
-        qcol_inv,
-        u_above,
-        l_row_ptr,
-        l_row_cols,
-        reach,
-        hyper: super::sparse_hyper::HyperWork::default(),
-        etas: Vec::new(),
-        growth: 1.0,
-        u_max0,
-        a_max,
-        reach_visits,
-        used_dense_bump,
-        used_markowitz,
-        bump_dim,
-        params,
-        scale,
-        scale_rperm_inv,
-        scratch: vec![0.0; m],
-        scratch_mark: vec![false; m],
-        ft_work: vec![0.0; m],
-        scratch_b: vec![0.0; m],
-        scratch_c: vec![0.0; m],
-        scratch_d: vec![0.0; m],
-        ft_rw: vec![0.0; m],
-        ft_rw_comp: vec![0.0; m],
-        targets_scratch: Vec::new(),
-        ft_touch_mark: vec![false; m],
-        row_pool: Vec::new(),
-        saved_scratch: Vec::new(),
-        saved_pool: Vec::new(),
-        last_update_work: 0,
-        update_work_total: 0,
-        last_refactor: None,
-        pivot_search_swaps: 0,
+    // The outgoing U rows become free buffers for the next factor's rows and
+    // for the FT update's row rebuilds. Bounded so a long-lived factor whose
+    // dimension shrinks does not hoard them.
+    let old_rows = std::mem::replace(f_u_rows, u_rows);
+    for row in old_rows {
+        if row_pool.len() >= m {
+            break;
+        }
+        row_pool.push(row);
     }
+    saved_pool.truncate(m);
+
+    fn refill<T: Copy>(v: &mut Vec<T>, m: usize, x: T) {
+        v.clear();
+        v.resize(m, x);
+    }
+    refill(scratch, m, 0.0);
+    refill(scratch_mark, m, false);
+    refill(ft_work, m, 0.0);
+    refill(scratch_b, m, 0.0);
+    refill(scratch_c, m, 0.0);
+    refill(scratch_d, m, 0.0);
+    refill(ft_rw, m, 0.0);
+    refill(ft_rw_comp, m, 0.0);
+    refill(ft_touch_mark, m, false);
+    targets_scratch.clear();
+    saved_scratch.clear();
+
+    uperm_inv.clear();
+    uperm_inv.extend(0..m);
+    uperm.clear();
+    uperm.extend(0..m);
+    etas.clear();
+
+    *f_m = m;
+    *f_l_col_ptr = l_col_ptr;
+    *f_l_row_idx = l_row_idx;
+    *f_l_val = l_val;
+    *f_perm = perm;
+    *f_perm_inv = perm_inv;
+    *f_qcol = qcol;
+    *f_qcol_inv = qcol_inv;
+    *growth = 1.0;
+    *f_a_max = a_max;
+    *f_reach_visits = reach_visits;
+    *f_used_dense_bump = used_dense_bump;
+    *f_used_markowitz = used_markowitz;
+    *f_bump_dim = bump_dim;
+    *f_params = params;
+    *f_scale = scale;
+    *last_update_work = 0;
+    *update_work_total = 0;
+    *last_refactor = None;
+    *pivot_search_swaps = 0;
 }
 
 /// Transpose a strict-upper `U` from column-wise CSC (`col_ptr` over columns,
@@ -1129,14 +1369,29 @@ fn transpose_to_csr(
 /// sum, then place with a per-row cursor. Columns are emitted in ascending `k`,
 /// so each output row comes out sorted.
 fn build_l_row_index(col_ptr: &[usize], row_idx: &[usize], m: usize) -> (Vec<usize>, Vec<usize>) {
-    let mut row_ptr = vec![0usize; m + 1];
+    let (mut ptr, mut cols) = (Vec::new(), Vec::new());
+    build_l_row_index_into(col_ptr, row_idx, m, &mut ptr, &mut cols);
+    (ptr, cols)
+}
+
+/// [`build_l_row_index`] into existing buffers (cleared first).
+fn build_l_row_index_into(
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    m: usize,
+    row_ptr: &mut Vec<usize>,
+    cols: &mut Vec<usize>,
+) {
+    row_ptr.clear();
+    row_ptr.resize(m + 1, 0);
     for &i in row_idx.iter() {
         row_ptr[i + 1] += 1;
     }
     for i in 0..m {
         row_ptr[i + 1] += row_ptr[i];
     }
-    let mut cols = vec![0usize; row_idx.len()];
+    cols.clear();
+    cols.resize(row_idx.len(), 0);
     let mut next: Vec<usize> = row_ptr[..m].to_vec();
     for k in 0..m {
         for &i in row_idx[col_ptr[k]..col_ptr[k + 1]].iter() {
@@ -1144,7 +1399,6 @@ fn build_l_row_index(col_ptr: &[usize], row_idx: &[usize], m: usize) -> (Vec<usi
             next[i] += 1;
         }
     }
-    (row_ptr, cols)
 }
 
 /// Remap L's original row indices to pivot positions and sort each column.
@@ -1158,16 +1412,24 @@ fn remap_and_sort_l(
     for r in row_idx.iter_mut() {
         *r = perm_inv[*r];
     }
-    let mut order: Vec<usize> = Vec::new();
+    // One reused buffer, and columns that are already sorted (every column of
+    // length < 2 among them) are left alone: on a near-triangular LP basis most
+    // `L` columns are empty, and two fresh `Vec`s per column were ~35k
+    // allocations per factorization at m = 17 470 (issue #232). Stable sort,
+    // as before, so the result is the same permutation of the column.
+    let mut buf: Vec<(usize, f64)> = Vec::new();
     for j in 0..m {
         let (s, e) = (col_ptr[j], col_ptr[j + 1]);
-        order.clear();
-        order.extend(s..e);
-        order.sort_by_key(|&idx| row_idx[idx]);
-        let rows: Vec<usize> = order.iter().map(|&idx| row_idx[idx]).collect();
-        let vals: Vec<f64> = order.iter().map(|&idx| val[idx]).collect();
-        row_idx[s..e].copy_from_slice(&rows);
-        val[s..e].copy_from_slice(&vals);
+        if row_idx[s..e].windows(2).all(|w| w[0] <= w[1]) {
+            continue;
+        }
+        buf.clear();
+        buf.extend(row_idx[s..e].iter().copied().zip(val[s..e].iter().copied()));
+        buf.sort_by_key(|&(r, _)| r);
+        for (k, &(r, v)) in buf.iter().enumerate() {
+            row_idx[s + k] = r;
+            val[s + k] = v;
+        }
     }
 }
 

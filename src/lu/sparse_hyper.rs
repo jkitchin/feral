@@ -98,6 +98,26 @@ pub(super) struct HyperWork {
 }
 
 impl HyperWork {
+    /// Put the workspace in the state a fresh factor leaves it in, keeping its
+    /// buffers when they already have the right size (issue #232: in-place
+    /// refactorization). A sized workspace becomes exactly `new(m)`; anything
+    /// else becomes `default()`, which the first sparse solve sizes.
+    pub(super) fn recycle(&mut self, m: usize) {
+        if self.is_sized(m) {
+            self.w.fill(0.0);
+            self.mark.fill(false);
+            self.pattern.clear();
+            self.stack.clear();
+            self.order.clear();
+            self.work = 0;
+            self.cap = usize::MAX;
+            self.dense = false;
+            self.fallbacks = 0;
+        } else {
+            *self = HyperWork::default();
+        }
+    }
+
     fn is_sized(&self, m: usize) -> bool {
         self.w.len() == m && self.mark.len() == m
     }

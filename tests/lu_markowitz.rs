@@ -469,3 +469,65 @@ fn default_params_route_through_markowitz_and_the_choice_is_observable() {
         assert!(err < 1e-9, "solve error {err}");
     }
 }
+
+/// Issue #232: a near-triangular basis — most columns peel as column or row
+/// singletons, then a kernel needs the general (heap-driven) search and fills.
+/// The count heaps are built only when the singleton stacks first run dry, and
+/// the active submatrix lives in packed lists that relocate on fill, so this is
+/// the shape that exercises both: the peel phase with no heaps, the build over
+/// the survivors, and fill growth inside the kernel. Oracle: `P B Q = L U`
+/// reconstructed entry by entry from the input.
+#[test]
+fn near_triangular_with_filling_kernel_factors_correctly() {
+    for seed in 0..6u64 {
+        let m = 240;
+        let k = 40 + (seed as usize) * 6; // kernel size
+        let mut rng = Rng(seed * 104_729 + 7);
+        let mut t: Vec<(usize, usize, f64)> = Vec::new();
+        // Kernel [0, k): random sparse, diagonally weighted, fills under
+        // elimination.
+        for j in 0..k {
+            t.push((j, j, 3.0 + rng.next_f64().abs()));
+            for _ in 0..4 {
+                let v = rng.next_f64();
+                if v != 0.0 {
+                    t.push((rng.below(k), j, v));
+                }
+            }
+        }
+        // Upper-triangular tail [k, m): diagonal plus entries in rows above,
+        // kernel rows included, so it peels bottom-up as row singletons; a
+        // third of its columns are pure diagonal (column singletons).
+        for j in k..m {
+            t.push((j, j, 2.0 + rng.next_f64().abs()));
+            if rng.below(3) != 0 {
+                for _ in 0..3 {
+                    let v = rng.next_f64();
+                    if v != 0.0 {
+                        t.push((rng.below(j), j, v));
+                    }
+                }
+            }
+        }
+        // Scramble rows and columns so nothing is in index order.
+        let mut pr: Vec<usize> = (0..m).collect();
+        let mut pc: Vec<usize> = (0..m).collect();
+        for i in (1..m).rev() {
+            pr.swap(i, rng.below(i + 1));
+            pc.swap(i, rng.below(i + 1));
+        }
+        let mut t: Vec<(usize, usize, f64)> =
+            t.into_iter().map(|(i, j, v)| (pr[i], pc[j], v)).collect();
+        let a = build(m, &mut t);
+        let lu = SparseLu::factor_markowitz(&a, LuParams::default()).expect("factor");
+        let r = residual(&a, &lu);
+        assert!(r < 1e-12, "seed {seed} residual {r}");
+        let ml = max_abs_l(&lu);
+        let u = LuParams::default().markowitz_threshold;
+        assert!(ml <= 1.0 / u + 1e-9, "seed {seed} max|L| {ml} exceeds 1/u");
+        assert!(
+            lu.factor_nnz() > a.values.len(),
+            "seed {seed}: kernel produced no fill, so the relocation path was not exercised"
+        );
+    }
+}

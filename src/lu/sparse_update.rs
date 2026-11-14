@@ -317,11 +317,29 @@ impl SparseLu {
 
     /// Discard all pending updates and re-factor from scratch on `a`, reusing
     /// the column ordering in `symbolic`.
+    ///
+    /// Under [`LuPivoting::Markowitz`](super::LuPivoting::Markowitz) (the
+    /// default) this re-factors in place through
+    /// [`SparseLu::refactor_markowitz`], reusing this factor's memory; the
+    /// result is bit-identical to [`SparseLu::factor`] either way (issue #232).
+    /// On `Err`, `self` is unchanged on both routes.
     pub fn refactor(
         &mut self,
         a: &SparseColMatrix,
         symbolic: &SparseLuSymbolic,
     ) -> Result<(), FeralError> {
+        if self.params.pivoting == super::LuPivoting::Markowitz {
+            // The checks `factor` makes before its Markowitz dispatch, in the
+            // same order, so both routes report the same error.
+            self.params.validate()?;
+            if symbolic.m != a.m {
+                return Err(FeralError::DimensionMismatch {
+                    expected: a.m,
+                    got: symbolic.m,
+                });
+            }
+            return self.refactor_markowitz(a, self.params.clone());
+        }
         *self = SparseLu::factor(a, symbolic, self.params.clone())?;
         Ok(())
     }

@@ -8192,3 +8192,59 @@ over supernodes and children (about 6 µs on the 1,501-supernode star).
 unchanged figures: star `Off` 65.73 MiB, `WideParents` 12.12 MiB; 192
 matrices, at most 7,208 B above `Off`. `tests/early_assembly_parity.rs`
 digests unchanged; the parent-release pin now runs on every target.
+
+## 2026-11-13 — Markowitz candidate search counts distinct columns (issue #232)
+
+**Decision.** The threshold-Markowitz pivot search examines each column at
+most once per step; `max_search` counts distinct columns. Previously a
+column with several live `(count, j)` copies in the lazy heap was scanned
+once per copy, each counting toward `max_search`.
+
+**Why.** Building the count heaps only over the kernel (the #232 speed fix)
+changes the heap's push history, and the copy count was a function of that
+history, not of the matrix. Without the dedup the pivot order would depend
+on an implementation detail of when the heap was built. With it, the
+bookkeeping refactor is bit-identical to "old code + dedup" on every basis
+measured, so the only behaviour change is this one, isolated and measured.
+
+**Evidence.** Fill on 40 synthetic near-triangular bases: geomean +0.27 %
+(min -0.46 %, max +1.61 %, 36 worse / 4 better). QPLIB_1157 +0.54 %,
+QPLIB_3852 and bchoco06 unchanged. All 1022 tests pass. Journal
+2026-11-13-02.
+
+## 2026-11-13 — fresh and in-place sparse LU factors share one fill path (issue #232)
+
+**Decision.** `SparseLu` is built by `assemble_into`, which overwrites
+every field of an existing `SparseLu` and reuses its buffers. A fresh
+factor is `assemble_into` on `SparseLu::empty()`. `refactor_markowitz`
+calls it on the live factor, and `SparseLu::refactor` routes to it under
+Markowitz pivoting. `assemble_into` destructures `SparseLu` exhaustively.
+
+**Why.** The in-place path is only safe if it leaves exactly the state a
+fresh factor would, and two parallel builders drift. One code path makes
+equality hold by construction. The exhaustive destructure makes a newly
+added field a compile error until someone decides how a refactor resets
+it, rather than a stale value carried into the next factorization.
+
+**Evidence.** tests/lu_refactor_inplace.rs compares in-place against
+fresh bitwise, including under the same script of solves and FT updates
+afterwards; deleting any of three resets fails it. ~22 % faster on the
+#232 basis shape (journal 2026-11-13-02).
+
+## 2026-11-13 — Markowitz pivot order is held bit-identical to 0.22 (reverses the distinct-columns entry above, PR #234)
+
+**Decision.** The threshold-Markowitz search keeps its 0.22 budget: each
+live heap entry it examines counts against `markowitz_max_search`,
+duplicates included. The kernel-only heap build reproduces the eager heaps'
+multiset exactly (peel-phase pushes logged, heapified at the first
+non-singleton step, dead rows/columns left out). This reverses the earlier
+2026-11-13 entry "Markowitz candidate search counts distinct columns".
+
+**Why.** pounce's active-set QP uses this factorization as a rank-reveal
+probe. The distinct-columns rule made QGFRDXPN cycle to the iteration cap
+(details in `dev/tried-and-rejected.md`, 2026-11-13). Pivot order is
+therefore treated as part of the contract.
+
+**Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
+QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
+fails if the dedup is re-added. Journal 2026-11-13-02.

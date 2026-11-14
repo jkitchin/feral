@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-13T18:31:50Z
+Generated: 2026-11-13T21:38:49Z
 
 ## Latest Session
-File: dev/sessions/2026-11-13-01.md
+File: dev/sessions/2026-11-13-02.md
 ```
-# Session 2026-11-13-01
-
-## Unfavourable results (read first)
-
-- **Bench factor times are 2–3× the previous checkpoint's** (spd_200
-  409 → 1253 µs, kkt_100_30 207 → 475 µs). That checkpoint ran on
-  Apple Silicon; this one ran in a shared x86_64 cloud container, and
-  no source change in this session touches the dense kernel paths
-  timed here (loop rewrites only). Treat this as a machine difference,
-  not a regression; it was not re-measured on the earlier machine.
+# Session 2026-11-13-02
 
 ## Goal
-Review PR #231 (packed contribution blocks, opt-in
-`EarlyAssembly::WideParents`), merge it, and fix the CI clippy
-failure under Rust 1.100.
+Issue #232: `SparseLu::factor_markowitz` ~6.5x slower than HiGHS HFactor
+on a near-triangular LP basis (heap churn + per-column allocation).
 
 ## Accomplished
-- Reviewed PR #231 and posted 8 inline findings. The author fixed all
-  of them in 14d9bc6, and the PR was merged as 675a468. Verified on
-  x86_64: `golden_digests` on d3f7eb6 and on the PR give the same 16
-  digests, equal to the aarch64-pinned `PARENT_GOLDEN` (so the
-  parent-release test now runs on x86 too); `cargo test --release` on
-  14d9bc6 gave 1,030 passed / 0 failed; wide_tree_memory 3/3.
-- CI's `dtolnay/rust-toolchain@stable` is now 1.100.0, whose clippy
-  flags `needless_range_loop`: main (d3f7eb6) fails
-  `cargo clippy -- -D warnings` in feral-metis. Rewrote 46 index
-  loops as slice iterations across the workspace (same reads, same
-  order). Rust 1.100: fmt and clippy (workspace + feral-diagnostics)
-  clean; cargo test, examples, feral-diagnostics and ordering-crate
-  tests: 1,288 passed, 0 failed, 26 ignored.
+- f3d99e0: `examples/lu_markowitz_triangular.rs` — timing + bitwise digest
+  harness on a synthetic basis shaped like the issue's (m = 17 470, ~13k
+  one-entry columns, 1 459-col kernel, little fill) and on the committed
+  `.mtx` bases. The issue's actual basis is in discopt and could not be
+  attached to this session.
+- dce0dc6: Markowitz count heaps built only when the singleton stacks first
+  run dry (over the kernel); active submatrix in packed `Lists<T>`;
+  per-step dedup of the candidate search.
+- 6a5afd3: `remap_and_sort_l` without per-column Vecs; `u_above` pre-sized.
+- Timings (median, default `LuParams`):
 
-## Benchmark Results
-```
-name                n   factor(μs)    solve(μs)        inertia
-spd_10             10           18            3     (10, 0, 0)
-spd_50             50           62            4     (50, 0, 0)
-spd_100           100          271            8    (100, 0, 0)
-spd_200           200         1253           26    (200, 0, 0)
-kkt_10_3           13            8            1     (10, 3, 0)
-kkt_30_10          40           45            2    (30, 10, 0)
-kkt_50_15          65          101            3    (50, 15, 0)
-kkt_100_30        130          475           11   (100, 30, 0)
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+  | basis | before | after |
+  |---|---|---|
+  | piperout-shape seed 1 | 12.4 ms | 5.4 ms |
+  | piperout-shape seed 2 | 12.9 ms | 4.9 ms |
+  | piperout-shape seed 3 | 13.4 ms | 5.8 ms |
+  | QPLIB_3852 | 0.78 ms | 0.35 ms |
+  | bchoco06_illcond | 0.47 ms | 0.26 ms |
+  | QPLIB_1157 (fill-bound) | 12.9 ms | 12.7 ms |
+
+- `cargo test --release --no-fail-fast`: 1022 passed, 0 failed.
+
+**Unfavourable:** the dedup changes kernel pivots and fill goes up slightly
+— geomean +0.27 % over 40 synthetic bases, max +1.61 %, 36 of 40 worse;
+QPLIB_1157 +0.54 %. See decisions.md 2026-11-13.
+
+**Not reached:** the issue's HiGHS parity (~2.7 ms on its basis). About 2.4x
+was recovered on the synthetic shape; the remaining cost is mostly
+`SparseLu`'s own storage (one Vec per U row, `u_above` Vec<Vec>, ~12
+m-length scratch arrays allocated, zeroed and dropped per factorization).
+The issue's real basis was not measured.
+
+## Continuation: in-place refactor (same session)
+- 132c16e: `SparseLu::refactor_markowitz` + `assemble_into` shared fill
+  path; `SparseLu::refactor` routed through it under Markowitz.
+- c25e89b: example times fresh-replacing-held vs in-place, checks digests.
+- **Correction to the table above:** its "after" times excluded dropping
+  the factor. Including the drop (what a caller replacing its factor
+  pays), fresh is 6.36 / 6.06 / 6.81 ms; in place 4.97 / 4.61 / 5.32 ms.
+  QPLIB_3852 0.371 -> 0.246, bchoco06 0.261 -> 0.202, QPLIB_1157 12.75 ->
+  12.15 ms. Overall on the synthetic shape: ~12.9 ms -> ~5.0 ms.
+- Only callers that keep one `SparseLu` get the in-place gain. discopt
+  currently builds a new factor per refactorization.
 ```
 
 ## Git Status
 ```
-39ea596 Fix clippy needless_range_loop under Rust 1.100
-675a468 Merge pull request #231 from firstprinciples/wide-parent-contrib-memory
-14d9bc6 Address review: per-factorization plan, out-of-order fallback, gated Always
-0d29668 Add Solver::with_early_assembly
-34494d5 Opt-in accumulators for wide parents (sequential drivers)
+60ce836 Markowitz LU: keep the elimination's buffers across in-place refactors (#232)
+d2a1e20 Markowitz LU: pack column-heap entries into one u64 key (#232)
+d00fdb6 Markowitz LU: smallest live row count from a histogram, not a heap (#232)
+5e91e5d Markowitz LU: skip the column walk when the update has nothing to subtract (#232)
+208b10c dev logs: piperout-d27 real-basis measurement (#232)
 ```
 
 ## Test Status
@@ -86,23 +86,14 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 474 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.98s
+test result: ok. 476 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.31s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-13-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-13-02.md)
 
-name                n   factor(μs)    solve(μs)        inertia
-spd_10             10           18            3     (10, 0, 0)
-spd_50             50           62            4     (50, 0, 0)
-spd_100           100          271            8    (100, 0, 0)
-spd_200           200         1253           26    (200, 0, 0)
-kkt_10_3           13            8            1     (10, 3, 0)
-kkt_30_10          40           45            2    (30, 10, 0)
-kkt_50_15          65          101            3    (50, 15, 0)
-kkt_100_30        130          475           11   (100, 30, 0)
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
@@ -111,63 +102,63 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Inertia, residual and validation lines are identical to 2026-11-12-01.
+Identical to 2026-10-23-01.
 
 ```
 
 ## Recent Decisions
-buffer from the returned factor. Factors are bit-identical under every
-scheme and driver.
+Markowitz pivoting. `assemble_into` destructures `SparseLu` exhaustively.
 
-**Evidence.** `dev/research/wide-tree-contribution-memory.md`;
-`tests/wide_tree_memory.rs` (generated trees, `WideParents` peak at most
-`Off`'s plus a bookkeeping allowance, retained factor no larger, no
-factor owns contribution storage; fails before the fix).
+**Why.** The in-place path is only safe if it leaves exactly the state a
+fresh factor would, and two parallel builders drift. One code path makes
+equality hold by construction. The exhaustive destructure makes a newly
+added field a compile error until someone decides how a refactor resets
+it, rather than a stale value carried into the next factorization.
 
-## 2026-11-13 — `WideParents` review follow-ups
+**Evidence.** tests/lu_refactor_inplace.rs compares in-place against
+fresh bitwise, including under the same script of solves and FT updates
+afterwards; deleting any of three resets fails it. ~22 % faster on the
+#232 basis shape (journal 2026-11-13-02).
 
-**Decision.** The accumulator plan is derived by each factorization that
-uses it (`Accumulators::new`, from `SymbolicFactorization::
-wide_parent_plan`), not cached on the analysis: no private field on the
-public struct, and no stale plan after a caller edits `supernodes`. A
-deposit out of ascending order abandons the plans it passes over instead
-of failing at the parent (debug builds assert): the accumulator keeps the
-prefix of children it absorbed, the rest are assembled whole after it in
-children order, so factors are unchanged. `EarlyAssembly::Always` sits
-behind the internal `__early-assembly-always` feature, which the crate's
-tests enable through a self dev-dependency. The frontal pool's growth rule
-is explicit (`grow_pooled_front`: capacity `max(2·cap, n²)`), and an
-adopted accumulator grows the idle pool's capacity without writing it.
+## 2026-11-13 — Markowitz pivot order is held bit-identical to 0.22 (reverses the distinct-columns entry above, PR #234)
 
-**Why.** Maintainer review of PR #231. Deriving the plan costs one pass
-over supernodes and children (about 6 µs on the 1,501-supernode star).
+**Decision.** The threshold-Markowitz search keeps its 0.22 budget: each
+live heap entry it examines counts against `markowitz_max_search`,
+duplicates included. The kernel-only heap build reproduces the eager heaps'
+multiset exactly (peel-phase pushes logged, heapified at the first
+non-singleton step, dead rows/columns left out). This reverses the earlier
+2026-11-13 entry "Markowitz candidate search counts distinct columns".
 
-**Evidence.** `tests/wide_tree_memory.rs` (now `harness = false`)
-unchanged figures: star `Off` 65.73 MiB, `WideParents` 12.12 MiB; 192
-matrices, at most 7,208 B above `Off`. `tests/early_assembly_parity.rs`
-digests unchanged; the parent-release pin now runs on every target.
+**Why.** pounce's active-set QP uses this factorization as a rank-reveal
+probe. The distinct-columns rule made QGFRDXPN cycle to the iteration cap
+(details in `dev/tried-and-rejected.md`, 2026-11-13). Pivot order is
+therefore treated as part of the contract.
+
+**Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
+QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
+fails if the dedup is re-added. Journal 2026-11-13-02.
 
 ## Recent Tried-and-Rejected
-  (`dense::matrix::fit_pooled_front`).
-- **Recycling absorbed blocks' buffers through the contribution pool.**
-  The kernel reuses a pooled buffer with `reserve`, so a buffer grows
-  along a chain of siblings up to twice the largest block, and the
-  parent's small block then pins it until the grandparent assembles: 19
-  of 2,000 random trees more than 2% above `Off` (worst 1.128×), and the
-  retained factor larger in 1,126 (review finding). Pooling only
-  delayed-pivot remainders still grew one delaying tree's retained
-  factor by 32 B. Absorbed blocks and remainders are now freed; `Off`
-  already pays one allocation per leaf block.
-- **Counting packed blocks in `WorkEstimate::peak_contrib_bytes`.** The
-  default `Solver` runs the parallel task graph when the tree has task
-  parallelism, which holds square blocks, so a packed figure understated
-  that path's contribution memory by about half (review finding). The
-  estimate stays the classic square one, an upper bound for every driver
-  and scheme.
-- **A `ContribLayout` argument on the public dense kernels.** Only the
-  crate's own drivers pass anything but `Square`. The public signatures
-  stay as in 0.22.0; the drivers call crate-internal `_with_layout`
-  variants.
+the contract for callers that use `SparseLu` as a rank-reveal probe. With
+PR #234 at dd98cb8, pounce's
+`crates/pounce-cli/tests/issue_1076_qgfrdxpn_active_set_prune_cap.rs`
+(`convex_qp_qgfrdxpn`, `solver_selection=qp-active-set`) went from
+SolveSucceeded, 3 553 iterations, 6.0 s on feral 0.22 to
+MaximumIterationsExceeded at 27 811 iterations, 50.6 s (objective 1.00569e11
+at the cap vs 1.00791e11 optimal); it reproduced on re-run. The other 2 156
+pounce tests passed, and pounce's default fixture sweep diffed empty
+because its default routing never reaches the rank probe. The only signal
+I had measured was fill (+0.27 % geomean over 40 synthetic bases, 36/40
+worse), which says nothing about which rows a rank reveal declares
+dependent.
+
+**Replaced with.** Exact reproduction of the 0.22 heap contents: peel-phase
+pushes are logged and heapified when the singleton stacks first run dry,
+minus entries for eliminated rows/columns. Digests are bit-identical to 0.22
+on 3 real and 40 synthetic bases, pinned by `tests/lu_markowitz_golden.rs`.
+Lesson: on a factorization other code uses for rank decisions, a change to
+pivot order is a behaviour change even when fill and residuals are fine;
+gate it on a golden pivot test, not on fill.
 
 ## Source Files
 ```
@@ -309,7 +300,9 @@ tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_markowitz.rs
+tests/lu_markowitz_golden.rs
 tests/lu_real_bases.rs
+tests/lu_refactor_inplace.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
 tests/lu_sparse_rhs.rs

@@ -138,6 +138,9 @@ name = "hyper_sparse_solve"
 name = "real_basis_hyper"
 
 [[example]]
+name = "lu_markowitz_triangular"
+
+[[example]]
 name = "lu_fill_orderings"
 
 [[example]]

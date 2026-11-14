@@ -55,6 +55,22 @@ impl ReachWork {
         ReachWork::default()
     }
 
+    /// Become `new(m)` (when `enabled`) or `disabled()`, reusing the marker's
+    /// allocation when it is already length `m` (issue #232).
+    pub(super) fn recycle(&mut self, m: usize, enabled: bool) {
+        if !enabled {
+            *self = ReachWork::disabled();
+        } else if self.mark.len() == m {
+            self.mark.fill(false);
+            self.stack.clear();
+            self.list.clear();
+            self.sweeps = 0;
+            self.nodes = 0;
+        } else {
+            *self = ReachWork::new(m);
+        }
+    }
+
     /// Length of the membership marker — `m` when the route is live, `0` when
     /// it was never built.
     #[inline]
