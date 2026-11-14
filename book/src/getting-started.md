@@ -4,7 +4,7 @@ Add feral to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-feral = "0.22"
+feral = "0.23"
 ```
 
 feral is primarily a **sparse** symmetric indefinite solver. The

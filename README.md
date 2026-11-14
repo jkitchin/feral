@@ -25,7 +25,7 @@ optimization. It is published on
 **full ~183k-matrix KKT corpus** with no n-size filter (matrices up to
 n ≈ 5×10⁵, ~14k above n = 500 and ~10k above n = 1000; residuals at
 machine precision on the well-conditioned majority), and passes
-**1022 tests, 0 failed** (lib + integration, 24 ignored).
+**1040 tests, 0 failed** (lib + integration, 24 ignored).
 
 Inertia correctness is validated against a multi-source consensus oracle —
 feral + canonical Fortran **MUMPS 5.8.2** + **SPRAL/SSIDS** — via

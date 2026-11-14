@@ -113,6 +113,28 @@ factor. A vanished bump pivot returns
 [`SingularBasis`](./api.md) so the simplex can repair the basis instead of
 receiving a garbage solve.
 
+### Refactor in place
+
+A simplex refactors every few dozen updates, so hold one `SparseLu` and refactor
+it rather than building a new one each time. Under the default
+`LuPivoting::Markowitz`, `lu.refactor(&b, &symbolic)` and
+`lu.refactor_markowitz(&b, params)` re-factor **in place**: the old factor's
+`U` rows, index lists, work arrays and the elimination's own buffers are
+cleared and refilled instead of freed and allocated again. The result is
+bit-identical to a fresh [`SparseLu::factor_markowitz`](./api.md), and on an
+error the previous factorization is left intact and still solves.
+
+```rust,ignore
+let params = LuParams::default();
+let mut lu = SparseLu::factor_markowitz(&b0, params.clone())?;
+// … ftran / btran / update until NeedsRefactor …
+lu.refactor_markowitz(&b1, params.clone())?;   // reuses lu's memory
+```
+
+On a 17 470-row LP basis from a dual simplex (issue #232), this takes the
+factorization from 15.5 ms in 0.22 to 5.65 ms in place, against 7.3 ms for a
+fresh factor.
+
 ## Robustness: scaling and refinement
 
 The wrong-answer bugs that historically bit downstream simplex code were *all*
