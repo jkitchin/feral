@@ -8248,3 +8248,26 @@ therefore treated as part of the contract.
 **Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
 QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
 fails if the dedup is re-added. Journal 2026-11-13-02.
+
+## 2026-11-18 — The permute cache owns the permuted matrix; the Solver vouches for the pattern (issue #237)
+
+**Decision.** `PermuteCache` holds the permuted `CscMatrix` itself. A warm
+hit moves it to the driver, which overwrites its values and hands it back
+(`FactorWorkspace::restore_permuted`) before returning; a driver that
+returns early with an error loses it and the next warm call rebuilds via
+the cold path. When the value map is a bijection the cache stores its
+inverse and the warm path gathers (in parallel on a rayon worker).
+`Solver::factor_impl` sets a crate-private, single-use
+`FactorWorkspace::pattern_verified` after its exact pattern comparison,
+and the warm path then skips its own `O(nnz)` re-comparison (the `O(n)`
+`perm_inv` check stays). `NumericParams` is not used for this signal: it
+is public with all-public fields, and its `pattern_reused_hint` can be set
+by direct-API callers, so it cannot carry a "pattern already checked"
+guarantee.
+
+**Why.** The warm permute is serial work outside the parallel tree; it
+cloned the cached pattern and allocated a fresh values array every call.
+
+**Evidence.** Chain KKT n = 155 970, nnz = 5.97 M: warm permute 74.8 ms
+-> 6-9 ms on 4 threads, solve digests identical to 0.23.0. Journal
+2026-11-18-01; `dev/research/issue-237-permute-warm-path-2026-11-18.md`.

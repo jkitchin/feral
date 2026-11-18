@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — faster same-pattern refactorization (issue #237, step 1)
+
+- The value permutation on a repeated factorization of an unchanged
+  pattern no longer allocates or copies the permuted pattern: the
+  permuted matrix is kept in the workspace and its values are
+  overwritten in place, gathered in parallel when the parallel driver
+  runs. The pattern comparison the `Solver` already made is no longer
+  repeated. On a 156k-row, 6.0M-nonzero block-banded KKT the warm
+  permute drops from 75 ms to 6-9 ms (4 threads). Factors are
+  bit-identical to 0.23.0.
+- Memory: the permuted values array (8 bytes per stored nonzero) now
+  stays resident between factorizations in the `Solver`'s workspace.
+
 ## [0.23.0] - 2026-11-14
 
 **Breaking (struct literals only).** `NumericParams` gains the public

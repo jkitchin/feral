@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-13T21:38:49Z
+Generated: 2026-11-18T17:45:45Z
 
 ## Latest Session
-File: dev/sessions/2026-11-13-02.md
+File: dev/sessions/2026-11-18-01.md
 ```
-# Session 2026-11-13-02
+# Session 2026-11-18-01
 
 ## Goal
-Issue #232: `SparseLu::factor_markowitz` ~6.5x slower than HiGHS HFactor
-on a near-triangular LP basis (heap churn + per-column allocation).
+Issue #237 (block-banded IPM KKT: serial per-call work is about half of
+each refactorization at 16 threads). Review the issue against the code,
+then step 1 of the review's order: the permute warm path.
 
 ## Accomplished
-- f3d99e0: `examples/lu_markowitz_triangular.rs` — timing + bitwise digest
-  harness on a synthetic basis shaped like the issue's (m = 17 470, ~13k
-  one-entry columns, 1 459-col kernel, little fill) and on the committed
-  `.mtx` bases. The issue's actual basis is in discopt and could not be
-  attached to this session.
-- dce0dc6: Markowitz count heaps built only when the singleton stacks first
-  run dry (over the kernel); active submatrix in packed `Lists<T>`;
-  per-step dedup of the candidate search.
-- 6a5afd3: `remap_and_sort_l` without per-column Vecs; `u_above` pre-sized.
-- Timings (median, default `LuParams`):
+- Reviewed #237 against 0.23.0. All code claims checked hold (InfNorm
+  recomputed every call, permute warm path compares + allocates + clones,
+  Solver pattern checks per call, refinement plateau reset by tiny gains).
+  #237 item 1 overlaps #202 (still open). Suggested order: permute warm
+  path, trust_pattern opt-in, parallel KR sweeps, scaling reuse with a
+  drift guard, refinement contraction exit.
+- 0431a10: research note + plan (`dev/research/issue-237-permute-warm-path-2026-11-18.md`,
+  `dev/plans/issue-237-step1-permute-warm.md`).
+- ae1ec31: `examples/issue237_permute_warm.rs`, chain KKT n = 155 970,
+  nnz = 5 965 170, analytic inertia oracle (78000, 77970, 0).
+  Baseline warm permute 74.8 ms: compare 7, alloc 2, scatter 37
+  (incl. page faults), pattern clone 28 ms.
+- 8d01094: PermuteCache owns the permuted matrix, values overwritten in
+  place, zero fill skipped for bijective maps, Solver-verified pattern
+  compare not repeated. Permute 92.2 -> 19.8 ms (same-run comparison).
+- 6e894b0: bijective maps gather; parallel on a rayon worker.
+  Permute 22.5-24.6 ms serial -> 6.3-9.2 ms on 4 threads.
+- Solve digests identical to the 0.23.0 build at two sizes in every
+  driver mode. `cargo test --release`: 1044 passed, 0 failed.
 
-  | basis | before | after |
-  |---|---|---|
-  | piperout-shape seed 1 | 12.4 ms | 5.4 ms |
-  | piperout-shape seed 2 | 12.9 ms | 4.9 ms |
-  | piperout-shape seed 3 | 13.4 ms | 5.8 ms |
-  | QPLIB_3852 | 0.78 ms | 0.35 ms |
-  | bchoco06_illcond | 0.47 ms | 0.26 ms |
-  | QPLIB_1157 (fill-bound) | 12.9 ms | 12.7 ms |
+**Not shown here:** a factor-wall improvement. On this 4-core container
+the tree phase dominates (~1.2 s) and run-to-run noise is ±15 %, so the
+~70 ms saved does not show reliably in factor wall. The issue's 16-thread
+setting (tree 123 ms vs permute 23 ms) was not reproduced.
 
-- `cargo test --release --no-fail-fast`: 1022 passed, 0 failed.
+**Finding:** the cold permute keeps a `-0.0` input as `-0.0`; 0.23.0's
+warm path produced `+0.0`. Pre-existing; the warm path keeps `+0.0`.
 
-**Unfavourable:** the dedup changes kernel pivots and fill goes up slightly
-— geomean +0.27 % over 40 synthetic bases, max +1.61 %, 36 of 40 worse;
-QPLIB_1157 +0.54 %. See decisions.md 2026-11-13.
+## Benchmark Results
+```
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+```
+Identical to 2026-11-13-02.
 
-**Not reached:** the issue's HiGHS parity (~2.7 ms on its basis). About 2.4x
-was recovered on the synthetic shape; the remaining cost is mostly
-`SparseLu`'s own storage (one Vec per U row, `u_above` Vec<Vec>, ~12
-m-length scratch arrays allocated, zeroed and dropped per factorization).
-The issue's real basis was not measured.
-
-## Continuation: in-place refactor (same session)
-- 132c16e: `SparseLu::refactor_markowitz` + `assemble_into` shared fill
-  path; `SparseLu::refactor` routed through it under Markowitz.
-- c25e89b: example times fresh-replacing-held vs in-place, checks digests.
-- **Correction to the table above:** its "after" times excluded dropping
-  the factor. Including the drop (what a caller replacing its factor
-  pays), fresh is 6.36 / 6.06 / 6.81 ms; in place 4.97 / 4.61 / 5.32 ms.
-  QPLIB_3852 0.371 -> 0.246, bchoco06 0.261 -> 0.202, QPLIB_1157 12.75 ->
-  12.15 ms. Overall on the synthetic shape: ~12.9 ms -> ~5.0 ms.
-- Only callers that keep one `SparseLu` get the in-place gain. discopt
-  currently builds a new factor per refactorization.
 ```
 
 ## Git Status
 ```
-60ce836 Markowitz LU: keep the elimination's buffers across in-place refactors (#232)
-d2a1e20 Markowitz LU: pack column-heap entries into one u64 key (#232)
-d00fdb6 Markowitz LU: smallest live row count from a histogram, not a heap (#232)
-5e91e5d Markowitz LU: skip the column walk when the update has nothing to subtract (#232)
-208b10c dev logs: piperout-d27 real-basis measurement (#232)
+6e894b0 perf(#237): permute warm path gathers, in parallel on a rayon worker
+8d01094 perf(#237): permute warm path reuses the permuted matrix in place
+ae1ec31 bench(#237): warm-refactorization permute harness on a chain KKT
+0431a10 docs(#237): research note and plan for the permute warm path
+0e7cc5f Merge pull request #236 from jkitchin/claude/gallant-cray-pjv1tt
 ```
 
 ## Test Status
@@ -86,50 +86,28 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 476 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.31s
+test result: ok. 480 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.23s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-13-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-18-01.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
   Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
 Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-10-23-01.
+Identical to 2026-11-13-02.
 
 ```
 
 ## Recent Decisions
-Markowitz pivoting. `assemble_into` destructures `SparseLu` exhaustively.
-
-**Why.** The in-place path is only safe if it leaves exactly the state a
-fresh factor would, and two parallel builders drift. One code path makes
-equality hold by construction. The exhaustive destructure makes a newly
-added field a compile error until someone decides how a refactor resets
-it, rather than a stale value carried into the next factorization.
-
-**Evidence.** tests/lu_refactor_inplace.rs compares in-place against
-fresh bitwise, including under the same script of solves and FT updates
-afterwards; deleting any of three resets fails it. ~22 % faster on the
-#232 basis shape (journal 2026-11-13-02).
-
-## 2026-11-13 — Markowitz pivot order is held bit-identical to 0.22 (reverses the distinct-columns entry above, PR #234)
-
-**Decision.** The threshold-Markowitz search keeps its 0.22 budget: each
-live heap entry it examines counts against `markowitz_max_search`,
-duplicates included. The kernel-only heap build reproduces the eager heaps'
-multiset exactly (peel-phase pushes logged, heapified at the first
-non-singleton step, dead rows/columns left out). This reverses the earlier
-2026-11-13 entry "Markowitz candidate search counts distinct columns".
-
-**Why.** pounce's active-set QP uses this factorization as a rank-reveal
 probe. The distinct-columns rule made QGFRDXPN cycle to the iteration cap
 (details in `dev/tried-and-rejected.md`, 2026-11-13). Pivot order is
 therefore treated as part of the contract.
@@ -137,6 +115,29 @@ therefore treated as part of the contract.
 **Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
 QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
 fails if the dedup is re-added. Journal 2026-11-13-02.
+
+## 2026-11-18 — The permute cache owns the permuted matrix; the Solver vouches for the pattern (issue #237)
+
+**Decision.** `PermuteCache` holds the permuted `CscMatrix` itself. A warm
+hit moves it to the driver, which overwrites its values and hands it back
+(`FactorWorkspace::restore_permuted`) before returning; a driver that
+returns early with an error loses it and the next warm call rebuilds via
+the cold path. When the value map is a bijection the cache stores its
+inverse and the warm path gathers (in parallel on a rayon worker).
+`Solver::factor_impl` sets a crate-private, single-use
+`FactorWorkspace::pattern_verified` after its exact pattern comparison,
+and the warm path then skips its own `O(nnz)` re-comparison (the `O(n)`
+`perm_inv` check stays). `NumericParams` is not used for this signal: it
+is public with all-public fields, and its `pattern_reused_hint` can be set
+by direct-API callers, so it cannot carry a "pattern already checked"
+guarantee.
+
+**Why.** The warm permute is serial work outside the parallel tree; it
+cloned the cached pattern and allocated a fresh values array every call.
+
+**Evidence.** Chain KKT n = 155 970, nnz = 5.97 M: warm permute 74.8 ms
+-> 6-9 ms on 4 threads, solve digests identical to 0.23.0. Journal
+2026-11-18-01; `dev/research/issue-237-permute-warm-path-2026-11-18.md`.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
