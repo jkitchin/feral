@@ -2137,6 +2137,10 @@ impl Solver {
         // reads `last_factors`. Memory only — the reused buffers are
         // fully re-initialized (tests/factor_output_recycling.rs).
         self.workspace.begin_recycle(self.last_factors.take());
+        // Issue #237: `cache_valid` is the exact `col_ptr` / `row_idx`
+        // comparison above; tell the permute warm path so it does not
+        // repeat it. Consumed by the driver (one call only).
+        self.workspace.pattern_verified = cache_valid;
         let result = Self::dispatch_numeric(
             self.use_parallel,
             pool.as_ref(),
@@ -2145,6 +2149,9 @@ impl Solver {
             symbolic,
             &effective_params,
         );
+        // Issue #237: paths that never reach the permute (dense fast
+        // path) leave the flag set; never let it outlive this call.
+        self.workspace.pattern_verified = false;
 
         // Issue #65: inertia-guided MC64 scaling fallback. When the user
         // configured `Auto`, the resolved scaling was NOT MC64, and the
@@ -2189,6 +2196,8 @@ impl Solver {
                 }
                 // Same #154 pool-or-sequential dispatch as the initial
                 // factor above — never the parallel driver bare.
+                // Issue #237: same matrix, same validation as above.
+                self.workspace.pattern_verified = cache_valid;
                 let retry = Self::dispatch_numeric(
                     self.use_parallel,
                     pool.as_ref(),
@@ -2197,6 +2206,7 @@ impl Solver {
                     symbolic,
                     &retry_params,
                 );
+                self.workspace.pattern_verified = false;
                 match retry {
                     Ok((rf, ri)) if ri.zero < first_zero => {
                         effective_params.scaling = ScalingStrategy::Mc64Symmetric;
