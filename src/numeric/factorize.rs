@@ -1730,16 +1730,37 @@ pub(crate) struct PermuteCache {
     /// without handing it back; a warm call that finds `None` takes the
     /// cold path, which rebuilds the cache (correct, just slower).
     permuted: Option<CscMatrix>,
-    /// Issue #237: `true` when `value_map` is a bijection onto the
-    /// permuted slots (no `(i, j)` / `(j, i)` duplicate pair in the
-    /// input), so every slot receives exactly one input value and the
-    /// warm path can skip zero-filling the buffer.
-    value_map_bijective: bool,
+    /// How input values reach the permuted slots; length `input_nnz`.
+    route: ValueRoute,
+}
+
+/// Issue #237: the warm path's value route for [`PermuteCache`].
+#[derive(Debug)]
+pub(crate) enum ValueRoute {
     /// `value_map[k]` is the index into the permuted `values` vector
-    /// where `matrix.values[k]` contributes (via `+=`). When the input
-    /// has duplicate `(i, j)` / `(j, i)` entries they map to the same
-    /// slot, matching `CscMatrix::from_triplets` duplicate-summing.
-    value_map: Vec<usize>,
+    /// where `matrix.values[k]` contributes (via `+=`). Used when the
+    /// input has duplicate `(i, j)` / `(j, i)` entries, which map to the
+    /// same slot, matching `CscMatrix::from_triplets` duplicate-summing.
+    Scatter(Vec<usize>),
+    /// The value map is a bijection (no duplicate pair): `src[d]` is the
+    /// one input index whose value lands in permuted slot `d`. A gather
+    /// writes the output sequentially, needs no zero fill, and splits
+    /// into independent output chunks for a parallel pass.
+    Gather(Vec<usize>),
+}
+
+impl Default for ValueRoute {
+    fn default() -> Self {
+        ValueRoute::Scatter(Vec::new())
+    }
+}
+
+impl ValueRoute {
+    fn len(&self) -> usize {
+        match self {
+            ValueRoute::Scatter(v) | ValueRoute::Gather(v) => v.len(),
+        }
+    }
 }
 
 impl FactorWorkspace {
@@ -4664,18 +4685,13 @@ fn permute_csc_values_with_cache(
             if c.permuted.is_some()
                 && c.input_n == n
                 && c.input_nnz == nnz
-                && c.value_map.len() == nnz
+                && c.route.len() == nnz
                 && (pattern_verified
                     || (c.input_col_ptr == matrix.col_ptr && c.input_row_idx == matrix.row_idx))
                 && c.input_perm_inv.as_slice() == perm_inv
             {
                 if let Some(mut permuted) = c.permuted.take() {
-                    scatter_permuted_values(
-                        &c.value_map,
-                        c.value_map_bijective,
-                        &matrix.values,
-                        &mut permuted.values,
-                    );
+                    write_permuted_values(&c.route, &matrix.values, &mut permuted.values);
                     return Ok((permuted, 0));
                 }
             }
@@ -4700,7 +4716,17 @@ fn permute_csc_values_with_cache(
         // successful refresh.
         match build_permute_value_map(matrix, perm_inv, &permuted) {
             Ok(value_map) => {
-                let value_map_bijective = value_map.len() == permuted.values.len();
+                // Every permuted slot comes from at least one input entry,
+                // so equal lengths mean each slot is hit exactly once.
+                let route = if value_map.len() == permuted.values.len() {
+                    let mut src = vec![0usize; value_map.len()];
+                    for (k, &d) in value_map.iter().enumerate() {
+                        src[d] = k;
+                    }
+                    ValueRoute::Gather(src)
+                } else {
+                    ValueRoute::Scatter(value_map)
+                };
                 // `permuted: None`: the driver holds the matrix and hands
                 // it back via `FactorWorkspace::restore_permuted`.
                 *cache = Some(PermuteCache {
@@ -4710,8 +4736,7 @@ fn permute_csc_values_with_cache(
                     input_row_idx: matrix.row_idx.clone(),
                     input_perm_inv: perm_inv.to_vec(),
                     permuted: None,
-                    value_map_bijective,
-                    value_map,
+                    route,
                 });
             }
             Err(_) => {
@@ -4730,28 +4755,50 @@ fn permute_csc_values_with_cache(
     Ok((permuted, from_triplets_us))
 }
 
-/// Issue #237: write the input values into the reused permuted buffer
-/// through `value_map`, reproducing bit for bit what the cold path's
-/// `from_triplets` (and the old allocate-zero-accumulate warm path)
-/// produced: every slot is `0.0 + a_1 (+ a_2)` in input order `k`.
+/// Issue #237: write the input values into the reused permuted buffer,
+/// reproducing bit for bit what 0.23.0's warm path (allocate zeroed,
+/// accumulate in input order `k`) produced: every slot is
+/// `0.0 + a_1 (+ a_2)`.
 ///
-/// When the map is a bijection (`value_map.len() == out.len()` and each
-/// slot hit once — true by construction when the lengths match, since
-/// every permuted slot comes from at least one input entry) the zero
-/// fill is skipped and each slot is written as `0.0 + v`. The explicit
-/// `0.0 +` is not a no-op: it turns a `-0.0` input into `+0.0`, as the
-/// accumulate-into-zero form does, so a signed zero cannot reach the
-/// factor differently than before.
-fn scatter_permuted_values(value_map: &[usize], bijective: bool, input: &[f64], out: &mut [f64]) {
-    debug_assert_eq!(value_map.len(), input.len());
-    if bijective {
-        for (&dest, &v) in value_map.iter().zip(input) {
-            out[dest] = 0.0 + v;
+/// `Gather` (bijective map) writes each slot once as `0.0 + v` with no
+/// zero fill. The explicit `0.0 +` is not a no-op: it turns a `-0.0`
+/// input into `+0.0`, as the accumulate-into-zero form does. Slots are
+/// independent, so when already running on a rayon worker (the parallel
+/// driver, or the sequential one dispatched inside a Solver's pool) and
+/// the matrix is large, output chunks are filled in parallel; the result
+/// is the same bits either way.
+///
+/// `Scatter` (duplicate pairs) zero-fills and accumulates serially in
+/// input order, keeping the summation order of duplicates.
+fn write_permuted_values(route: &ValueRoute, input: &[f64], out: &mut [f64]) {
+    /// Below this many entries the pass is a few hundred microseconds at
+    /// most and not worth a fork.
+    const PAR_MIN_NNZ: usize = 1 << 18;
+    const CHUNK: usize = 1 << 15;
+    match route {
+        ValueRoute::Gather(src) => {
+            debug_assert_eq!(src.len(), out.len());
+            if out.len() >= PAR_MIN_NNZ && rayon::current_thread_index().is_some() {
+                use rayon::prelude::*;
+                out.par_chunks_mut(CHUNK)
+                    .zip(src.par_chunks(CHUNK))
+                    .for_each(|(o, s)| {
+                        for (slot, &k) in o.iter_mut().zip(s) {
+                            *slot = 0.0 + input[k];
+                        }
+                    });
+            } else {
+                for (slot, &k) in out.iter_mut().zip(src) {
+                    *slot = 0.0 + input[k];
+                }
+            }
         }
-    } else {
-        out.fill(0.0);
-        for (&dest, &v) in value_map.iter().zip(input) {
-            out[dest] += v;
+        ValueRoute::Scatter(value_map) => {
+            debug_assert_eq!(value_map.len(), input.len());
+            out.fill(0.0);
+            for (&dest, &v) in value_map.iter().zip(input) {
+                out[dest] += v;
+            }
         }
     }
 }
@@ -6548,9 +6595,9 @@ mod tests {
             assert_csc_bits_eq(&cold, &oracle, name);
             let c = cache.as_ref().unwrap();
             assert_eq!(
-                c.value_map_bijective,
+                matches!(c.route, ValueRoute::Gather(_)),
                 name == "bijective",
-                "{name}: bijective flag"
+                "{name}: gather route iff bijective"
             );
             assert!(c.permuted.is_none(), "{name}: driver holds the buffer");
             // Stand in for the driver handing the buffer back.
@@ -6716,5 +6763,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Issue #237: the parallel gather (taken only on a rayon worker and
+    /// above `PAR_MIN_NNZ`) writes the same bits as the serial one,
+    /// including the `-0.0 -> +0.0` normalization.
+    #[test]
+    fn parallel_gather_matches_serial_issue_237() {
+        let len = (1usize << 18) + 12_345;
+        // A fixed pseudo-random permutation as the gather source.
+        let mut src: Vec<usize> = (0..len).collect();
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in (1..len).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            src.swap(i, (x % (i as u64 + 1)) as usize);
+        }
+        let input: Vec<f64> = (0..len)
+            .map(|k| {
+                if k % 1000 == 7 {
+                    -0.0
+                } else {
+                    (k as f64).sin() * 1e3
+                }
+            })
+            .collect();
+        let route = ValueRoute::Gather(src);
+        let mut serial = vec![f64::NAN; len];
+        write_permuted_values(&route, &input, &mut serial);
+        assert!(rayon::current_thread_index().is_none());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let mut par = vec![f64::NAN; len];
+        pool.install(|| {
+            assert!(rayon::current_thread_index().is_some());
+            write_permuted_values(&route, &input, &mut par);
+        });
+        let sb: Vec<u64> = serial.iter().map(|v| v.to_bits()).collect();
+        let pb: Vec<u64> = par.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(sb, pb);
+        assert!(serial.iter().all(|v| v.to_bits() != (-0.0f64).to_bits()));
     }
 }

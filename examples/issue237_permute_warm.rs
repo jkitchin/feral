@@ -19,6 +19,9 @@
 //!
 //! Usage:
 //!   cargo run --release --example issue237_permute_warm -- [t] [nx] [iters]
+//!
+//! The last line runs the profiled sequential driver on a rayon worker,
+//! where the permute's parallel gather engages.
 
 use std::time::Instant;
 
@@ -160,4 +163,14 @@ fn main() {
     run(&a, false, true, iters);
     run(&a, false, false, iters);
     run(&a, true, false, iters);
+    // Profiled sequential driver run on a rayon worker: the permute's
+    // parallel gather engages there (it does inside a parallel Solver's
+    // pool too, where the profiler cannot attribute it).
+    match rayon::ThreadPoolBuilder::new().build() {
+        Ok(pool) => {
+            println!("  (next line: sequential driver called on a rayon worker)");
+            pool.install(|| run(&a, false, true, iters));
+        }
+        Err(e) => eprintln!("pool build failed: {e}"),
+    }
 }
