@@ -1,45 +1,30 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-18T17:45:45Z
+Generated: 2026-11-18T23:49:15Z
 
 ## Latest Session
-File: dev/sessions/2026-11-18-01.md
+File: dev/sessions/2026-11-18-02.md
 ```
-# Session 2026-11-18-01
+# Session 2026-11-18-02
 
 ## Goal
-Issue #237 (block-banded IPM KKT: serial per-call work is about half of
-each refactorization at 16 threads). Review the issue against the code,
-then step 1 of the review's order: the permute warm path.
+Issue #237 step 2 (#202 Defect 2): per-call work in `Solver::factor`
+outside the numeric driver. Attribute it first, then decide on a
+caller-asserted unchanged-pattern opt-in.
 
 ## Accomplished
-- Reviewed #237 against 0.23.0. All code claims checked hold (InfNorm
-  recomputed every call, permute warm path compares + allocates + clones,
-  Solver pattern checks per call, refinement plateau reset by tiny gains).
-  #237 item 1 overlaps #202 (still open). Suggested order: permute warm
-  path, trust_pattern opt-in, parallel KR sweeps, scaling reuse with a
-  drift guard, refinement contraction exit.
-- 0431a10: research note + plan (`dev/research/issue-237-permute-warm-path-2026-11-18.md`,
-  `dev/plans/issue-237-step1-permute-warm.md`).
-- ae1ec31: `examples/issue237_permute_warm.rs`, chain KKT n = 155 970,
-  nnz = 5 965 170, analytic inertia oracle (78000, 77970, 0).
-  Baseline warm permute 74.8 ms: compare 7, alloc 2, scatter 37
-  (incl. page faults), pattern clone 28 ms.
-- 8d01094: PermuteCache owns the permuted matrix, values overwritten in
-  place, zero fill skipped for bijective maps, Solver-verified pattern
-  compare not repeated. Permute 92.2 -> 19.8 ms (same-run comparison).
-- 6e894b0: bijective maps gather; parallel on a rayon worker.
-  Permute 22.5-24.6 ms serial -> 6.3-9.2 ms on 4 threads.
-- Solve digests identical to the 0.23.0 build at two sizes in every
-  driver mode. `cargo test --release`: 1044 passed, 0 failed.
-
-**Not shown here:** a factor-wall improvement. On this 4-core container
-the tree phase dominates (~1.2 s) and run-to-run noise is ±15 %, so the
-~70 ms saved does not show reliably in factor wall. The issue's 16-thread
-setting (tree 123 ms vs permute 23 ms) was not reproduced.
-
-**Finding:** the cold permute keeps a `-0.0` input as `-0.0`; 0.23.0's
-warm path produced `+0.0`. Pre-existing; the warm path keeps `+0.0`.
+- Attribution (throwaway timers, chain KKT n = 155 970, nnz = 5.97 M,
+  80 490 supernodes, warm calls): fingerprint SipHash 31-44 ms, finite
+  scan 10-13, exact compare 6-9, begin_recycle 4-7, post-dispatch
+  escalation check 6-10 ms. ~65-80 ms total.
+- 376f6d4: exact compare first, stored fingerprint reused on exact
+  match (hash only on mismatch / first call); chunked branch-free
+  finite scan. Hash+compare 37-51 -> 6.4-8.8 ms; scan -> 4.9-7.7 ms.
+- 0854fde: #102 escalation check tests the O(1) preprocess condition
+  first and computes pivot extent in one pass: 5.7-9.7 -> 0.7-0.9 ms.
+- Outside-driver work per warm call: ~65-80 ms -> ~20 ms. Solve digests
+  unchanged at both harness sizes, every driver mode. cargo test
+  --release: 1046 passed, 0 failed (2 new tests).
 
 ## Benchmark Results
 ```
@@ -53,17 +38,32 @@ Sparse solver: 2/2 total
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 ```
-Identical to 2026-11-13-02.
+Identical to 2026-11-18-01.
 
+## Decisions Made
+- No `trust_pattern` / `factor_assume_same_pattern` API (user's
+  decision; dev/decisions.md 2026-11-18).
+
+## Abandoned Approaches
+- None tried and dropped. begin_recycle lazy-take left as a lead (below).
+
+## Next Session Should
+1. #237 step 3: parallel Knight–Ruiz sweeps (max reductions are order
+   independent, so bit-identical by construction; verify by digest).
+2. #237 step 4 / #202 Defect 1: InfNorm reuse across same-pattern calls
+   with a value-drift guard or host refresh interval. Do NOT retry
+   warm-starting KR (tried-and-rejected 2026-08-09).
+3. Lead: begin_recycle (4-7 ms at 80k supernodes) — take buffers lazily
+   per node in the drivers instead of moving them all up front.
 ```
 
 ## Git Status
 ```
+0854fde perf(#237): pivot-growth escalation check in one pass, cheap test first
+376f6d4 perf(#237): skip re-hashing an unchanged pattern; vectorized finite scan
+803f513 docs(session): 2026-11-18-01 checkpoint — #237 step 1 permute warm path
 6e894b0 perf(#237): permute warm path gathers, in parallel on a rayon worker
 8d01094 perf(#237): permute warm path reuses the permuted matrix in place
-ae1ec31 bench(#237): warm-refactorization permute harness on a chain KKT
-0431a10 docs(#237): research note and plan for the permute warm path
-0e7cc5f Merge pull request #236 from jkitchin/claude/gallant-cray-pjv1tt
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 480 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.23s
+test result: ok. 482 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.32s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-18-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-18-02.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -103,29 +103,11 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-11-13-02.
+Identical to 2026-11-18-01.
 
 ```
 
 ## Recent Decisions
-probe. The distinct-columns rule made QGFRDXPN cycle to the iteration cap
-(details in `dev/tried-and-rejected.md`, 2026-11-13). Pivot order is
-therefore treated as part of the contract.
-
-**Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
-QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
-fails if the dedup is re-added. Journal 2026-11-13-02.
-
-## 2026-11-18 — The permute cache owns the permuted matrix; the Solver vouches for the pattern (issue #237)
-
-**Decision.** `PermuteCache` holds the permuted `CscMatrix` itself. A warm
-hit moves it to the driver, which overwrites its values and hands it back
-(`FactorWorkspace::restore_permuted`) before returning; a driver that
-returns early with an error loses it and the next warm call rebuilds via
-the cold path. When the value map is a bijection the cache stores its
-inverse and the warm path gathers (in parallel on a rayon worker).
-`Solver::factor_impl` sets a crate-private, single-use
-`FactorWorkspace::pattern_verified` after its exact pattern comparison,
 and the warm path then skips its own `O(nnz)` re-comparison (the `O(n)`
 `perm_inv` check stays). `NumericParams` is not used for this signal: it
 is public with all-public fields, and its `pattern_reused_hint` can be set
@@ -138,6 +120,24 @@ cloned the cached pattern and allocated a fresh values array every call.
 **Evidence.** Chain KKT n = 155 970, nnz = 5.97 M: warm permute 74.8 ms
 -> 6-9 ms on 4 threads, solve digests identical to 0.23.0. Journal
 2026-11-18-01; `dev/research/issue-237-permute-warm-path-2026-11-18.md`.
+
+## 2026-11-18 — No caller-asserted "same pattern" entry point (issue #237 step 2, #202 Defect 2)
+
+**Decision.** `Solver` does not get `trust_pattern` /
+`factor_assume_same_pattern`. Each `factor()` still compares the input
+pattern exactly against the stored one (issue #121), and still scans the
+values for non-finite entries.
+
+**Why.** Once the repeat-call path stopped re-hashing a matching pattern
+(the stored fingerprint is reused on an exact match), the opt-in could
+only remove the exact compare: ~7 ms per call on a 6 M-nnz KKT, against a
+public API whose misuse returns a silently wrong factor (the REG-1 / #121
+failure class). Decided with the user, 2026-11-18.
+
+**Evidence.** Journal 2026-11-18-02: outside-driver work per warm call
+went from ~65-80 ms to ~20 ms with no API change (hash 31-44 ms -> 0,
+finite scan 10-13 -> 5-8 ms, escalation check 6-10 -> 0.7 ms); the
+compare (6-9 ms) and begin_recycle (4-7 ms) remain.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With

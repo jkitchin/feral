@@ -8271,3 +8271,21 @@ cloned the cached pattern and allocated a fresh values array every call.
 **Evidence.** Chain KKT n = 155 970, nnz = 5.97 M: warm permute 74.8 ms
 -> 6-9 ms on 4 threads, solve digests identical to 0.23.0. Journal
 2026-11-18-01; `dev/research/issue-237-permute-warm-path-2026-11-18.md`.
+
+## 2026-11-18 — No caller-asserted "same pattern" entry point (issue #237 step 2, #202 Defect 2)
+
+**Decision.** `Solver` does not get `trust_pattern` /
+`factor_assume_same_pattern`. Each `factor()` still compares the input
+pattern exactly against the stored one (issue #121), and still scans the
+values for non-finite entries.
+
+**Why.** Once the repeat-call path stopped re-hashing a matching pattern
+(the stored fingerprint is reused on an exact match), the opt-in could
+only remove the exact compare: ~7 ms per call on a 6 M-nnz KKT, against a
+public API whose misuse returns a silently wrong factor (the REG-1 / #121
+failure class). Decided with the user, 2026-11-18.
+
+**Evidence.** Journal 2026-11-18-02: outside-driver work per warm call
+went from ~65-80 ms to ~20 ms with no API change (hash 31-44 ms -> 0,
+finite scan 10-13 -> 5-8 ms, escalation check 6-10 -> 0.7 ms); the
+compare (6-9 ms) and begin_recycle (4-7 ms) remain.

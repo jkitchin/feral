@@ -16,6 +16,13 @@ All notable changes to FERAL will be documented in this file.
   bit-identical to 0.23.0.
 - Memory: the permuted values array (8 bytes per stored nonzero) now
   stays resident between factorizations in the `Solver`'s workspace.
+- `Solver::factor` no longer re-hashes an unchanged sparsity pattern:
+  the exact comparison with the stored pattern runs first and an exact
+  match reuses the stored fingerprint. The non-finite input check is
+  vectorized, and the post-factor pivot-growth check makes one pass
+  instead of two (and is skipped when it cannot apply). On the same
+  KKT, per-call work outside the numeric factorization drops from
+  ~65-80 ms to ~20 ms. Results are bit-identical.
 
 ## [0.23.0] - 2026-11-14
 
