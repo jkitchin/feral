@@ -2447,15 +2447,29 @@ impl Solver {
                     && self.snode_params.preprocess == crate::symbolic::OrderingPreprocess::Auto
                 {
                     if let Some(limit) = self.ordering_escalation_growth {
-                        let growth = match (self.min_pivot_magnitude(), self.max_pivot_magnitude())
-                        {
-                            (Some(mn), Some(mx)) if mn > 0.0 => mx / mn,
-                            _ => 0.0,
+                        // Issue #237: the O(1) preprocess test runs first
+                        // and the pivot extent is computed in one pass
+                        // (it was two: min and max each walked every
+                        // node's D, ~6 ms per call at 80k supernodes).
+                        // All three conditions are pure, so the order
+                        // changes no outcome.
+                        let dropped_compress = self.last_symbolic.as_ref().is_some_and(|s| {
+                            s.resolved_preprocess == crate::symbolic::OrderingPreprocess::None
+                        });
+                        let growth = if dropped_compress {
+                            match self
+                                .last_factors
+                                .as_ref()
+                                .and_then(|f| f.pivot_magnitude_extent())
+                            {
+                                Some((mn, mx)) if mn > 0.0 => mx / mn,
+                                _ => 0.0,
+                            }
+                        } else {
+                            0.0
                         };
-                        if growth > limit
-                            && self.last_symbolic.as_ref().is_some_and(|s| {
-                                s.resolved_preprocess == crate::symbolic::OrderingPreprocess::None
-                            })
+                        if dropped_compress
+                            && growth > limit
                             && crate::symbolic::pick_ordering_preprocess(matrix)
                                 == crate::symbolic::OrderingPreprocess::LdltCompress
                         {

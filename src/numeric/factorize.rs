@@ -1489,7 +1489,7 @@ impl SparseFactors {
     /// Shared by [`min_pivot_magnitude`](Self::min_pivot_magnitude) and
     /// [`max_pivot_magnitude`](Self::max_pivot_magnitude). 2×2 detection
     /// follows the solve-path convention (`d_subdiag[k] != 0.0`).
-    fn pivot_magnitude_extent(&self) -> Option<(f64, f64)> {
+    pub(crate) fn pivot_magnitude_extent(&self) -> Option<(f64, f64)> {
         let mut min_mag = f64::INFINITY;
         let mut max_mag = 0.0f64;
         let mut any = false;
