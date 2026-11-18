@@ -322,6 +322,30 @@ struct PatternFingerprint {
     structural_hash: u64,
 }
 
+/// Index of the first non-finite (`±∞` / NaN) entry, if any.
+///
+/// Issue #237: the plain early-exit loop does not vectorize; this scans
+/// fixed-size chunks with a branch-free OR reduction over the exponent
+/// bits (all-ones exponent ⇔ non-finite) and only walks a chunk entry by
+/// entry once it is known to hold a bad value, so the index reported is
+/// the same as the early-exit loop's.
+fn first_non_finite(values: &[f64]) -> Option<usize> {
+    const CHUNK: usize = 1024;
+    const EXP: u64 = 0x7ff0_0000_0000_0000;
+    for (c, chunk) in values.chunks(CHUNK).enumerate() {
+        let bad = chunk
+            .iter()
+            .fold(false, |acc, v| acc | ((v.to_bits() & EXP) == EXP));
+        if bad {
+            return chunk
+                .iter()
+                .position(|v| !v.is_finite())
+                .map(|i| c * CHUNK + i);
+        }
+    }
+    None
+}
+
 impl PatternFingerprint {
     fn of(matrix: &CscMatrix) -> Self {
         use std::collections::hash_map::DefaultHasher;
@@ -1782,16 +1806,32 @@ impl Solver {
         // can decide to back off δ_w. O(nnz), allocation-free.
         // See `dev/journal/2026-05-17-01.org` §08:00 (dtoc2 root
         // cause), §11:50 (input-validation fix).
-        for (k, &v) in matrix.values.iter().enumerate() {
-            if !v.is_finite() {
-                return FactorStatus::FatalError(FeralError::InvalidInput(format!(
-                    "matrix value at nnz index {k} is non-finite ({v}); \
-                     fix the upstream computation before calling factor()"
-                )));
-            }
+        if let Some(k) = first_non_finite(&matrix.values) {
+            let v = matrix.values[k];
+            return FactorStatus::FatalError(FeralError::InvalidInput(format!(
+                "matrix value at nnz index {k} is non-finite ({v}); \
+                 fix the upstream computation before calling factor()"
+            )));
         }
-        // Step 1: pattern fingerprint.
-        let fp = PatternFingerprint::of(matrix);
+        // Step 1: pattern identity. The exact compare against the stored
+        // pattern (issue #121) decides reuse; the fingerprint is only a
+        // fast reject and the key of the MC64 scaling cache.
+        //
+        // Issue #237: `last_pattern` and `last_pattern_fingerprint` are
+        // set and cleared together (symbolic success, race adoption,
+        // invalidation), so when the exact compare succeeds the stored
+        // fingerprint IS this matrix's fingerprint and hashing it again
+        // (SipHash over col_ptr + row_idx, ~half the per-call work
+        // outside the driver on a 6 M-nnz KKT) is skipped. A mismatch
+        // usually exits the compare early; then, and on a first call,
+        // the fingerprint is computed as before.
+        let exact_pattern_match = self.last_pattern.as_ref().is_some_and(|(cp, ri)| {
+            cp.as_slice() == matrix.col_ptr && ri.as_slice() == matrix.row_idx
+        });
+        let fp = match (exact_pattern_match, self.last_pattern_fingerprint) {
+            (true, Some(stored)) => stored,
+            _ => PatternFingerprint::of(matrix),
+        };
 
         // Issue #52 (Phase B): rotate the per-call profiler arcs.
         // Always reset `last_symbolic_profiler` (the symbolic block
@@ -1822,10 +1862,7 @@ impl Solver {
         // stored pattern matches (issue #121): the fingerprint is a fast
         // reject; an equal fingerprint is confirmed by the O(n + nnz) compare
         // so a hash collision can never reuse a stale symbolic.
-        let cache_valid = self.last_pattern_fingerprint == Some(fp)
-            && self.last_pattern.as_ref().is_some_and(|(cp, ri)| {
-                cp.as_slice() == matrix.col_ptr && ri.as_slice() == matrix.row_idx
-            });
+        let cache_valid = self.last_pattern_fingerprint == Some(fp) && exact_pattern_match;
         // The reported reuse signal; the escalation re-entry passes its
         // outer call's value through.
         let pattern_reused = reentry_pattern_reused.unwrap_or(cache_valid);
@@ -5793,5 +5830,69 @@ mod tests {
                 "nothing stored, nothing recycled"
             );
         }
+    }
+
+    /// Issue #237: the chunked non-finite scan reports the same (first)
+    /// index as the plain early-exit loop. Oracle: hand-placed positions,
+    /// including both sides of the 1024-entry chunk boundary, and finite
+    /// edge values (largest finite, smallest subnormal, -0.0) that must
+    /// not trip it.
+    #[test]
+    fn first_non_finite_matches_hand_placed_index_issue_237() {
+        let len = 5000usize;
+        let base: Vec<f64> = (0..len)
+            .map(|k| match k % 4 {
+                0 => f64::MAX,
+                1 => -f64::MIN_POSITIVE / 4.0, // subnormal
+                2 => -0.0,
+                _ => (k as f64).cos(),
+            })
+            .collect();
+        assert_eq!(first_non_finite(&base), None);
+        assert_eq!(first_non_finite(&[]), None);
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for &(pos, second) in &[
+                (0usize, None),
+                (1023, Some(1024usize)),
+                (1024, Some(4999)),
+                (2047, Some(2048)),
+                (4999, None),
+            ] {
+                let mut v = base.clone();
+                v[pos] = bad;
+                if let Some(q) = second {
+                    v[q] = f64::NAN;
+                }
+                assert_eq!(first_non_finite(&v), Some(pos), "{bad} at {pos}");
+            }
+        }
+    }
+
+    /// Issue #237: a warm call skips re-hashing the pattern only when the
+    /// stored pattern matches exactly; a same-`(n, nnz)` pattern change
+    /// after warm calls still re-runs the symbolic analysis, and the
+    /// result matches a fresh Solver (hand oracle: inertia (2, 1, 0)).
+    #[test]
+    fn warm_calls_reuse_and_pattern_change_rebuilds_issue_237() {
+        // A: diagonal SPD 3x3 with one off-diagonal (1,0).
+        let a = CscMatrix::from_triplets(3, &[0, 1, 1, 2], &[0, 0, 1, 2], &[4.0, 1.0, 4.0, 4.0])
+            .expect("valid CSC");
+        // B: same (n, nnz), off-diagonal moved to (2,0), (2,2) negative.
+        let b = CscMatrix::from_triplets(3, &[0, 2, 1, 2], &[0, 0, 1, 2], &[4.0, 1.0, 4.0, -4.0])
+            .expect("valid CSC");
+        let mut s = Solver::new();
+        for _ in 0..3 {
+            assert!(matches!(s.factor(&a, None), FactorStatus::Success));
+        }
+        assert_eq!(s.symbolic_call_count(), 1, "warm calls must reuse");
+        assert_eq!(
+            s.last_pattern_fingerprint,
+            Some(PatternFingerprint::of(&a)),
+            "stored fingerprint stays the pattern's hash"
+        );
+        assert!(matches!(s.factor(&b, None), FactorStatus::Success));
+        assert_eq!(s.symbolic_call_count(), 2, "pattern change must re-analyse");
+        assert_eq!(s.last_pattern_fingerprint, Some(PatternFingerprint::of(&b)));
+        assert_eq!(*s.inertia().expect("B inertia"), Inertia::new(2, 1, 0));
     }
 }
