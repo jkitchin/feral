@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-13T21:38:49Z
+Generated: 2026-11-19T00:42:13Z
 
 ## Latest Session
-File: dev/sessions/2026-11-13-02.md
+File: dev/sessions/2026-11-19-01.md
 ```
-# Session 2026-11-13-02
+# Session 2026-11-19-01
 
 ## Goal
-Issue #232: `SparseLu::factor_markowitz` ~6.5x slower than HiGHS HFactor
-on a near-triangular LP basis (heap churn + per-column allocation).
+Issue #237 step 3: parallel Knight–Ruiz (`InfNorm`) sweeps, keeping
+the scaling vector bit-identical.
 
 ## Accomplished
-- f3d99e0: `examples/lu_markowitz_triangular.rs` — timing + bitwise digest
-  harness on a synthetic basis shaped like the issue's (m = 17 470, ~13k
-  one-entry columns, 1 459-col kernel, little fill) and on the committed
-  `.mtx` bases. The issue's actual basis is in discopt and could not be
-  attached to this session.
-- dce0dc6: Markowitz count heaps built only when the singleton stacks first
-  run dry (over the kernel); active submatrix in packed `Lists<T>`;
-  per-step dedup of the candidate search.
-- 6a5afd3: `remap_and_sort_l` without per-column Vecs; `u_above` pre-sized.
-- Timings (median, default `LuParams`):
+- Read tried-and-rejected 2026-08-09 / 2026-08-15 and
+  scaling-warm-start-2026-08-09.md: KR is cap-bound (all 10 passes from
+  IPM iterate 1); warm starts and lower caps rejected. Parallel passes
+  were not tried before.
+- 9c9a138: research note + plan
+  (`dev/research/issue-237-parallel-kr-sweeps-2026-11-19.md`).
+- ff7f8bb: `ParallelSweep` in `src/scaling/infnorm.rs`; harness
+  reports `scaling_us`. Chain KKT (n = 155 970, nnz = 5.97 M), on a
+  4-thread worker: scaling 238–284 ms -> 98.5–99.0 ms. Serial path off a
+  worker unchanged. Digests unchanged; 1048 tests pass (2 new).
 
-  | basis | before | after |
-  |---|---|---|
-  | piperout-shape seed 1 | 12.4 ms | 5.4 ms |
-  | piperout-shape seed 2 | 12.9 ms | 4.9 ms |
-  | piperout-shape seed 3 | 13.4 ms | 5.8 ms |
-  | QPLIB_3852 | 0.78 ms | 0.35 ms |
-  | bchoco06_illcond | 0.47 ms | 0.26 ms |
-  | QPLIB_1157 (fill-bound) | 12.9 ms | 12.7 ms |
+**Limit:** ~100 ms is near this container's memory bandwidth (10 passes
+x ~96 MB). More threads will not help much here; less traffic per pass
+would. The issue's 16-thread machine was not measured.
 
-- `cargo test --release --no-fail-fast`: 1022 passed, 0 failed.
+## Benchmark Results
+```
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+```
+Identical to 2026-11-18-02.
 
-**Unfavourable:** the dedup changes kernel pivots and fill goes up slightly
-— geomean +0.27 % over 40 synthetic bases, max +1.61 %, 36 of 40 worse;
-QPLIB_1157 +0.54 %. See decisions.md 2026-11-13.
+## Decisions Made
+- None beyond the design in the research note (same rayon-worker gate
+  as the step-1 permute gather).
 
-**Not reached:** the issue's HiGHS parity (~2.7 ms on its basis). About 2.4x
-was recovered on the synthetic shape; the remaining cost is mostly
-`SparseLu`'s own storage (one Vec per U row, `u_above` Vec<Vec>, ~12
-m-length scratch arrays allocated, zeroed and dropped per factorization).
-The issue's real basis was not measured.
+## Abandoned Approaches
+- None.
 
-## Continuation: in-place refactor (same session)
-- 132c16e: `SparseLu::refactor_markowitz` + `assemble_into` shared fill
-  path; `SparseLu::refactor` routed through it under Markowitz.
-- c25e89b: example times fresh-replacing-held vs in-place, checks digests.
-- **Correction to the table above:** its "after" times excluded dropping
-  the factor. Including the drop (what a caller replacing its factor
-  pays), fresh is 6.36 / 6.06 / 6.81 ms; in place 4.97 / 4.61 / 5.32 ms.
-  QPLIB_3852 0.371 -> 0.246, bchoco06 0.261 -> 0.202, QPLIB_1157 12.75 ->
-  12.15 ms. Overall on the synthetic shape: ~12.9 ms -> ~5.0 ms.
-- Only callers that keep one `SparseLu` get the in-place gain. discopt
-  currently builds a new factor per refactorization.
+## Next Session Should
+1. #237 step 4 / #202 Defect 1: InfNorm reuse across same-pattern calls
+   (value-drift-guarded cache like MC64's, or a host refresh interval).
+   This changes numerics: needs a corpus gate. Do NOT retry KR warm
+   starts or lower caps (tried-and-rejected 2026-08-09, 2026-08-15).
+2. Ask the #237 reporter to remeasure at 8/16 threads on this branch
+   (steps 1–3 are all bit-identical, so they can A/B directly).
 ```
 
 ## Git Status
 ```
-60ce836 Markowitz LU: keep the elimination's buffers across in-place refactors (#232)
-d2a1e20 Markowitz LU: pack column-heap entries into one u64 key (#232)
-d00fdb6 Markowitz LU: smallest live row count from a histogram, not a heap (#232)
-5e91e5d Markowitz LU: skip the column walk when the update has nothing to subtract (#232)
-208b10c dev logs: piperout-d27 real-basis measurement (#232)
+ff7f8bb perf(#237): parallel Knight-Ruiz sweeps on a rayon worker
+9c9a138 docs(#237): research note and plan for parallel Knight-Ruiz sweeps
+df03150 docs(session): 2026-11-18-02 checkpoint — #237 step 2 per-call checks
+0854fde perf(#237): pivot-growth escalation check in one pass, cheap test first
+376f6d4 perf(#237): skip re-hashing an unchanged pattern; vectorized finite scan
 ```
 
 ## Test Status
@@ -86,57 +86,58 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 476 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.31s
+test result: ok. 484 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.69s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-13-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-01.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
   Residual pass: 1/1 (100.0%)
   Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
 Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-10-23-01.
+Identical to 2026-11-18-02.
 
 ```
 
 ## Recent Decisions
-Markowitz pivoting. `assemble_into` destructures `SparseLu` exhaustively.
+and the warm path then skips its own `O(nnz)` re-comparison (the `O(n)`
+`perm_inv` check stays). `NumericParams` is not used for this signal: it
+is public with all-public fields, and its `pattern_reused_hint` can be set
+by direct-API callers, so it cannot carry a "pattern already checked"
+guarantee.
 
-**Why.** The in-place path is only safe if it leaves exactly the state a
-fresh factor would, and two parallel builders drift. One code path makes
-equality hold by construction. The exhaustive destructure makes a newly
-added field a compile error until someone decides how a refactor resets
-it, rather than a stale value carried into the next factorization.
+**Why.** The warm permute is serial work outside the parallel tree; it
+cloned the cached pattern and allocated a fresh values array every call.
 
-**Evidence.** tests/lu_refactor_inplace.rs compares in-place against
-fresh bitwise, including under the same script of solves and FT updates
-afterwards; deleting any of three resets fails it. ~22 % faster on the
-#232 basis shape (journal 2026-11-13-02).
+**Evidence.** Chain KKT n = 155 970, nnz = 5.97 M: warm permute 74.8 ms
+-> 6-9 ms on 4 threads, solve digests identical to 0.23.0. Journal
+2026-11-18-01; `dev/research/issue-237-permute-warm-path-2026-11-18.md`.
 
-## 2026-11-13 — Markowitz pivot order is held bit-identical to 0.22 (reverses the distinct-columns entry above, PR #234)
+## 2026-11-18 — No caller-asserted "same pattern" entry point (issue #237 step 2, #202 Defect 2)
 
-**Decision.** The threshold-Markowitz search keeps its 0.22 budget: each
-live heap entry it examines counts against `markowitz_max_search`,
-duplicates included. The kernel-only heap build reproduces the eager heaps'
-multiset exactly (peel-phase pushes logged, heapified at the first
-non-singleton step, dead rows/columns left out). This reverses the earlier
-2026-11-13 entry "Markowitz candidate search counts distinct columns".
+**Decision.** `Solver` does not get `trust_pattern` /
+`factor_assume_same_pattern`. Each `factor()` still compares the input
+pattern exactly against the stored one (issue #121), and still scans the
+values for non-finite entries.
 
-**Why.** pounce's active-set QP uses this factorization as a rank-reveal
-probe. The distinct-columns rule made QGFRDXPN cycle to the iteration cap
-(details in `dev/tried-and-rejected.md`, 2026-11-13). Pivot order is
-therefore treated as part of the contract.
+**Why.** Once the repeat-call path stopped re-hashing a matching pattern
+(the stored fingerprint is reused on an exact match), the opt-in could
+only remove the exact compare: ~7 ms per call on a 6 M-nnz KKT, against a
+public API whose misuse returns a silently wrong factor (the REG-1 / #121
+failure class). Decided with the user, 2026-11-18.
 
-**Evidence.** Digests identical to the unmodified 0.22 code on QPLIB_1157,
-QPLIB_3852, bchoco06 and 40 synthetic bases; `tests/lu_markowitz_golden.rs`
-fails if the dedup is re-added. Journal 2026-11-13-02.
+**Evidence.** Journal 2026-11-18-02: outside-driver work per warm call
+went from ~65-80 ms to ~20 ms with no API change (hash 31-44 ms -> 0,
+finite scan 10-13 -> 5-8 ms, escalation check 6-10 -> 0.7 ms); the
+compare (6-9 ms) and begin_recycle (4-7 ms) remain.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With

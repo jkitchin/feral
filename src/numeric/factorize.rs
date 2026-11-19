@@ -1489,7 +1489,7 @@ impl SparseFactors {
     /// Shared by [`min_pivot_magnitude`](Self::min_pivot_magnitude) and
     /// [`max_pivot_magnitude`](Self::max_pivot_magnitude). 2×2 detection
     /// follows the solve-path convention (`d_subdiag[k] != 0.0`).
-    fn pivot_magnitude_extent(&self) -> Option<(f64, f64)> {
+    pub(crate) fn pivot_magnitude_extent(&self) -> Option<(f64, f64)> {
         let mut min_mag = f64::INFINITY;
         let mut max_mag = 0.0f64;
         let mut any = false;
@@ -1658,6 +1658,15 @@ pub struct FactorWorkspace {
     /// precomputed `value_map` instead of rebuilding triplets and
     /// re-sorting through `CscMatrix::from_triplets`.
     pub(crate) permute_cache: Option<PermuteCache>,
+    /// Issue #237: set by `Solver::factor_impl` (only) when it has just
+    /// compared this call's input pattern exactly against the pattern of
+    /// its previous factorization and found it unchanged. The drivers
+    /// consume it (`std::mem::take`) at the value permutation, so it
+    /// covers exactly one driver call and a later direct-API call through
+    /// the same workspace cannot inherit it. When set (and
+    /// `pattern_reused_hint` is on), the permute warm path skips its own
+    /// `O(nnz)` re-comparison of `col_ptr` / `row_idx`.
+    pub(crate) pattern_verified: bool,
     /// Issue #153: per-supernode output buffers recycled from the
     /// previous factorization of the same pattern, indexed by supernode
     /// (postorder). Filled by [`FactorWorkspace::begin_recycle`] (called
@@ -1712,21 +1721,67 @@ pub(crate) struct PermuteCache {
     input_row_idx: Vec<usize>,
     /// `perm_inv` at cache build (see `input_col_ptr`).
     input_perm_inv: Vec<usize>,
-    /// `col_ptr` of the cached permuted CSC.
-    permuted_col_ptr: Vec<usize>,
-    /// `row_idx` of the cached permuted CSC.
-    permuted_row_idx: Vec<usize>,
+    /// Issue #237: the permuted matrix itself (pattern + value buffer),
+    /// kept between calls so a warm call overwrites its values in place
+    /// instead of allocating a values array and cloning the pattern. A
+    /// warm hit moves it out to the driver, which hands it back through
+    /// [`FactorWorkspace::restore_permuted`] when done. `None` while a
+    /// driver holds it, and after a driver returned early with an error
+    /// without handing it back; a warm call that finds `None` takes the
+    /// cold path, which rebuilds the cache (correct, just slower).
+    permuted: Option<CscMatrix>,
+    /// How input values reach the permuted slots; length `input_nnz`.
+    route: ValueRoute,
+}
+
+/// Issue #237: the warm path's value route for [`PermuteCache`].
+#[derive(Debug)]
+pub(crate) enum ValueRoute {
     /// `value_map[k]` is the index into the permuted `values` vector
-    /// where `matrix.values[k]` contributes (via `+=`). When the input
-    /// has duplicate `(i, j)` / `(j, i)` entries they map to the same
-    /// slot, matching `CscMatrix::from_triplets` duplicate-summing.
-    value_map: Vec<usize>,
+    /// where `matrix.values[k]` contributes (via `+=`). Used when the
+    /// input has duplicate `(i, j)` / `(j, i)` entries, which map to the
+    /// same slot, matching `CscMatrix::from_triplets` duplicate-summing.
+    Scatter(Vec<usize>),
+    /// The value map is a bijection (no duplicate pair): `src[d]` is the
+    /// one input index whose value lands in permuted slot `d`. A gather
+    /// writes the output sequentially, needs no zero fill, and splits
+    /// into independent output chunks for a parallel pass.
+    Gather(Vec<usize>),
+}
+
+impl Default for ValueRoute {
+    fn default() -> Self {
+        ValueRoute::Scatter(Vec::new())
+    }
+}
+
+impl ValueRoute {
+    fn len(&self) -> usize {
+        match self {
+            ValueRoute::Scatter(v) | ValueRoute::Gather(v) => v.len(),
+        }
+    }
 }
 
 impl FactorWorkspace {
     /// Construct an empty workspace. Equivalent to `default()`.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Issue #237: hand the permuted matrix a driver got from
+    /// `permute_csc_values_with_cache` back to the permute cache, so the
+    /// next warm call can overwrite its values in place. Dropped when
+    /// there is no cache (one-shot callers, or the cache was cleared) or
+    /// the cache already holds a buffer. Only the matrix produced for
+    /// this cache in the same driver call may be passed: nothing else
+    /// touches `permute_cache` between the permute and the restore.
+    fn restore_permuted(&mut self, permuted: CscMatrix) {
+        if let Some(c) = self.permute_cache.as_mut() {
+            if c.permuted.is_none() && permuted.n == c.input_n {
+                c.permuted = Some(permuted);
+            }
+        }
     }
 
     /// Issue #153: stage `prev` (the factor this workspace's owner is
@@ -2173,12 +2228,15 @@ fn factorize_multifrontal_with_schur_inner(
     let scaling_pivot_order: Vec<f64> =
         symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
 
+    // Issue #237: consumed here — covers this one driver call only.
+    let pattern_verified = std::mem::take(&mut ws.pattern_verified);
     let (permuted, _) = permute_csc_values_with_cache(
         matrix,
         &symbolic.perm,
         &symbolic.perm_inv,
         false,
         params.pattern_reused_hint,
+        pattern_verified,
         &mut ws.permute_cache,
     )?;
     // Issue #56 Lever A.1: `symbolic.permuted_pattern` is the full
@@ -2284,6 +2342,8 @@ fn factorize_multifrontal_with_schur_inner(
         data: out,
     };
 
+    // Issue #237: return the permuted matrix to the cache for reuse.
+    ws.restore_permuted(permuted);
     Ok((factors, total_inertia, schur))
 }
 
@@ -2406,12 +2466,15 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // used to scatter values in O(nnz) — skipping the triplet sort
     // that dominated the prologue on Thomson IPM trajectories.
     let t_phase = tic();
+    // Issue #237: consumed here — covers this one driver call only.
+    let pattern_verified = std::mem::take(&mut ws.pattern_verified);
     let (permuted, from_triplets_us) = permute_csc_values_with_cache(
         matrix,
         &symbolic.perm,
         &symbolic.perm_inv,
         profiling,
         params.pattern_reused_hint,
+        pattern_verified,
         &mut ws.permute_cache,
     )?;
     bd.permute_us = toc(t_phase);
@@ -2612,6 +2675,8 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     let t_epilogue = params.profiler.as_ref().map(|_| Instant::now());
     // Issue #153: drop any recycled slot no supernode consumed.
     ws.recycled.clear();
+    // Issue #237: return the permuted matrix to the cache for reuse.
+    ws.restore_permuted(permuted);
 
     let result = Ok((
         SparseFactors {
@@ -3597,12 +3662,15 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
     // O(nnz) rather than re-sorting via `from_triplets`. On a cache miss
     // (cold call or pattern change) this rebuilds and repopulates the cache,
     // exactly as the sequential driver does.
+    // Issue #237: consumed here — covers this one driver call only.
+    let pattern_verified = std::mem::take(&mut ws.pattern_verified);
     let (permuted, _) = permute_csc_values_with_cache(
         matrix,
         &symbolic.perm,
         &symbolic.perm_inv,
         false,
         params.pattern_reused_hint,
+        pattern_verified,
         &mut ws.permute_cache,
     )?;
     if let (Some(t), Some(start)) = (telemetry, t_phase) {
@@ -3777,6 +3845,8 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
         t.phase_collect_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
+    // Issue #237: return the permuted matrix to the cache for reuse.
+    ws.restore_permuted(permuted);
 
     Ok((
         SparseFactors {
@@ -4591,6 +4661,7 @@ fn permute_csc_values_with_cache(
     perm_inv: &[usize],
     profile: bool,
     pattern_reused_hint: bool,
+    pattern_verified: bool,
     cache: &mut Option<PermuteCache>,
 ) -> Result<(CscMatrix, u64), FeralError> {
     let n = matrix.n;
@@ -4603,29 +4674,26 @@ fn permute_csc_values_with_cache(
     // an ordering after a symbolic-cache invalidation), must fall through
     // to the cold rebuild rather than scatter values through a stale
     // structure.
+    //
+    // Issue #237: `pattern_verified` (the Solver compared the input
+    // pattern exactly against its previous factorization's this call)
+    // skips the `O(nnz)` `col_ptr` / `row_idx` re-comparison. The size
+    // checks and the `O(n)` `perm_inv` comparison always run: the
+    // Solver's check covers the pattern, not the ordering.
     if pattern_reused_hint {
-        if let Some(c) = cache.as_ref() {
-            if c.input_n == n
+        if let Some(c) = cache.as_mut() {
+            if c.permuted.is_some()
+                && c.input_n == n
                 && c.input_nnz == nnz
-                && c.value_map.len() == nnz
-                && c.input_col_ptr == matrix.col_ptr
-                && c.input_row_idx == matrix.row_idx
+                && c.route.len() == nnz
+                && (pattern_verified
+                    || (c.input_col_ptr == matrix.col_ptr && c.input_row_idx == matrix.row_idx))
                 && c.input_perm_inv.as_slice() == perm_inv
             {
-                let permuted_nnz = c.permuted_row_idx.len();
-                let mut values = vec![0.0f64; permuted_nnz];
-                for k in 0..nnz {
-                    let dest = c.value_map[k];
-                    debug_assert!(dest < permuted_nnz);
-                    values[dest] += matrix.values[k];
+                if let Some(mut permuted) = c.permuted.take() {
+                    write_permuted_values(&c.route, &matrix.values, &mut permuted.values);
+                    return Ok((permuted, 0));
                 }
-                let permuted = CscMatrix {
-                    n,
-                    col_ptr: c.permuted_col_ptr.clone(),
-                    row_idx: c.permuted_row_idx.clone(),
-                    values,
-                };
-                return Ok((permuted, 0));
             }
         }
     }
@@ -4648,15 +4716,27 @@ fn permute_csc_values_with_cache(
         // successful refresh.
         match build_permute_value_map(matrix, perm_inv, &permuted) {
             Ok(value_map) => {
+                // Every permuted slot comes from at least one input entry,
+                // so equal lengths mean each slot is hit exactly once.
+                let route = if value_map.len() == permuted.values.len() {
+                    let mut src = vec![0usize; value_map.len()];
+                    for (k, &d) in value_map.iter().enumerate() {
+                        src[d] = k;
+                    }
+                    ValueRoute::Gather(src)
+                } else {
+                    ValueRoute::Scatter(value_map)
+                };
+                // `permuted: None`: the driver holds the matrix and hands
+                // it back via `FactorWorkspace::restore_permuted`.
                 *cache = Some(PermuteCache {
                     input_n: n,
                     input_nnz: nnz,
                     input_col_ptr: matrix.col_ptr.clone(),
                     input_row_idx: matrix.row_idx.clone(),
                     input_perm_inv: perm_inv.to_vec(),
-                    permuted_col_ptr: permuted.col_ptr.clone(),
-                    permuted_row_idx: permuted.row_idx.clone(),
-                    value_map,
+                    permuted: None,
+                    route,
                 });
             }
             Err(_) => {
@@ -4673,6 +4753,54 @@ fn permute_csc_values_with_cache(
     }
 
     Ok((permuted, from_triplets_us))
+}
+
+/// Issue #237: write the input values into the reused permuted buffer,
+/// reproducing bit for bit what 0.23.0's warm path (allocate zeroed,
+/// accumulate in input order `k`) produced: every slot is
+/// `0.0 + a_1 (+ a_2)`.
+///
+/// `Gather` (bijective map) writes each slot once as `0.0 + v` with no
+/// zero fill. The explicit `0.0 +` is not a no-op: it turns a `-0.0`
+/// input into `+0.0`, as the accumulate-into-zero form does. Slots are
+/// independent, so when already running on a rayon worker (the parallel
+/// driver, or the sequential one dispatched inside a Solver's pool) and
+/// the matrix is large, output chunks are filled in parallel; the result
+/// is the same bits either way.
+///
+/// `Scatter` (duplicate pairs) zero-fills and accumulates serially in
+/// input order, keeping the summation order of duplicates.
+fn write_permuted_values(route: &ValueRoute, input: &[f64], out: &mut [f64]) {
+    /// Below this many entries the pass is a few hundred microseconds at
+    /// most and not worth a fork.
+    const PAR_MIN_NNZ: usize = 1 << 18;
+    const CHUNK: usize = 1 << 15;
+    match route {
+        ValueRoute::Gather(src) => {
+            debug_assert_eq!(src.len(), out.len());
+            if out.len() >= PAR_MIN_NNZ && rayon::current_thread_index().is_some() {
+                use rayon::prelude::*;
+                out.par_chunks_mut(CHUNK)
+                    .zip(src.par_chunks(CHUNK))
+                    .for_each(|(o, s)| {
+                        for (slot, &k) in o.iter_mut().zip(s) {
+                            *slot = 0.0 + input[k];
+                        }
+                    });
+            } else {
+                for (slot, &k) in out.iter_mut().zip(src) {
+                    *slot = 0.0 + input[k];
+                }
+            }
+        }
+        ValueRoute::Scatter(value_map) => {
+            debug_assert_eq!(value_map.len(), input.len());
+            out.fill(0.0);
+            for (&dest, &v) in value_map.iter().zip(input) {
+                out[dest] += v;
+            }
+        }
+    }
 }
 
 /// Build the `value_map` for `PermuteCache` by replaying the
@@ -6197,7 +6325,8 @@ mod tests {
         // One-shot: hint off, empty cache.
         let mut cache: Option<PermuteCache> = None;
         let (permuted, _us) =
-            permute_csc_values_with_cache(&m, &perm, &perm_inv, false, false, &mut cache).unwrap();
+            permute_csc_values_with_cache(&m, &perm, &perm_inv, false, false, false, &mut cache)
+                .unwrap();
 
         // Permuted matrix is correct (identity perm ⇒ equals input).
         assert_eq!(permuted.n, m.n);
@@ -6218,7 +6347,7 @@ mod tests {
         // blanket disable.
         let mut warm_cache: Option<PermuteCache> = None;
         let (_permuted2, _us2) =
-            permute_csc_values_with_cache(&m, &perm, &perm_inv, true, true, &mut warm_cache)
+            permute_csc_values_with_cache(&m, &perm, &perm_inv, true, true, false, &mut warm_cache)
                 .unwrap();
         assert!(
             warm_cache.is_some(),
@@ -6344,16 +6473,19 @@ mod tests {
 
         // Warm-reuse caller builds A's cache (hint=true cold call).
         let mut cache: Option<PermuteCache> = None;
-        permute_csc_values_with_cache(&a, &perm, &perm_inv, false, true, &mut cache).unwrap();
+        permute_csc_values_with_cache(&a, &perm, &perm_inv, false, true, false, &mut cache)
+            .unwrap();
         assert!(cache.is_some());
 
         // A one-shot (hint=false) call on pattern B follows.
-        permute_csc_values_with_cache(&b, &perm, &perm_inv, false, false, &mut cache).unwrap();
+        permute_csc_values_with_cache(&b, &perm, &perm_inv, false, false, false, &mut cache)
+            .unwrap();
 
         // Warm call on pattern B must equal the canonical permutation of
         // B — NOT B's values scattered through A's structure.
         let (warm_b, _) =
-            permute_csc_values_with_cache(&b, &perm, &perm_inv, false, true, &mut cache).unwrap();
+            permute_csc_values_with_cache(&b, &perm, &perm_inv, false, true, false, &mut cache)
+                .unwrap();
         let (canon_b, _) = permute_csc_values(&b, &perm, &perm_inv, false).unwrap();
         assert_eq!(warm_b.col_ptr, canon_b.col_ptr, "stale-pattern col_ptr");
         assert_eq!(warm_b.row_idx, canon_b.row_idx, "stale-pattern row_idx");
@@ -6384,7 +6516,8 @@ mod tests {
         let perm1: Vec<usize> = (0..n).collect();
         let perm1_inv: Vec<usize> = (0..n).collect();
         let mut cache: Option<PermuteCache> = None;
-        permute_csc_values_with_cache(&m, &perm1, &perm1_inv, false, true, &mut cache).unwrap();
+        permute_csc_values_with_cache(&m, &perm1, &perm1_inv, false, true, false, &mut cache)
+            .unwrap();
         assert!(cache.is_some());
 
         // Permutation 2 (reversal) on the SAME pattern, hint still true.
@@ -6394,10 +6527,284 @@ mod tests {
             perm2_inv[p] = i;
         }
         let (warm, _) =
-            permute_csc_values_with_cache(&m, &perm2, &perm2_inv, false, true, &mut cache).unwrap();
+            permute_csc_values_with_cache(&m, &perm2, &perm2_inv, false, true, false, &mut cache)
+                .unwrap();
         let (canon, _) = permute_csc_values(&m, &perm2, &perm2_inv, false).unwrap();
         assert_eq!(warm.col_ptr, canon.col_ptr, "stale-perm col_ptr");
         assert_eq!(warm.row_idx, canon.row_idx, "stale-perm row_idx");
         assert_eq!(warm.values, canon.values, "stale-perm values");
+    }
+
+    /// Issue #237 helper: bitwise equality of two permuted matrices.
+    fn assert_csc_bits_eq(a: &CscMatrix, b: &CscMatrix, what: &str) {
+        assert_eq!(a.n, b.n, "{what}: n");
+        assert_eq!(a.col_ptr, b.col_ptr, "{what}: col_ptr");
+        assert_eq!(a.row_idx, b.row_idx, "{what}: row_idx");
+        let ab: Vec<u64> = a.values.iter().map(|v| v.to_bits()).collect();
+        let bb: Vec<u64> = b.values.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(ab, bb, "{what}: values (bitwise)");
+    }
+
+    /// Issue #237: the in-place warm path must reproduce the cold
+    /// `permute_csc_values` output (`from_triplets`, an independent code
+    /// path) bit for bit, across value changes, with and without the
+    /// Solver's `pattern_verified` signal, on both a bijective value map
+    /// and one with a `(i, j)` / `(j, i)` duplicate pair.
+    ///
+    /// One pre-existing difference is kept on purpose: the cold path
+    /// keeps a `-0.0` input as `-0.0`, while the warm path (0.23.0's
+    /// allocate-zero-accumulate, and the in-place form here) yields
+    /// `+0.0`. The oracle therefore normalizes signed zeros, and the
+    /// test pins that the warm path still produces `+0.0`, so warm
+    /// refactorizations stay bit-identical to 0.23.0.
+    #[test]
+    fn permute_warm_in_place_matches_cold_bitwise_issue_237() {
+        // Bijective: lower-triangle arrow + tridiagonal, one -0.0 entry.
+        let bij = CscMatrix::from_triplets(
+            5,
+            &[0, 1, 2, 3, 4, 1, 2, 2, 3, 3, 4, 4],
+            &[0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4],
+            &[
+                9.0, 1.0, -0.0, 3.0, 4.0, 8.0, 0.5, 7.0, 0.25, 6.0, -1.5, 5.0,
+            ],
+        )
+        .unwrap();
+        // Duplicate pair: (1, 0) stored in column 0 AND (0, 1) stored in
+        // column 1; both land in the same lower-triangle slot.
+        let dup = CscMatrix {
+            n: 3,
+            col_ptr: vec![0, 2, 5, 7],
+            row_idx: vec![0, 1, 0, 1, 2, 1, 2],
+            values: vec![4.0, 0.1, 0.2, -0.0, 0.3, -0.3, 2.0],
+        };
+        for (name, base, perm) in [
+            ("bijective", bij, vec![3usize, 0, 4, 1, 2]),
+            ("duplicate", dup, vec![2usize, 0, 1]),
+        ] {
+            let n = base.n;
+            let mut perm_inv = vec![0usize; n];
+            for (i, &p) in perm.iter().enumerate() {
+                perm_inv[p] = i;
+            }
+            let mut cache: Option<PermuteCache> = None;
+            let (cold, _) = permute_csc_values_with_cache(
+                &base, &perm, &perm_inv, false, true, false, &mut cache,
+            )
+            .unwrap();
+            let (oracle, _) = permute_csc_values(&base, &perm, &perm_inv, false).unwrap();
+            assert_csc_bits_eq(&cold, &oracle, name);
+            let c = cache.as_ref().unwrap();
+            assert_eq!(
+                matches!(c.route, ValueRoute::Gather(_)),
+                name == "bijective",
+                "{name}: gather route iff bijective"
+            );
+            assert!(c.permuted.is_none(), "{name}: driver holds the buffer");
+            // Stand in for the driver handing the buffer back.
+            let mut ws = FactorWorkspace::new();
+            ws.permute_cache = cache.take();
+            ws.restore_permuted(cold);
+            assert!(ws.permute_cache.as_ref().unwrap().permuted.is_some());
+
+            let mut m = base.clone();
+            for step in 0..4 {
+                for (k, v) in m.values.iter_mut().enumerate() {
+                    if v.to_bits() != (-0.0f64).to_bits() {
+                        *v *= 1.0 + 0.01 * ((k + step) % 5) as f64;
+                    }
+                }
+                let verified = step % 2 == 0;
+                let buf_ptr = ws
+                    .permute_cache
+                    .as_ref()
+                    .and_then(|c| c.permuted.as_ref())
+                    .map(|p| p.values.as_ptr());
+                let (warm, _) = permute_csc_values_with_cache(
+                    &m,
+                    &perm,
+                    &perm_inv,
+                    false,
+                    true,
+                    verified,
+                    &mut ws.permute_cache,
+                )
+                .unwrap();
+                assert_eq!(
+                    Some(warm.values.as_ptr()),
+                    buf_ptr,
+                    "{name} step {step}: warm path must reuse the cached buffer"
+                );
+                let (mut oracle, _) = permute_csc_values(&m, &perm, &perm_inv, false).unwrap();
+                for v in oracle.values.iter_mut() {
+                    *v += 0.0; // -0.0 -> +0.0, as the warm path does
+                }
+                assert_csc_bits_eq(&warm, &oracle, &format!("{name} step {step}"));
+                assert!(
+                    warm.values
+                        .iter()
+                        .all(|v| v.to_bits() != (-0.0f64).to_bits()),
+                    "{name} step {step}: warm path must keep 0.23.0's +0.0"
+                );
+                ws.restore_permuted(warm);
+            }
+        }
+    }
+
+    /// Issue #237: a warm call that finds no buffer (a driver returned
+    /// early with an error and never handed it back) must still return
+    /// the correct permuted matrix, via the cold path, and rebuild the
+    /// cache.
+    #[test]
+    fn permute_warm_without_buffer_falls_back_to_cold_issue_237() {
+        let m = CscMatrix::from_triplets(
+            4,
+            &[0, 1, 2, 3, 1, 2, 3],
+            &[0, 0, 0, 0, 1, 2, 3],
+            &[10.0, 2.0, 3.0, 4.0, 20.0, 30.0, 40.0],
+        )
+        .unwrap();
+        let perm = vec![2usize, 3, 0, 1];
+        let mut perm_inv = vec![0usize; 4];
+        for (i, &p) in perm.iter().enumerate() {
+            perm_inv[p] = i;
+        }
+        let mut cache: Option<PermuteCache> = None;
+        // Cold build; the returned matrix is dropped (never restored).
+        let _ = permute_csc_values_with_cache(&m, &perm, &perm_inv, false, true, true, &mut cache)
+            .unwrap();
+        assert!(cache.as_ref().unwrap().permuted.is_none());
+        let mut m2 = m.clone();
+        m2.values[3] = -7.5;
+        let (out, _) =
+            permute_csc_values_with_cache(&m2, &perm, &perm_inv, false, true, true, &mut cache)
+                .unwrap();
+        let (oracle, _) = permute_csc_values(&m2, &perm, &perm_inv, false).unwrap();
+        assert_csc_bits_eq(&out, &oracle, "lost buffer");
+        assert!(cache.is_some(), "cold fallback must rebuild the cache");
+    }
+
+    /// Issue #237: both drivers consume `pattern_verified` (one call
+    /// only), hand the permuted matrix back to the cache, and produce
+    /// factors bit-identical to a fresh cache-less factorization on the
+    /// warm, in-place call.
+    #[test]
+    fn drivers_consume_pattern_verified_and_restore_buffer_issue_237() {
+        let n = 48usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(if i % 7 == 3 { -3.0 } else { 4.0 });
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+            if i + 5 < n {
+                rows.push(i + 5);
+                cols.push(i);
+                vals.push(0.5);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+        let mut m2 = m.clone();
+        for (k, v) in m2.values.iter_mut().enumerate() {
+            *v *= 1.0 + 0.003 * (k % 3) as f64;
+        }
+        let (ref_f, ref_i) = factorize_multifrontal_with_workspace(
+            &m2,
+            &sym,
+            &make_params(),
+            &mut FactorWorkspace::new(),
+        )
+        .unwrap();
+
+        let mut params = make_params();
+        params.pattern_reused_hint = true;
+        for parallel in [false, true] {
+            let mut ws = FactorWorkspace::new();
+            let run = |ws: &mut FactorWorkspace, a: &CscMatrix| {
+                if parallel {
+                    factorize_multifrontal_supernodal_parallel_with_workspace(a, &sym, &params, ws)
+                } else {
+                    factorize_multifrontal_supernodal_with_workspace(a, &sym, &params, ws)
+                }
+            };
+            ws.pattern_verified = true;
+            run(&mut ws, &m).unwrap();
+            assert!(
+                !ws.pattern_verified,
+                "parallel={parallel}: flag not consumed"
+            );
+            assert!(
+                ws.permute_cache
+                    .as_ref()
+                    .is_some_and(|c| c.permuted.is_some()),
+                "parallel={parallel}: buffer not handed back"
+            );
+            ws.pattern_verified = true;
+            let (f, i) = run(&mut ws, &m2).unwrap();
+            assert!(!ws.pattern_verified);
+            assert!(ws
+                .permute_cache
+                .as_ref()
+                .is_some_and(|c| c.permuted.is_some()));
+            assert_eq!(i, ref_i, "parallel={parallel}: inertia");
+            for (k, (a, b)) in f.node_factors.iter().zip(&ref_f.node_factors).enumerate() {
+                let (a, b) = (&a.frontal_factors, &b.frontal_factors);
+                assert_eq!(a.l, b.l, "parallel={parallel}: node {k} l");
+                assert_eq!(a.d_diag, b.d_diag, "parallel={parallel}: node {k} d_diag");
+                assert_eq!(
+                    a.d_subdiag, b.d_subdiag,
+                    "parallel={parallel}: node {k} d_subdiag"
+                );
+            }
+        }
+    }
+
+    /// Issue #237: the parallel gather (taken only on a rayon worker and
+    /// above `PAR_MIN_NNZ`) writes the same bits as the serial one,
+    /// including the `-0.0 -> +0.0` normalization.
+    #[test]
+    fn parallel_gather_matches_serial_issue_237() {
+        let len = (1usize << 18) + 12_345;
+        // A fixed pseudo-random permutation as the gather source.
+        let mut src: Vec<usize> = (0..len).collect();
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in (1..len).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            src.swap(i, (x % (i as u64 + 1)) as usize);
+        }
+        let input: Vec<f64> = (0..len)
+            .map(|k| {
+                if k % 1000 == 7 {
+                    -0.0
+                } else {
+                    (k as f64).sin() * 1e3
+                }
+            })
+            .collect();
+        let route = ValueRoute::Gather(src);
+        let mut serial = vec![f64::NAN; len];
+        write_permuted_values(&route, &input, &mut serial);
+        assert!(rayon::current_thread_index().is_none());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let mut par = vec![f64::NAN; len];
+        pool.install(|| {
+            assert!(rayon::current_thread_index().is_some());
+            write_permuted_values(&route, &input, &mut par);
+        });
+        let sb: Vec<u64> = serial.iter().map(|v| v.to_bits()).collect();
+        let pb: Vec<u64> = par.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(sb, pb);
+        assert!(serial.iter().all(|v| v.to_bits() != (-0.0f64).to_bits()));
     }
 }

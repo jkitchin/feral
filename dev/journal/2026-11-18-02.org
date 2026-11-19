@@ -1,0 +1,52 @@
+#+TITLE: Journal 2026-11-18 session 02 — #237 step 2: per-call pattern checks
+#+STARTUP: showall
+
+* 18:05 :issue-237:issue-202:solver:measure:baseline:
+Attribution of Solver::factor_impl work outside the numeric driver,
+throwaway Instant instrumentation (reverted), chain KKT t=2600 nx=30
+(n = 155 970, nnz = 5 965 170), warm calls, 4-core container:
+  non-finite scan      10.0-13.1 ms
+  PatternFingerprint   31.3-44.5 ms   (SipHash of col_ptr + row_idx)
+  exact pattern cmp     5.9- 8.9 ms
+  begin_recycle         3.9- 9.7 ms
+  after dispatch        5.7- 7.3 ms   (one outlier 20 ms)
+~60-70 ms per call; the hash is half of it. #237 measured ~39 ms
+"outside the driver" on 3.86 M nnz; consistent in proportion.
+Observation: last_pattern and last_pattern_fingerprint are set and
+cleared together, so when the exact compare succeeds the hash is
+determined (= stored fp). Hash only needed when the exact compare
+fails or there is no stored pattern (cold / pattern change).
+The finite scan is an early-exit loop (not vectorized).
+
+* 18:40 :issue-237:issue-202:solver:fingerprint:result:
+Exact compare first; reuse stored fingerprint on exact match. Finite
+scan chunked + branch-free exponent OR. Same harness, warm calls:
+  fingerprint + compare  37-51 ms -> 6.4-8.8 ms (cold call still 31-33)
+  finite scan            10-13 ms -> 4.9-7.7 ms
+Digests unchanged at both sizes, all driver modes. 1046 tests pass.
+Remaining outside the driver per warm call: exact compare ~7 ms,
+finite scan ~6 ms, begin_recycle 4-7 ms, post-dispatch ~6 ms (not
+attributed further). A trust_pattern opt-in could only remove the
+~7 ms compare; it is public API with a silent-wrong-factor failure
+mode if the caller is wrong (REG-1 / #121 class). Deferred to the user.
+
+* 19:10 :issue-237:issue-202:trust-pattern:decision:
+User chose not to add Solver::trust_pattern: it could only remove the
+~7 ms exact compare left after the fingerprint skip, at the cost of a
+public API whose misuse gives a silently wrong factor.
+
+* 19:20 :issue-237:solver:recycle:escalation:measure:
+begin_recycle 4.1-6.7 ms: the chain KKT has 80 490 supernodes (not
+~10k); no buffer is freed (contrib capacity 0 on every node); the cost
+is moving ~7 Vecs per node into Vec<Option<RecycledNode>> (~60 ns/node,
+cache-miss bound). Moving the take into the drivers (lazy per-node
+mem::take from the old factor) would save ~4 ms but touches the
+parallel driver's recycle plumbing; not done, recorded as a lead.
+Post-dispatch 5.7-9.7 ms was the #102 escalation growth check:
+min_pivot_magnitude + max_pivot_magnitude each walk every node's D
+(2 x 80 490 nodes). One pass + O(1) preprocess test first:
+0.70-0.88 ms. Digests unchanged, 1046 tests pass.
+
+* 19:30 :issue-237:bench:session-end:
+bench: dense inertia 1/1, residual 1/1, worst 1.14e-15; sparse inertia
+vs MUMPS 2/2, residual 2/2, worst 1.26e-16. Identical to 2026-11-18-01.

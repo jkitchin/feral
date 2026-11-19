@@ -47,47 +47,15 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     // Work buffer for the row ∞-norms.
     let mut row_max = vec![0.0f64; n];
 
+    // Issue #237: on a rayon worker and above a size threshold, each
+    // pass runs over column chunks in parallel. Bit-identical to the
+    // serial pass (see `ParallelSweep`).
+    let mut par = ParallelSweep::plan(matrix);
+
     for _ in 0..max_iter {
-        // Reset the row-max buffer.
-        for r in row_max.iter_mut() {
-            *r = 0.0;
-        }
-
-        // Accumulate row maxes by scanning the lower triangle once.
-        // Each (i, j) entry with i >= j contributes to row i (via the
-        // explicit storage) and to row j (by symmetry).
-        //
-        // The row-j accumulation is hoisted to a register-resident
-        // `col_max` across the inner k-loop, then folded into
-        // `row_max[j]` once at column end. The diagonal entry (i == j)
-        // is folded into `col_max` only — its `row_max[i]` write would
-        // be overwritten by the end-of-column store, so we skip the
-        // memory traffic and rely on `col_max` to carry the diagonal's
-        // contribution. Off-diagonal entries (i > j) update both
-        // `row_max[i]` and `col_max`.
-        //
-        // Bit-identical to the prior formulation: max(·,·) is
-        // associative on non-NaN inputs (every `v` is `|·|` of finite
-        // products), so combining via a register accumulator then
-        // folding into `row_max[j]` produces the same value as in-place
-        // updates in any iteration order.
-        for j in 0..n {
-            let col_start = matrix.col_ptr[j];
-            let col_end = matrix.col_ptr[j + 1];
-            let dj = d[j];
-            let mut col_max = row_max[j];
-
-            for k in col_start..col_end {
-                let i = matrix.row_idx[k];
-                let v = (d[i] * matrix.values[k] * dj).abs();
-                if i != j && v > row_max[i] {
-                    row_max[i] = v;
-                }
-                if v > col_max {
-                    col_max = v;
-                }
-            }
-            row_max[j] = col_max;
+        match par.as_mut() {
+            Some(p) => p.sweep(matrix, &d, &mut row_max),
+            None => sweep_serial(matrix, &d, &mut row_max),
         }
 
         // Update diagonal and check convergence.
@@ -113,6 +81,172 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     }
 
     (d, ScalingInfo::Applied)
+}
+
+/// One serial pass: `row_max[i] = max_j |d[i]·a[i,j]·d[j]|` over the full
+/// symmetric matrix, from its lower-triangle storage.
+fn sweep_serial(matrix: &CscMatrix, d: &[f64], row_max: &mut [f64]) {
+    let n = matrix.n;
+    // Reset the row-max buffer.
+    for r in row_max.iter_mut() {
+        *r = 0.0;
+    }
+
+    // Accumulate row maxes by scanning the lower triangle once.
+    // Each (i, j) entry with i >= j contributes to row i (via the
+    // explicit storage) and to row j (by symmetry).
+    //
+    // The row-j accumulation is hoisted to a register-resident
+    // `col_max` across the inner k-loop, then folded into
+    // `row_max[j]` once at column end. The diagonal entry (i == j)
+    // is folded into `col_max` only — its `row_max[i]` write would
+    // be overwritten by the end-of-column store, so we skip the
+    // memory traffic and rely on `col_max` to carry the diagonal's
+    // contribution. Off-diagonal entries (i > j) update both
+    // `row_max[i]` and `col_max`.
+    //
+    // Bit-identical to the prior formulation: max(·,·) is
+    // associative on non-NaN inputs (every `v` is `|·|` of finite
+    // products), so combining via a register accumulator then
+    // folding into `row_max[j]` produces the same value as in-place
+    // updates in any iteration order.
+    for j in 0..n {
+        let col_start = matrix.col_ptr[j];
+        let col_end = matrix.col_ptr[j + 1];
+        let dj = d[j];
+        let mut col_max = row_max[j];
+
+        for k in col_start..col_end {
+            let i = matrix.row_idx[k];
+            let v = (d[i] * matrix.values[k] * dj).abs();
+            if i != j && v > row_max[i] {
+                row_max[i] = v;
+            }
+            if v > col_max {
+                col_max = v;
+            }
+        }
+        row_max[j] = col_max;
+    }
+}
+
+/// Issue #237: the per-pass row-max scan split over contiguous column
+/// ranges, one private buffer per range, merged per row.
+///
+/// Column range `[j0, j1)` of lower-triangle storage writes only rows
+/// `i >= j0`, so its buffer covers rows `[j0, n)`. Each range runs the
+/// serial scan's loop body unchanged against its own buffer; the merge
+/// takes, per row, the maximum over the ranges that start at or before it.
+///
+/// Bit-identical to [`sweep_serial`]: every update in both is
+/// `if v > acc { acc = v }` from `0.0`. For non-NaN `v >= 0` that is the
+/// exact maximum of the contributions, whatever the order or grouping;
+/// a NaN `v` never wins a `>` comparison, so it is ignored in every
+/// order as well. The ranges partition the columns, so each row sees the
+/// same multiset of contributions as in the serial pass.
+struct ParallelSweep {
+    /// Range boundaries: range `t` is columns `starts[t]..starts[t + 1]`.
+    starts: Vec<usize>,
+    /// `bufs[t][i - starts[t]]` is range `t`'s partial max for row `i`.
+    bufs: Vec<Vec<f64>>,
+}
+
+impl ParallelSweep {
+    /// Below this many stored entries a pass is a few milliseconds at
+    /// most; stay serial.
+    const MIN_NNZ: usize = 1 << 18;
+    /// Lower bound on stored entries per range, so tiny ranges do not
+    /// pay a buffer and a merge term for no work.
+    const MIN_NNZ_PER_RANGE: usize = 1 << 16;
+    /// Rows per merge task.
+    const MERGE_CHUNK: usize = 1 << 13;
+
+    /// `Some` only on a rayon worker (inside a `Solver`'s pool or the
+    /// parallel driver) with more than one thread and enough entries.
+    fn plan(matrix: &CscMatrix) -> Option<Self> {
+        let n = matrix.n;
+        let nnz = matrix.col_ptr.get(n).copied().unwrap_or(0);
+        if nnz < Self::MIN_NNZ || rayon::current_thread_index().is_none() {
+            return None;
+        }
+        let ranges = rayon::current_num_threads()
+            .min(nnz / Self::MIN_NNZ_PER_RANGE)
+            .max(1);
+        if ranges < 2 {
+            return None;
+        }
+        Some(Self::with_ranges(matrix, ranges))
+    }
+
+    /// Split the columns into `ranges` contiguous ranges of roughly equal
+    /// stored-entry count. Some ranges may be empty (one heavy column).
+    fn with_ranges(matrix: &CscMatrix, ranges: usize) -> Self {
+        let n = matrix.n;
+        let nnz = matrix.col_ptr.get(n).copied().unwrap_or(0);
+        let mut starts = Vec::with_capacity(ranges + 1);
+        starts.push(0usize);
+        let mut j = 0usize;
+        for t in 1..ranges {
+            let target = nnz / ranges * t;
+            while j < n && matrix.col_ptr[j] < target {
+                j += 1;
+            }
+            starts.push(j);
+        }
+        starts.push(n);
+        let bufs = (0..ranges).map(|t| vec![0.0f64; n - starts[t]]).collect();
+        Self { starts, bufs }
+    }
+
+    fn sweep(&mut self, matrix: &CscMatrix, d: &[f64], row_max: &mut [f64]) {
+        use rayon::prelude::*;
+        let starts = &self.starts;
+        self.bufs.par_iter_mut().enumerate().for_each(|(t, buf)| {
+            let j0 = starts[t];
+            let j1 = starts[t + 1];
+            buf.fill(0.0);
+            // Same loop body as `sweep_serial`, rows offset by `j0`.
+            for j in j0..j1 {
+                let col_start = matrix.col_ptr[j];
+                let col_end = matrix.col_ptr[j + 1];
+                let dj = d[j];
+                let mut col_max = buf[j - j0];
+                for k in col_start..col_end {
+                    let i = matrix.row_idx[k];
+                    let v = (d[i] * matrix.values[k] * dj).abs();
+                    if i != j && v > buf[i - j0] {
+                        buf[i - j0] = v;
+                    }
+                    if v > col_max {
+                        col_max = v;
+                    }
+                }
+                buf[j - j0] = col_max;
+            }
+        });
+        let bufs = &self.bufs;
+        row_max
+            .par_chunks_mut(Self::MERGE_CHUNK)
+            .enumerate()
+            .for_each(|(c, out)| {
+                let base = c * Self::MERGE_CHUNK;
+                for (off, slot) in out.iter_mut().enumerate() {
+                    let i = base + off;
+                    let mut m = 0.0f64;
+                    for (t, buf) in bufs.iter().enumerate() {
+                        let j0 = starts[t];
+                        if j0 > i {
+                            break;
+                        }
+                        let v = buf[i - j0];
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    *slot = m;
+                }
+            });
+    }
 }
 
 /// Knight-Ruiz ∞-norm scaling computed on a `SymmetricMatrix`
@@ -498,6 +632,103 @@ mod tests {
                 i,
                 row_max
             );
+        }
+    }
+
+    /// Issue #237 fixture: banded lower triangle (bandwidth 12) plus an
+    /// arrow (dense first column), an all-zero row/column, explicit
+    /// zeros, and values spanning ~12 orders of magnitude so the
+    /// scaling vector is far from 1. nnz > `ParallelSweep::MIN_NNZ`.
+    fn issue237_fixture() -> CscMatrix {
+        let n = 24_000usize;
+        let zero_row = 777usize;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            if j == zero_row {
+                continue;
+            }
+            for i in j..(j + 12).min(n) {
+                if i == zero_row {
+                    continue;
+                }
+                let e = ((i * 7 + j * 13) % 25) as i32 - 12;
+                let v = if (i + j) % 97 == 0 {
+                    0.0
+                } else {
+                    (1.0 + ((i ^ j) % 5) as f64) * 10f64.powi(e / 2)
+                };
+                let v = if i != j && (i + 2 * j) % 3 == 0 {
+                    -v
+                } else {
+                    v
+                };
+                rows.push(i);
+                cols.push(j);
+                vals.push(v);
+            }
+            if j > 12 && j != zero_row && j % 3 == 0 {
+                rows.push(j);
+                cols.push(0);
+                vals.push(1e3 / (1.0 + j as f64));
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    /// Issue #237: one chunked pass equals the serial pass bit for bit at
+    /// several range counts (range boundaries move with the count),
+    /// iterated through ten passes with the real `d` updates in between.
+    /// Oracle: `sweep_serial`, the pre-existing pass.
+    #[test]
+    fn chunked_sweep_matches_serial_bitwise_issue_237() {
+        let m = issue237_fixture();
+        assert!(m.nnz() > ParallelSweep::MIN_NNZ);
+        let n = m.n;
+        for ranges in [1usize, 2, 3, 4, 7] {
+            let mut par = ParallelSweep::with_ranges(&m, ranges);
+            let mut d = vec![1.0f64; n];
+            let mut serial = vec![0.0f64; n];
+            let mut chunked = vec![f64::NAN; n];
+            for pass in 0..10 {
+                sweep_serial(&m, &d, &mut serial);
+                par.sweep(&m, &d, &mut chunked);
+                let sb: Vec<u64> = serial.iter().map(|v| v.to_bits()).collect();
+                let cb: Vec<u64> = chunked.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(sb, cb, "ranges={ranges} pass={pass}");
+                for i in 0..n {
+                    if serial[i] > 0.0 {
+                        d[i] = crate::scaling::kr_guarded_update(d[i], serial[i]);
+                    }
+                }
+            }
+            assert_eq!(serial[777], 0.0, "zero row stays zero");
+        }
+    }
+
+    /// Issue #237: `compute_infnorm` takes the parallel pass on a rayon
+    /// worker and the serial pass elsewhere; the scaling vectors are
+    /// bit-identical, and not trivially all-ones.
+    #[test]
+    fn compute_infnorm_on_worker_matches_serial_issue_237() {
+        let m = issue237_fixture();
+        assert!(rayon::current_thread_index().is_none());
+        assert!(ParallelSweep::plan(&m).is_none(), "serial off a worker");
+        let (serial, _) = compute_infnorm(&m);
+        assert!(serial.iter().any(|&x| (x - 1.0).abs() > 1e-3));
+        for threads in [2usize, 3, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let par = pool.install(|| {
+                assert!(ParallelSweep::plan(&m).is_some(), "parallel on a worker");
+                compute_infnorm(&m).0
+            });
+            let sb: Vec<u64> = serial.iter().map(|v| v.to_bits()).collect();
+            let pb: Vec<u64> = par.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(sb, pb, "threads={threads}");
         }
     }
 }

@@ -4,6 +4,33 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — faster same-pattern refactorization (issue #237, step 1)
+
+- The value permutation on a repeated factorization of an unchanged
+  pattern no longer allocates or copies the permuted pattern: the
+  permuted matrix is kept in the workspace and its values are
+  overwritten in place, gathered in parallel when the parallel driver
+  runs. The pattern comparison the `Solver` already made is no longer
+  repeated. On a 156k-row, 6.0M-nonzero block-banded KKT the warm
+  permute drops from 75 ms to 6-9 ms (4 threads). Factors are
+  bit-identical to 0.23.0.
+- Memory: the permuted values array (8 bytes per stored nonzero) now
+  stays resident between factorizations in the `Solver`'s workspace.
+- `Solver::factor` no longer re-hashes an unchanged sparsity pattern:
+  the exact comparison with the stored pattern runs first and an exact
+  match reuses the stored fingerprint. The non-finite input check is
+  vectorized, and the post-factor pivot-growth check makes one pass
+  instead of two (and is skipped when it cannot apply). On the same
+  KKT, per-call work outside the numeric factorization drops from
+  ~65-80 ms to ~20 ms. Results are bit-identical.
+- `InfNorm` (Knight–Ruiz) scaling, including `Auto` resolved to it, runs
+  each equilibration pass over column ranges in parallel when the
+  factorization runs on a thread pool (a parallel `Solver`) and the
+  matrix has at least 2^18 stored entries. Scaling vectors are
+  bit-identical to the serial pass. On the same KKT: 204-284 ms ->
+  99 ms per factorization at 4 threads. Extra memory during the call:
+  one row-max buffer per thread (at most threads x n f64).
+
 ## [0.23.0] - 2026-11-14
 
 **Breaking (struct literals only).** `NumericParams` gains the public
