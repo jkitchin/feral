@@ -1,0 +1,32 @@
+#+TITLE: Journal 2026-11-19 session 03 — issue triage, #213 closed, #134 F
+#+STARTUP: showall
+
+* 17:30 :triage:issues:
+Reviewed the 13 open issues for quick wins. Quick: #213 (bug as reported
+fixed in 0.19.0 + #215; remaining structural work), #227 (shipped opt-in
+0.22.0; open for pounce end-to-end on user's machine), #134 F (doc +
+test). Session-sized: #147 (Rust 2024; needs MSRV decision), #211
+(reproducible here: wasm32-wasip1 target installs, node 22 present).
+Not quick: #237/#232 (waiting on others), #125, #153, #212, #131, #189,
+#209. Correction to my own triage: swap-to-boundary delayed pivoting was
+already implemented 2026-05-21 (decisions.md); what #213 leaves open is
+exact-inertia handling when a front exceeds its delay budget.
+
+* 17:40 :issue-213:issue-240:
+Created #240 (exact-inertia alternative to cascade-break), closed #213
+with a summary (0.19.0 floor fix + counters, #215 auto re-analysis;
+before/after numbers from the 0.19.0 CHANGELOG).
+
+* 17:55 :issue-134:bk:pivot-order:
+Confirmed at src/dense/factor.rs: dense `factor` (Step 5 swap test
+before Step 6 LAPACK extension), frontal `scalar_pivot_step` (same), and
+the blocked panel bail-outs (same order). Decision: keep and document
+(reordering changes factors; corpus gate unavailable). Test
+issue_134f_pivot_order_tests, hand oracle on [[0.5,1,0],[1,1.5,2],[0,2,3]]:
+perm [1,0,2], d = (1.5 | 2x2 [[-1/6,-4/3],[.,1/3]]), L col0 = (2/3, 4/3),
+inertia (2,1,0), scalar and blocked. Mutation: swap test disabled ->
+fails with perm [0,1,2] (LAPACK's choice), as predicted.
+Side fix: `cargo clippy --all-targets` flagged
+examples/issue237_scope_probe.rs (field assignment after Default; I added
+it in #239; CI and the hook do not lint examples). Fixed with a struct
+initializer. cargo test --release: 1058 passed, 0 failed.

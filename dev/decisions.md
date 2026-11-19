@@ -8312,3 +8312,29 @@ inertia of A for any positive diagonal D).
 inertia. tests/issue237_infnorm_reuse.rs. Journal 2026-11-19-02.
 Revisit (default on) after a corpus run and the #237 reporter's in-loop
 A/B.
+
+## 2026-11-19 — Keep feral's 1×1 test order (swap-in before LAPACK extension); document and pin it (issue #134 F)
+
+**Decision.** In Bunch–Kaufman pivot selection, when `|a_kk| < α·γ_0`,
+feral tests the swap-in 1×1 (`|a_rr| >= α·γ_r`) before LAPACK's no-swap
+extension (`|a_kk|·γ_r >= α·γ_0²`). `dsytf2` and Bunch & Kaufman (1977,
+`bunch1977stable`) test them the other way round. The order is kept, and
+is now documented at all three sites: dense `factor`, frontal
+`scalar_pivot_step`, and the blocked panel path, whose bail-outs hand the
+same decision to the scalar path. It is pinned by
+`issue_134f_pivot_order_tests` in `src/dense/factor.rs`.
+
+**Why not reorder for LAPACK parity.** Both branches are bounded-growth
+1×1 pivots, and inertia is the same either way (any admissible pivot
+sequence is a congruence; Sylvester). Only L and perm differ, and only
+when both tests hold. Reordering would change pivot choices, and so
+factors, on every matrix that hits that case. That needs the corpus gate
+(inertia 100 %, residual partitions), which this container cannot run,
+and buys only bit-parity with a LAPACK oracle, which no test relies on.
+
+**Evidence.** Hand-oracle test on
+`[[0.5, 1, 0], [1, 1.5, 2], [0, 2, 3]]`: both 1×1 tests hold at step 1;
+feral pivots on 1.5 (perm `[1, 0, 2]`), then a 2×2 on the Schur
+complement `[[-1/6, -4/3], [-4/3, 1/3]]`; inertia (2, 1, 0); scalar and
+blocked kernels agree. With the swap test disabled (LAPACK order) the
+test fails with perm `[0, 1, 2]`. Journal 2026-11-19-03.
