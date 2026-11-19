@@ -266,3 +266,35 @@ fn symv(a: &CscMatrix, x: &[f64]) -> Vec<f64> {
     }
     y
 }
+
+/// The parallel `Solver` runs the reuse guard on its thread pool, and
+/// above 2^18 stored entries the guard's pass is the parallel one. Same
+/// contract as the sequential tests: first call fresh (bitwise vs
+/// `compute_scaling`), then reuse of that vector, analytic inertia.
+#[test]
+fn parallel_solver_reuses_through_the_pool() {
+    let (t, nx) = (600usize, 16usize);
+    let a = chain_kkt(t, nx);
+    assert!(a.nnz() >= 1 << 18, "large enough for the parallel pass");
+    let np = NumericParams {
+        scaling: ScalingStrategy::InfNorm,
+        ..NumericParams::default()
+    };
+    let mut s = Solver::with_params(np, Default::default())
+        .with_parallel(true)
+        .with_infnorm_reuse(Some(InfNormReuse::default()));
+    let m0 = drift(&a, 0, 0.02);
+    assert!(matches!(s.factor(&m0, None), FactorStatus::Success));
+    let d0 = stored_scaling(&s);
+    assert_eq!(bits(&d0), bits(&fresh(&m0)));
+    for step in 1..3 {
+        let m = drift(&a, step, 0.02);
+        assert!(matches!(s.factor(&m, None), FactorStatus::Success));
+        assert_eq!(bits(&stored_scaling(&s)), bits(&d0), "step {step}");
+        assert_eq!(
+            *s.inertia().expect("inertia"),
+            Inertia::new(t * nx, (t - 1) * nx, 0)
+        );
+    }
+    assert_eq!(s.infnorm_reuse_hit_count(), 2);
+}
