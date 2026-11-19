@@ -1218,7 +1218,13 @@ pub fn factor(
         // Step 4: Compute γᵣ = max off-diagonal magnitude in symmetric row/column r
         let gamma_r = symmetric_row_offdiag_max(&a, n, k, r);
 
-        // Step 5: Test if A[r,r] is acceptable as 1×1 pivot (swap k↔r)
+        // Step 5: Test if A[r,r] is acceptable as 1×1 pivot (swap k↔r).
+        // Order note (issue #134 F, `dev/decisions.md` 2026-11-19): this
+        // swap-in 1×1 test runs BEFORE the LAPACK extension test below;
+        // `dsytf2` and Bunch & Kaufman (1977) run them the other way round.
+        // Both are bounded-growth 1×1 pivots and inertia is unchanged
+        // (Sylvester); only L/perm differ when both hold. Kept for bit
+        // stability; pinned by `issue_134f_pivot_order_tests`.
         let arr = a[r * n + r].abs();
         if arr >= alpha * gamma_r {
             // Swap invalidates any fused column — re-scan next iteration
@@ -3187,6 +3193,9 @@ fn lblt_panel_frontal(
                     // and scalar redoes gamma0/r/swap identically.
                     let gamma_r_pre = symmetric_row_offdiag_max(a, nrow, col, r);
                     let arr_pre = a[r * nrow + r].abs();
+                    // Same test order as `scalar_pivot_step` (swap-in 1×1
+                    // first, then the LAPACK extension), so the bail-outs
+                    // below hand scalar the identical decision. Issue #134 F.
                     if arr_pre >= alpha_bk * gamma_r_pre {
                         diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
                         return Ok((c, PanelStatus::ScalarFallback));
@@ -4755,6 +4764,12 @@ fn scalar_pivot_step(
     // Can we swap r into pivot position? Only if r < ncol (fully summed)
     let r_is_fully_summed = r < ncol;
 
+    // Order note (issue #134 F, `dev/decisions.md` 2026-11-19): this
+    // swap-in 1×1 test runs BEFORE the LAPACK extension test below;
+    // `dsytf2` and Bunch & Kaufman (1977) run them the other way round.
+    // Both are bounded-growth 1×1 pivots and inertia is unchanged
+    // (Sylvester); only L/perm differ when both hold. Kept for bit
+    // stability; pinned by `issue_134f_pivot_order_tests`.
     if r_is_fully_summed && arr >= alpha * gamma_r {
         // 1×1 pivot at r, swap r↔k
         swap_rows_cols(a, nrow, k, r, perm);
@@ -7398,5 +7413,92 @@ mod contrib_layout_tests {
             );
         }
         assert!(delayed > 0, "the corpus must exercise delayed columns");
+    }
+}
+
+#[cfg(test)]
+mod issue_134f_pivot_order_tests {
+    use super::*;
+    use crate::dense::matrix::SymmetricMatrix;
+
+    /// Issue #134 item F: when both 1×1 tests pass, feral takes the
+    /// swap-in 1×1 (`|a_rr| >= α·γ_r`) before LAPACK's no-swap extension
+    /// (`|a_kk|·γ_r >= α·γ_0²`); `dsytf2` and Bunch & Kaufman (1977) test
+    /// them in the other order. Both are bounded-growth 1×1 pivots and the
+    /// inertia is the same either way (Sylvester); only L/perm differ.
+    /// This pins feral's order (see `dev/decisions.md`, 2026-11-19).
+    ///
+    /// Matrix (lower triangle, column-major), α = (1 + √17)/8 ≈ 0.6404:
+    ///
+    /// ```text
+    ///   [ 0.5  .    .  ]
+    ///   [ 1.0  1.5  .  ]
+    ///   [ 0.0  2.0  3.0]
+    /// ```
+    ///
+    /// Hand oracle. Step 1 (k = 0): γ_0 = 1 at r = 1; 0.5 < α·1, so no
+    /// plain 1×1. γ_r = max(1, 2) = 2. Swap test 1.5 >= α·2 ≈ 1.281 holds,
+    /// and so does the LAPACK test 0.5·2 = 1 >= α·1 ≈ 0.640. feral swaps:
+    /// pivot d = 1.5 on original index 1, L = (1, 2)/1.5 = (2/3, 4/3) on
+    /// original (0, 2). LAPACK would pivot on 0.5 at index 0.
+    /// Step 2: Schur complement on original {0, 2} is
+    /// [[0.5 − 1/1.5, −2/1.5], [·, 3 − 4/1.5]] = [[−1/6, −4/3], [·, 1/3]].
+    /// γ_0 = 4/3, 1/6 < α·4/3; γ_r = 4/3; 1/3 < α·4/3; (1/6)(4/3) = 2/9 <
+    /// α·16/9: 2×2 pivot, det = −1/18 − 16/9 < 0 → one +, one −.
+    /// Inertia (2, 1, 0), perm [1, 0, 2].
+    #[test]
+    fn swap_1x1_is_preferred_over_lapack_extension() {
+        let n = 3;
+        let mut data = vec![0.0f64; n * n];
+        data[0] = 0.5;
+        data[1] = 1.0;
+        data[n + 1] = 1.5;
+        data[n + 2] = 2.0;
+        data[2 * n + 2] = 3.0;
+        let m = SymmetricMatrix { n, data };
+        let params = BunchKaufmanParams::default();
+        let alpha = params.alpha;
+        // Both 1×1 tests hold at step 1 (the case this test is about).
+        assert!(0.5 < alpha * 1.0);
+        assert!(1.5 >= alpha * 2.0, "swap test");
+        assert!(0.5 * 2.0 >= alpha * 1.0 * 1.0, "LAPACK extension test");
+        for (name, ff) in [
+            ("scalar", factor_frontal(&m, 3, false, &params)),
+            ("blocked", factor_frontal_blocked(&m, 3, false, &params)),
+        ] {
+            let ff = ff.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(ff.nelim, 3, "{name}");
+            assert_eq!(ff.perm, vec![1, 0, 2], "{name}: swap 1×1 first");
+            let tol = 1e-14;
+            assert!(
+                (ff.d_diag[0] - 1.5).abs() < tol,
+                "{name}: d0 {}",
+                ff.d_diag[0]
+            );
+            assert_eq!(ff.d_subdiag[0], 0.0, "{name}: step 1 is 1×1");
+            assert!(
+                (ff.d_diag[1] + 1.0 / 6.0).abs() < tol,
+                "{name}: {:?}",
+                ff.d_diag
+            );
+            assert!(
+                (ff.d_subdiag[1] + 4.0 / 3.0).abs() < tol,
+                "{name}: {:?}",
+                ff.d_subdiag
+            );
+            assert!(
+                (ff.d_diag[2] - 1.0 / 3.0).abs() < tol,
+                "{name}: {:?}",
+                ff.d_diag
+            );
+            // L column 0 (pivot on original 1): rows hold original 0, 2.
+            assert!((ff.l[1] - 2.0 / 3.0).abs() < tol, "{name}: {:?}", ff.l);
+            assert!((ff.l[2] - 4.0 / 3.0).abs() < tol, "{name}: {:?}", ff.l);
+            assert_eq!(
+                (ff.inertia.positive, ff.inertia.negative, ff.inertia.zero),
+                (2, 1, 0),
+                "{name}"
+            );
+        }
     }
 }
