@@ -1,40 +1,28 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-19T12:52:17Z
+Generated: 2026-11-19T18:24:54Z
 
 ## Latest Session
-File: dev/sessions/2026-11-19-02.md
+File: dev/sessions/2026-11-19-03.md
 ```
-# Session 2026-11-19-02
+# Session 2026-11-19-03
 
 ## Goal
-#237 follow-up after the reporter confirmed PR #238 (warm factor
--25..-28 %, FERAL level with / ahead of MA97): (1) check their 8-thread
-"scope" slowdown, (2) opt-in InfNorm reuse, (3) begin_recycle if simple.
+Triage the open issues for quick wins; close #213; do #134 item F.
 
 ## Accomplished
-- 5684b6b: `examples/issue237_scope_probe.rs` (parallel-driver phase
-  telemetry; builds against 0.23.0 too). A/B vs 0.23.0, MetisND,
-  alternating builds: scope 124-134 vs 121-134 ms (4 thr), 218-225 vs
-  217-224 ms (2 thr) — no regression. Warm factor 522-564 -> 254-279 ms
-  (4 thr). 8 threads not testable here.
-- 6094066 / 0761a18: `Solver::with_infnorm_reuse`, `InfNormReuse`,
-  `infnorm_reuse_hit_count`, `scaling::infnorm::rows_within_ratio`.
-  Default off (digests unchanged). With the default policy: warm factor
-  254-258 -> 183-197 ms (MetisND, 4 thr), refined residual unchanged,
-  analytic inertia. 8 new tests; mutation-checked.
-- `cargo test --release`: 1056 passed, 0 failed.
-
-**Side finding (not acted on):** on the chain KKT the default ordering
-(Auto -> Amf, 80 490 supernodes) is ~4x slower than MetisND (1081 vs
-283 ms per warm factor, 4 thr). Belongs to #203 / #209 ordering choice.
-
-**Not done:** begin_recycle lazy take (journal 12:45: needs reworking
-4 consumers + the parallel driver's slot mutexes for ~4 ms).
-
-**Not pushed:** PR #238 is unmerged; these commits are on local branch
-`issue237-followup` and go to `claude/blissful-ramanujan-w2nhfw` once
-#238 merges (the branch is restarted from main then).
+- Triage of 13 open issues (journal 2026-11-19-03 17:30). Quick: #213,
+  #227 (user's call), #134 F. Session-sized: #147 (needs MSRV decision),
+  #211 (reproducible here). Rest large or waiting on others.
+- #213 closed with a summary; remaining exact-inertia work split into
+  #240.
+- f437ae4: #134 F — BK 1x1 test order (swap-in before LAPACK extension)
+  documented at the three kernel sites and pinned by
+  `issue_134f_pivot_order_tests` (hand oracle; mutation-checked). No
+  logic change. decisions.md entry.
+- 4ddae78: clippy `--all-targets` fix in `examples/issue237_scope_probe.rs`
+  (from #239; CI and the hook do not lint examples).
+- `cargo test --release`: 1058 passed, 0 failed.
 
 ## Benchmark Results
 ```
@@ -48,51 +36,61 @@ Sparse solver: 2/2 total
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 ```
-Identical to 2026-11-19-01.
+Identical to 2026-11-19-02.
 
 ## Decisions Made
-- Opt-in guarded InfNorm reuse, default off (dev/decisions.md 2026-11-19).
+- Keep feral's BK 1x1 test order; documented and pinned
+  (dev/decisions.md 2026-11-19).
 
 ## Abandoned Approaches
 - None.
+
+## Next Session Should
+1. #134 F lands with this branch's PR; tick item F on #134.
+2. #147 Rust 2024 edition once the MSRV policy is decided.
+3. #211 wasm vs native factor values: reproducible in this container
+   (`rustup target add wasm32-wasip1`, node 22). Narrow which reduction
+   breaks the cross-lane-width bit-exactness claim.
+4. CI does not lint examples/tests with clippy; consider adding
+   `--all-targets` for the feral crate to the pre-commit/CI hook.
 ```
 
 ## Git Status
 ```
-0761a18 feat(#237): opt-in InfNorm scaling reuse across same-pattern factors
-6094066 docs(#237): research note and plan for opt-in InfNorm reuse
-5684b6b bench(#237): parallel-driver phase probe for build-to-build A/B
-441ff73 docs(session): 2026-11-19-01 checkpoint — #237 step 3 parallel KR sweeps
-ff7f8bb perf(#237): parallel Knight-Ruiz sweeps on a rayon worker
+4ddae78 fix(examples): clippy field_reassign_with_default in scope probe
+f437ae4 test+docs(#134 F): pin and document the BK 1x1 test order
+f04ecce Merge pull request #239 from jkitchin/claude/blissful-ramanujan-w2nhfw
+3bfc393 test(#237): InfNorm reuse through a parallel Solver's pool
+62034af docs(session): 2026-11-19-02 checkpoint — #237 scope A/B, InfNorm reuse
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_single_schur_index ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 485 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.72s
+test result: ok. 486 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.96s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-03.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -103,41 +101,41 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-11-19-01.
+Identical to 2026-11-19-02.
 
 ```
 
 ## Recent Decisions
-public API whose misuse returns a silently wrong factor (the REG-1 / #121
-failure class). Decided with the user, 2026-11-18.
-
-**Evidence.** Journal 2026-11-18-02: outside-driver work per warm call
-went from ~65-80 ms to ~20 ms with no API change (hash 31-44 ms -> 0,
-finite scan 10-13 -> 5-8 ms, escalation check 6-10 -> 0.7 ms); the
-compare (6-9 ms) and begin_recycle (4-7 ms) remain.
-
-## 2026-11-19 — Opt-in, guarded InfNorm scaling reuse (issue #237 step 4, #202 Defect 1)
-
-**Decision.** `Solver::with_infnorm_reuse(Option<InfNormReuse>)` lets a
-host reuse a computed `InfNorm` vector across same-pattern factorizations
-(age limit + one-pass row-norm ratio guard; default policy max_age 5,
-ratio 2). The default stays `None`: per-call recomputation, bit-identical
-to before.
-
-**Why.** The scaling is cap-bound (warm starts and lower caps rejected
-2026-08-09 / 2026-08-15), so only skipping it saves time. Making it the
-default changes numerics and needs the corpus gate, unavailable here.
-This is not the #49 defect recorded on 2026-05-2x: that was the MC64
-cache *unintentionally* replaying an InfNorm vector with no guard of its
-own. Here reuse is explicit, InfNorm-only, age-bounded and checked
-against the current values; inertia cannot change (D·A·D has the
-inertia of A for any positive diagonal D).
-
-**Evidence.** Chain KKT n = 155 970 (MetisND, 4 threads): warm factor
 254-258 -> 183-197 ms, refined residual unchanged (3.02e-13), analytic
 inertia. tests/issue237_infnorm_reuse.rs. Journal 2026-11-19-02.
 Revisit (default on) after a corpus run and the #237 reporter's in-loop
 A/B.
+
+## 2026-11-19 — Keep feral's 1×1 test order (swap-in before LAPACK extension); document and pin it (issue #134 F)
+
+**Decision.** In Bunch–Kaufman pivot selection, when `|a_kk| < α·γ_0`,
+feral tests the swap-in 1×1 (`|a_rr| >= α·γ_r`) before LAPACK's no-swap
+extension (`|a_kk|·γ_r >= α·γ_0²`). `dsytf2` and Bunch & Kaufman (1977,
+`bunch1977stable`) test them the other way round. The order is kept, and
+is now documented at all three sites: dense `factor`, frontal
+`scalar_pivot_step`, and the blocked panel path, whose bail-outs hand the
+same decision to the scalar path. It is pinned by
+`issue_134f_pivot_order_tests` in `src/dense/factor.rs`.
+
+**Why not reorder for LAPACK parity.** Both branches are bounded-growth
+1×1 pivots, and inertia is the same either way (any admissible pivot
+sequence is a congruence; Sylvester). Only L and perm differ, and only
+when both tests hold. Reordering would change pivot choices, and so
+factors, on every matrix that hits that case. That needs the corpus gate
+(inertia 100 %, residual partitions), which this container cannot run,
+and buys only bit-parity with a LAPACK oracle, which no test relies on.
+
+**Evidence.** Hand-oracle test on
+`[[0.5, 1, 0], [1, 1.5, 2], [0, 2, 3]]`: both 1×1 tests hold at step 1;
+feral pivots on 1.5 (perm `[1, 0, 2]`), then a 2×2 on the Schur
+complement `[[-1/6, -4/3], [-4/3, 1/3]]`; inertia (2, 1, 0); scalar and
+blocked kernels agree. With the swap test disabled (LAPACK order) the
+test fails with perm `[0, 1, 2]`. Journal 2026-11-19-03.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
