@@ -4,6 +4,11 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-19
+
+A minor release, not a 0.23.x patch, because it raises the minimum
+Rust compiler to 1.85.
+
 ### Added — `FactorStats::n_cascade_break_chain_nodes`
 - New counter for the cascade-break nodes tripped only by the issue #221
   delay-chain backstop, not by their own #215 delay budget. Also
@@ -15,9 +20,6 @@ All notable changes to FERAL will be documented in this file.
   4 fronts there (exact inertia, nothing floored), and the #215 test now
   checks only budget-triggered cascade-break.
 
-**Release as 0.24.0** (not a 0.23.x patch): this release raises the minimum
-Rust compiler to 1.85.
-
 ### Changed — Rust 2024 edition, MSRV 1.85 (issue #147)
 
 - All crates now declare `rust-version = "1.85"`; the solver and ordering
@@ -25,6 +27,10 @@ Rust compiler to 1.85.
   needs rustc 1.85 or newer (previously about 1.80 in practice, never
   declared). Crates that depend on feral can use any edition; nothing else
   changes for them.
+- The ordering crates are republished with the new edition and declared
+  MSRV and no code change: feral-ordering-core 0.2.4, feral-amd 0.2.2,
+  feral-amf 0.2.2, feral-metis 0.3.2, feral-scotch 0.3.2, feral-kahip
+  0.3.2.
 - The C API keeps the same symbols and ABI (`#[no_mangle]` is now spelled
   `#[unsafe(no_mangle)]`). Results are bit-identical.
 
