@@ -57,7 +57,7 @@ fn run_case(case: &Case) -> Outcome {
             return Outcome {
                 pass: false,
                 detail: format!("read_mtx error: {e:?}"),
-            }
+            };
         }
     };
     let csc = match mtx.to_csc() {
@@ -66,7 +66,7 @@ fn run_case(case: &Case) -> Outcome {
             return Outcome {
                 pass: false,
                 detail: format!("to_csc error: {e:?}"),
-            }
+            };
         }
     };
     let mut solver = Solver::with_params(cb_on_params(), SupernodeParams::default());
@@ -81,7 +81,7 @@ fn run_case(case: &Case) -> Outcome {
                     return Outcome {
                         pass: false,
                         detail: format!("Success but no inertia after {dt:.3}s"),
-                    }
+                    };
                 }
             };
             if got.positive == case.oracle.positive

@@ -1,7 +1,8 @@
 [package]
 name = "feral-ordering-core"
 version = "0.2.3"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Shared input/output types for FERAL's fill-reducing ordering crates (feral-amd, feral-metis, feral-scotch, feral-kahip). Defines the locked contract surface — CscPattern, OrderingStats, OrderingError."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]

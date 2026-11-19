@@ -124,8 +124,20 @@ fn main() {
                     i,
                     na.len()
                 );
-                eprintln!("  row_indices_eq={} l_eq={} dd_eq={} ds_eq={} contrib_eq={} perm_eq={} inertia_eq={} nd_eq={} nelim_eq={} ncol_eq={} ndi_eq={}",
-                          row_indices_eq, l_eq, dd_eq, ds_eq, contrib_eq, perm_eq, inertia_eq, nd_eq, nelim_eq, ncol_eq, ndi_eq);
+                eprintln!(
+                    "  row_indices_eq={} l_eq={} dd_eq={} ds_eq={} contrib_eq={} perm_eq={} inertia_eq={} nd_eq={} nelim_eq={} ncol_eq={} ndi_eq={}",
+                    row_indices_eq,
+                    l_eq,
+                    dd_eq,
+                    ds_eq,
+                    contrib_eq,
+                    perm_eq,
+                    inertia_eq,
+                    nd_eq,
+                    nelim_eq,
+                    ncol_eq,
+                    ndi_eq
+                );
                 eprintln!(
                     "  first_col={} ncol={} nelim={} n_delayed_in={}",
                     a.first_col, a.ncol, a.nelim, a.n_delayed_in

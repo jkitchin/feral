@@ -93,7 +93,7 @@ pub struct FeralSolver {
 ///     deficient KKT systems every iteration, so feral stays quiet
 ///     as a library should. On the Rust API the same fact is
 ///     always available structurally via `Solver::scaling_info`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn feral_new() -> *mut FeralSolver {
     catch_unwind(|| {
         let cb_on = matches!(
@@ -214,7 +214,7 @@ fn scaling_value_is_unrecognized(s: &str) -> bool {
 /// # Safety
 /// `s` must be a pointer previously returned by `feral_new` and not
 /// already freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_free(s: *mut FeralSolver) {
     if s.is_null() {
         return;
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn feral_free(s: *mut FeralSolver) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller contract — pointer came from `feral_new` and
         // has not been freed. Box reclaims and drops the owned data.
-        drop(Box::from_raw(s));
+        drop(unsafe { Box::from_raw(s) });
     }));
 }
 
@@ -236,7 +236,7 @@ pub unsafe extern "C" fn feral_free(s: *mut FeralSolver) {
 /// # Safety
 /// `s` must come from `feral_new`. `ia` must point to at least `n+1`
 /// `i32`s; `ja` must point to at least `nnz` `i32`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_set_structure(
     s: *mut FeralSolver,
     n: i32,
@@ -249,13 +249,13 @@ pub unsafe extern "C" fn feral_set_structure(
             return FERAL_FATAL;
         }
         // SAFETY: caller contract — `s` came from `feral_new`.
-        let s = &mut *s;
+        let s = unsafe { &mut *s };
         let n_usize = n as usize;
         let nnz_usize = nnz as usize;
         // SAFETY: caller contract — `ia` has at least n+1 entries.
-        let ia_slice = std::slice::from_raw_parts(ia, n_usize + 1);
+        let ia_slice = unsafe { std::slice::from_raw_parts(ia, n_usize + 1) };
         // SAFETY: caller contract — `ja` has at least nnz entries.
-        let ja_slice = std::slice::from_raw_parts(ja, nnz_usize);
+        let ja_slice = unsafe { std::slice::from_raw_parts(ja, nnz_usize) };
 
         let col_ptr: Vec<usize> = ia_slice.iter().map(|&x| x as usize).collect();
         let row_idx: Vec<usize> = ja_slice.iter().map(|&x| x as usize).collect();
@@ -294,14 +294,14 @@ pub unsafe extern "C" fn feral_set_structure(
 /// `s` must come from `feral_new` and have had `feral_set_structure`
 /// called successfully. The returned pointer is valid until the
 /// next `feral_set_structure` or `feral_free`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_values_ptr(s: *mut FeralSolver) -> *mut f64 {
     if s.is_null() {
         return std::ptr::null_mut();
     }
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller contract.
-        let s = &mut *s;
+        let s = unsafe { &mut *s };
         match &mut s.matrix {
             Some(m) => m.values.as_mut_ptr(),
             None => std::ptr::null_mut(),
@@ -319,7 +319,7 @@ pub unsafe extern "C" fn feral_values_ptr(s: *mut FeralSolver) -> *mut f64 {
 /// # Safety
 /// `s` must come from `feral_new` and have had
 /// `feral_set_structure` called successfully.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_factor(
     s: *mut FeralSolver,
     check_neg: i32,
@@ -330,7 +330,7 @@ pub unsafe extern "C" fn feral_factor(
             return FERAL_FATAL;
         }
         // SAFETY: caller contract.
-        let s = &mut *s;
+        let s = unsafe { &mut *s };
         // Borrow the stored matrix rather than cloning it. `matrix` and
         // `solver` are disjoint fields of `*s`, so `&s.matrix` coexists
         // with `&mut s.solver` below — no O(nnz) clone per IPM iteration
@@ -437,14 +437,14 @@ pub unsafe extern "C" fn feral_factor(
 /// values fill. The values buffer must not have been modified
 /// between `feral_factor` and `feral_solve` (Ipopt's protocol).
 /// `rhs` must point to at least `n * nrhs` `f64`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_solve(s: *mut FeralSolver, nrhs: i32, rhs: *mut f64) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         if s.is_null() || rhs.is_null() || nrhs <= 0 {
             return FERAL_FATAL;
         }
         // SAFETY: caller contract.
-        let s = &*s;
+        let s = unsafe { &*s };
         let matrix = match &s.matrix {
             Some(m) => m,
             None => return FERAL_FATAL,
@@ -452,7 +452,7 @@ pub unsafe extern "C" fn feral_solve(s: *mut FeralSolver, nrhs: i32, rhs: *mut f
         let n = matrix.n;
         let nrhs_usize = nrhs as usize;
         // SAFETY: caller contract — `rhs` has at least n*nrhs entries.
-        let rhs_slice = std::slice::from_raw_parts_mut(rhs, n * nrhs_usize);
+        let rhs_slice = unsafe { std::slice::from_raw_parts_mut(rhs, n * nrhs_usize) };
 
         let refined = !matches!(
             std::env::var("FERAL_REFINE").as_deref(),
@@ -482,14 +482,14 @@ pub unsafe extern "C" fn feral_solve(s: *mut FeralSolver, nrhs: i32, rhs: *mut f
 ///
 /// # Safety
 /// `s` must come from `feral_new`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_num_neg(s: *const FeralSolver) -> i32 {
     if s.is_null() {
         return -1;
     }
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller contract.
-        let s = &*s;
+        let s = unsafe { &*s };
         s.neg_evals
     }))
     .unwrap_or(-1)
@@ -509,14 +509,14 @@ pub unsafe extern "C" fn feral_num_neg(s: *const FeralSolver) -> i32 {
 ///
 /// # Safety
 /// `s` must come from `feral_new`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_min_pivot(s: *const FeralSolver) -> f64 {
     if s.is_null() {
         return -1.0;
     }
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller contract.
-        let s = &*s;
+        let s = unsafe { &*s };
         s.solver.min_pivot_magnitude().unwrap_or(-1.0)
     }))
     .unwrap_or(-1.0)
@@ -529,14 +529,14 @@ pub unsafe extern "C" fn feral_min_pivot(s: *const FeralSolver) -> f64 {
 ///
 /// # Safety
 /// `s` must come from `feral_new`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn feral_max_pivot(s: *const FeralSolver) -> f64 {
     if s.is_null() {
         return -1.0;
     }
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller contract.
-        let s = &*s;
+        let s = unsafe { &*s };
         s.solver.max_pivot_magnitude().unwrap_or(-1.0)
     }))
     .unwrap_or(-1.0)

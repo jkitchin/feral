@@ -90,7 +90,7 @@ fn median(xs: &mut [f64]) -> f64 {
     }
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let m = xs.len() / 2;
-    if xs.len().is_multiple_of(2) {
+    if xs.len() % 2 == 0 {
         0.5 * (xs[m - 1] + xs[m])
     } else {
         xs[m]

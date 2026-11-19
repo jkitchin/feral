@@ -278,26 +278,32 @@ fn run_one(mtx_path: &Path, po: &mut PerOrdering, max_n: usize, verbose: bool) {
 }
 
 fn report_aggregate(agg: &Aggregate) {
-    let report =
-        |label: &str, vals: &[f64], worst: Option<&(f64, String)>| {
-            if vals.is_empty() {
-                println!("    {:<24}  (no data)", label);
-                return;
-            }
-            let mut v = vals.to_vec();
-            let g = geomean(&v);
-            let p50 = percentile_f64(&mut v, 0.50);
-            let p90 = percentile_f64(&mut v, 0.90);
-            let p99 = percentile_f64(&mut v, 0.99);
-            let max = *v.last().unwrap_or(&0.0);
-            let worst_str = worst
-                .map(|(_, name)| format!("  worst={}", name))
-                .unwrap_or_default();
-            println!(
+    let report = |label: &str, vals: &[f64], worst: Option<&(f64, String)>| {
+        if vals.is_empty() {
+            println!("    {:<24}  (no data)", label);
+            return;
+        }
+        let mut v = vals.to_vec();
+        let g = geomean(&v);
+        let p50 = percentile_f64(&mut v, 0.50);
+        let p90 = percentile_f64(&mut v, 0.90);
+        let p99 = percentile_f64(&mut v, 0.99);
+        let max = *v.last().unwrap_or(&0.0);
+        let worst_str = worst
+            .map(|(_, name)| format!("  worst={}", name))
+            .unwrap_or_default();
+        println!(
             "    {:<24}  n={:>6}  geomean={:7.2}  p50={:7.2}  p90={:7.2}  p99={:7.2}  max={:7.2}{}",
-            label, vals.len(), g, p50, p90, p99, max, worst_str,
+            label,
+            vals.len(),
+            g,
+            p50,
+            p90,
+            p99,
+            max,
+            worst_str,
         );
-        };
+    };
 
     println!(
         "  [{}]  factored={}  factor_fail={}",
@@ -321,7 +327,9 @@ fn print_section(po: &PerOrdering) {
         "\n=== {} ===  seen={}  skipped(size)={}  skipped(read)={}  skipped(filter)={}",
         po.label, po.seen, po.skipped_size, po.skipped_no_mtx, po.skipped_filter,
     );
-    println!("  Methodology: feral-amd vs MUMPS, feral-metis vs SSIDS, feral-auto = production dispatcher.");
+    println!(
+        "  Methodology: feral-amd vs MUMPS, feral-metis vs SSIDS, feral-auto = production dispatcher."
+    );
     report_aggregate(&po.auto);
     report_aggregate(&po.amd);
     report_aggregate(&po.metis);

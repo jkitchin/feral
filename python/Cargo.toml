@@ -1,9 +1,14 @@
 [workspace]
+resolver = "3"
 
 [package]
 name = "feral-python"
 version = "0.23.0"
+# Edition 2021 on purpose (issue #147): pyo3 0.22's #[pymethods] and
+# #[pyfunction] expansions are not 2024-clean (~190 unsafe_op_in_unsafe_fn
+# warnings from macro-generated code). Revisit with a pyo3 upgrade.
 edition = "2021"
+rust-version = "1.85"
 license = "MIT"
 description = "Python bindings for feral — sparse symmetric indefinite direct solver."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]

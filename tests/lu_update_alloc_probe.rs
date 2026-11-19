@@ -42,22 +42,30 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Relaxed);
         BYTES.fetch_add(layout.size() as u64, Relaxed);
-        System.alloc(layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Relaxed);
         BYTES.fetch_add(layout.size() as u64, Relaxed);
-        System.alloc_zeroed(layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         REALLOCS.fetch_add(1, Relaxed);
         if new_size > layout.size() {
             BYTES.fetch_add((new_size - layout.size()) as u64, Relaxed);
         }
-        System.realloc(ptr, layout, new_size)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 

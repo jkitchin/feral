@@ -705,7 +705,11 @@ fn calibrate() {
         }
         println!(
             "\n  slack_max={}: {} families | route changes vs shipped: {} ({} gain MC64, {} lose it)",
-            slack_max, total, changed, gained.len(), lost.len()
+            slack_max,
+            total,
+            changed,
+            gained.len(),
+            lost.len()
         );
         println!(
             "    invariant under reversal: candidate {}/{}   shipped router NOT invariant on {}",

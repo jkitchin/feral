@@ -2924,7 +2924,12 @@ fn factor_one_supernode<L: BlockLayout>(
             debug_assert!(
                 r >= own_last,
                 "trailing row {} at position {} of supernode (first_col={}, own_ncol={}, expanded_ncol={}) is < first_col+own_ncol={}",
-                r, pos, first_col, own_ncol, expanded_ncol, own_last
+                r,
+                pos,
+                first_col,
+                own_ncol,
+                expanded_ncol,
+                own_last
             );
         }
     }

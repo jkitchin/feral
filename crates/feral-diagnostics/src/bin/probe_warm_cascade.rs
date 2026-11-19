@@ -92,7 +92,9 @@ fn main() {
     let curr: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(5);
 
     println!("# probe_warm_cascade  problem={problem}  prev={prev}  curr={curr}");
-    println!("# pair: data/matrices/kkt-mittelmann/{problem}/{problem}_{prev:04}.mtx -> {problem}_{curr:04}.mtx");
+    println!(
+        "# pair: data/matrices/kkt-mittelmann/{problem}/{problem}_{prev:04}.mtx -> {problem}_{curr:04}.mtx"
+    );
     let (cp, ep, cc, ec) = load_pair(&problem, prev, curr);
     println!(
         "# prev dim={}, nnz={}; curr dim={}, nnz={}",

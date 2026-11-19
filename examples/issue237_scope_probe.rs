@@ -124,13 +124,19 @@ fn main() {
         base.n,
         base.values.len(),
         std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "default".into()),
-        solver.factors().map(|f| format!("{:?}", f.resolved_method)).unwrap_or_default(),
+        solver
+            .factors()
+            .map(|f| format!("{:?}", f.resolved_method))
+            .unwrap_or_default(),
         solver.symbolic().map(|s| s.supernodes.len()).unwrap_or(0),
         solver.inertia().map(|i| (i.positive, i.negative, i.zero)),
         median(wall),
         median(scal),
         median(perm),
         median(scope.clone()),
-        scope.iter().map(|v| (v * 10.0).round() / 10.0).collect::<Vec<_>>(),
+        scope
+            .iter()
+            .map(|v| (v * 10.0).round() / 10.0)
+            .collect::<Vec<_>>(),
     );
 }

@@ -142,7 +142,19 @@ fn main() {
                 let inertia_flag = if a.4 == mt.4 { "" } else { " INERTIA-DIFF" };
                 println!(
                     "{:<16} {:>8} {:>6.2} {:>6} {:>9} {:>11} {:>11} {:>7.2} {:>9} {:>9} {:>9} {:>9} {:>7.2}{}",
-                    name, n, avg, max_deg, auto_m, a.2, mt.2, fill_r, a.0, mt.0, a.1, mt.1, time_r,
+                    name,
+                    n,
+                    avg,
+                    max_deg,
+                    auto_m,
+                    a.2,
+                    mt.2,
+                    fill_r,
+                    a.0,
+                    mt.0,
+                    a.1,
+                    mt.1,
+                    time_r,
                     inertia_flag,
                 );
             }

@@ -1,7 +1,8 @@
 [package]
 name = "feral-amd"
 version = "0.2.1"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Approximate Minimum Degree (AMD) fill-reducing ordering, quotient-graph algorithm (Amestoy, Davis & Duff 1996, 2004). Pure Rust, standalone."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]

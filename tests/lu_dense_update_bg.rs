@@ -112,9 +112,9 @@ fn dense_bg_update_chain_dense_basis() {
     assert_solves(&mut lu, &cols, "initial");
 
     // Replace slots 0,1,2,... (early columns → wide bumps) with fresh columns.
-    let mut gen = dense_basis(m, 0xF00D);
+    let mut fresh_cols = dense_basis(m, 0xF00D);
     for (step, slot) in [0usize, 1, 2, 0, 3, 1].into_iter().enumerate() {
-        let new_col = std::mem::take(&mut gen[step % m]);
+        let new_col = std::mem::take(&mut fresh_cols[step % m]);
         match lu.update(slot, &new_col) {
             Ok(()) => {
                 cols[slot] = new_col;

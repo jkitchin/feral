@@ -1,7 +1,8 @@
 [package]
 name = "feral-scotch"
 version = "0.3.1"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "SCOTCH-style nested-dissection fill-reducing ordering (Pellegrini 1996). Pure Rust, clean-room, standalone. Implements the FERAL ordering-crate contract."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]

@@ -45,7 +45,7 @@ fn read_rhs(path: &str, n: usize) -> std::io::Result<Vec<f64>> {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("rhs parse: {}", e),
-                ))
+                ));
             }
         }
     }

@@ -234,7 +234,9 @@ fn main() {
     } else {
         match expect {
             Some(_) => {
-                println!("correctness gate: all arms hit the analytic inertia oracle, rel_res <= 1e-8")
+                println!(
+                    "correctness gate: all arms hit the analytic inertia oracle, rel_res <= 1e-8"
+                )
             }
             None => println!(
                 "correctness gate: all arms agree on inertia {:?}, rel_res <= 1e-8 (agreement, not an oracle)",

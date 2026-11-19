@@ -48,15 +48,21 @@ struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         grow(layout.size());
-        System.alloc(layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         LIVE.fetch_sub(layout.size(), Relaxed);
-        System.dealloc(ptr, layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         grow(layout.size());
-        System.alloc_zeroed(layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if new_size >= layout.size() {
@@ -64,7 +70,9 @@ unsafe impl GlobalAlloc for Counting {
         } else {
             LIVE.fetch_sub(layout.size() - new_size, Relaxed);
         }
-        System.realloc(ptr, layout, new_size)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 
