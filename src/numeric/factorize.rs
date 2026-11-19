@@ -1471,6 +1471,21 @@ impl SparseFactors {
             .count()
     }
 
+    /// Number of cascade-break nodes (a subset of
+    /// [`n_cascade_break_nodes`](Self::n_cascade_break_nodes)) whose
+    /// trigger was only the issue #221 delay-chain backstop: the node's
+    /// own delay budget (#215) was not exceeded, but the delays carried
+    /// through its chain of fronts cost more than [`DELAY_CHAIN_GROWTH`]
+    /// times the subtree's symbolic area. The difference
+    /// `n_cascade_break_nodes() - n_cascade_break_chain_nodes()` counts
+    /// nodes where the per-front budget itself forced cascade-break.
+    pub fn n_cascade_break_chain_nodes(&self) -> usize {
+        self.node_factors
+            .iter()
+            .filter(|nf| nf.cascade_break_chain)
+            .count()
+    }
+
     /// Total number of 1×1 pivots that failed the threshold test but were
     /// accepted with their value unchanged because their front could not
     /// delay them (root or cascade-break fronts). Their L columns are not
@@ -1575,6 +1590,11 @@ pub struct NodeFactors {
     /// of being delayed to the parent. Set from the delay budget alone;
     /// it does not mean such a pivot occurred (issue #213).
     pub cascade_break: bool,
+    /// `true` iff `cascade_break` fired only through the issue #221
+    /// delay-chain backstop ([`DELAY_CHAIN_GROWTH`]): the node's own
+    /// #215 delay budget was not exceeded. Always `false` when
+    /// `cascade_break` is `false`.
+    pub cascade_break_chain: bool,
 }
 
 /// Caller-owned scratch pool for sparse numeric factorization.
@@ -2028,6 +2048,7 @@ pub fn dense_fast_factor_with_workspace(
         frontal_factors: ff,
         inertia: inertia.clone(),
         cascade_break: false,
+        cascade_break_chain: false,
     };
 
     Ok((
@@ -2797,6 +2818,7 @@ fn factor_one_supernode<L: BlockLayout>(
                 zero: 0,
             },
             cascade_break: false,
+            cascade_break_chain: false,
         });
     }
 
@@ -3079,6 +3101,9 @@ fn factor_one_supernode<L: BlockLayout>(
         }
         _ => false,
     };
+    // #221 backstop alone tripped: budgeted node, budget not exceeded.
+    let cascade_break_chain =
+        cascade_break && snode.delayed_capacity != usize::MAX && !budget_exceeded;
     let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots && !cascade_break;
     let local_bk;
     let bk_ref: &BunchKaufmanParams = if cascade_break {
@@ -3173,6 +3198,7 @@ fn factor_one_supernode<L: BlockLayout>(
         frontal_factors: ff,
         inertia: node_inertia,
         cascade_break,
+        cascade_break_chain,
     })
 }
 
@@ -3301,6 +3327,7 @@ fn factor_one_small_leaf(
                 zero: 0,
             },
             cascade_break: false,
+            cascade_break_chain: false,
         });
     }
 
@@ -3376,6 +3403,7 @@ fn factor_one_small_leaf(
         frontal_factors: ff,
         inertia: node_inertia,
         cascade_break: false,
+        cascade_break_chain: false,
     })
 }
 
