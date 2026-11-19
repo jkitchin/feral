@@ -101,6 +101,7 @@ fn run(base: &CscMatrix, parallel: bool, profiling: bool, iters: usize) -> (f64,
         .with_profiling(profiling);
     let mut walls = Vec::with_capacity(iters);
     let mut permutes = Vec::with_capacity(iters);
+    let mut scalings = Vec::with_capacity(iters);
     // Calls 0 and 1 are cold (analysis; cache build). Time 2.. .
     for step in 0..iters + 2 {
         drift(&mut m, step);
@@ -115,6 +116,7 @@ fn run(base: &CscMatrix, parallel: bool, profiling: bool, iters: usize) -> (f64,
             walls.push(dt);
             if let Some(r) = solver.profile_report() {
                 permutes.push(r.prologue_breakdown.permute_us as f64 / 1e3);
+                scalings.push(r.prologue_breakdown.scaling_us as f64 / 1e3);
             }
         }
     }
@@ -135,12 +137,13 @@ fn run(base: &CscMatrix, parallel: bool, profiling: bool, iters: usize) -> (f64,
     }
     println!(
         "  driver={} profiling={} inertia(+,-,0)={:?} factor_median_ms={:.2} \
-         permute_median_ms={:.3} solve_digest={:016x}",
+         permute_median_ms={:.3} scaling_median_ms={:.3} solve_digest={:016x}",
         if parallel { "parallel" } else { "sequential" },
         profiling,
         n_vars_neg,
         median(walls.clone()),
         median(permutes),
+        median(scalings),
         h
     );
     (median(walls), 0.0, h)
