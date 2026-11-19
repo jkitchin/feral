@@ -78,7 +78,8 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
     if !banner_ok {
         return Err(FeralError::IoError(format!(
             "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate real symmetric)",
-            source, header.trim()
+            source,
+            header.trim()
         )));
     }
 

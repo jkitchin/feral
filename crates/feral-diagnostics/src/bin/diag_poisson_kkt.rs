@@ -409,13 +409,26 @@ fn main() {
                 }
                 eprintln!(
                     "  cmp: Σ sym_nrow={}, Σ sym_ncol={}, n_supernodes={}, count_nrow_grew={}, count_ncol_grew={}, max_nrow_growth={:.2}× at idx={}",
-                    total_sym_nrow, total_sym_ncol, factors.node_factors.len(), count_nrow_grew, count_ncol_grew, max_nrow_growth, max_ncol_growth_idx
+                    total_sym_nrow,
+                    total_sym_ncol,
+                    factors.node_factors.len(),
+                    count_nrow_grew,
+                    count_ncol_grew,
+                    max_nrow_growth,
+                    max_ncol_growth_idx
                 );
                 if let Some(nf) = factors.node_factors.get(max_ncol_growth_idx) {
                     let s = &symbolic.supernodes[max_ncol_growth_idx];
                     eprintln!(
                         "  worst-case[{}]: sym(first_col={}, ncol={}, nrow={}) vs num(ncol={}, nrow={}, n_delayed_in={}, n_children={})",
-                        max_ncol_growth_idx, s.first_col, s.ncol, s.nrow, nf.frontal_factors.ncol, nf.frontal_factors.nrow, nf.n_delayed_in, s.children.len()
+                        max_ncol_growth_idx,
+                        s.first_col,
+                        s.ncol,
+                        s.nrow,
+                        nf.frontal_factors.ncol,
+                        nf.frontal_factors.nrow,
+                        nf.n_delayed_in,
+                        s.children.len()
                     );
                     let mut row_below = 0usize;
                     let mut row_above_or_eq = 0usize;
@@ -474,7 +487,14 @@ fn main() {
                 let solve_us = t0_solve.elapsed().as_micros();
                 eprintln!(
                     "  factor: {} us  factor_nnz={}  inertia=(+{}, -{}, 0={})  needs_refinement={}  solve x{}: {} us",
-                    us, nz, inertia.positive, inertia.negative, n_kkt - inertia.positive - inertia.negative, needs_refinement, nrhs, solve_us
+                    us,
+                    nz,
+                    inertia.positive,
+                    inertia.negative,
+                    n_kkt - inertia.positive - inertia.negative,
+                    needs_refinement,
+                    nrhs,
+                    solve_us
                 );
             }
             Err(e) => {

@@ -155,7 +155,7 @@ fn mc64_places_large_entries_on_diagonal() {
         let diag = rows
             .iter()
             .zip(vals)
-            .find(|(&i, _)| i == j)
+            .find(|&(&i, _)| i == j)
             .map(|(_, &v)| v.abs())
             .unwrap_or(0.0);
         assert!(

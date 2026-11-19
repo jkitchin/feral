@@ -39,13 +39,17 @@ unsafe impl GlobalAlloc for CountingAlloc {
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         }
-        System.alloc(layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if COUNTING.load(Ordering::Relaxed) {
             DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
-        System.dealloc(ptr, layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if COUNTING.load(Ordering::Relaxed) {
@@ -54,7 +58,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
                 ALLOC_BYTES.fetch_add((new_size - layout.size()) as u64, Ordering::Relaxed);
             }
         }
-        System.realloc(ptr, layout, new_size)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 

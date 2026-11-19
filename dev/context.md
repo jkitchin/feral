@@ -1,28 +1,29 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-19T18:24:54Z
+Generated: 2026-11-19T18:57:45Z
 
 ## Latest Session
-File: dev/sessions/2026-11-19-03.md
+File: dev/sessions/2026-11-19-04.md
 ```
-# Session 2026-11-19-03
+# Session 2026-11-19-04
 
 ## Goal
-Triage the open issues for quick wins; close #213; do #134 item F.
+Issue #147: Rust 2024 edition, resolver 3, declared MSRV (user chose
+1.85). Also landed: PR #241 (#134 F) merged at session start.
 
 ## Accomplished
-- Triage of 13 open issues (journal 2026-11-19-03 17:30). Quick: #213,
-  #227 (user's call), #134 F. Session-sized: #147 (needs MSRV decision),
-  #211 (reproducible here). Rest large or waiting on others.
-- #213 closed with a summary; remaining exact-inertia work split into
-  #240.
-- f437ae4: #134 F — BK 1x1 test order (swap-in before LAPACK extension)
-  documented at the three kernel sites and pinned by
-  `issue_134f_pivot_order_tests` (hand oracle; mutation-checked). No
-  logic change. decisions.md entry.
-- 4ddae78: clippy `--all-targets` fix in `examples/issue237_scope_probe.rs`
-  (from #239; CI and the hook do not lint examples).
-- `cargo test --release`: 1058 passed, 0 failed.
+- 3510a0c: research note + plan
+  (`dev/research/rust-2024-edition-2026-11-19.md`).
+- 7c13b4e: 8 workspace crates on edition 2024 + rust-version 1.85,
+  resolver 3; python/ rust-version 1.85 + resolver 3 but edition 2021
+  (pyo3 0.22 macros). capi.rs: #[unsafe(no_mangle)] + 11 narrow unsafe
+  blocks; allocators: 13 narrow wraps; set_var FIXMEs replaced with
+  SAFETY reasoning; 6 post-1.85 API uses in tests/tools replaced;
+  rustfmt style_edition 2021.
+- 0152aca: CI `msrv` job (cargo check on 1.85, --locked).
+- Verification: C ABI symbols identical (9), harness digests identical,
+  cargo test --release 1058 passed + all crate suites green, 1.85 check
+  clean, clippy/fmt clean, lockfiles unchanged.
 
 ## Benchmark Results
 ```
@@ -36,32 +37,31 @@ Sparse solver: 2/2 total
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 ```
-Identical to 2026-11-19-02.
+Identical to 2026-11-19-03.
 
 ## Decisions Made
-- Keep feral's BK 1x1 test order; documented and pinned
-  (dev/decisions.md 2026-11-19).
+- Edition 2024 / resolver 3 / MSRV 1.85; python/ stays 2021; rustfmt
+  2021 style; next release 0.24.0 (dev/decisions.md 2026-11-19).
 
 ## Abandoned Approaches
-- None.
+- cargo fix's whole-body `unsafe {}` wraps (replaced by narrow blocks).
+- Edition 2024 for python/ (pyo3 0.22 macro warnings) — deferred to a
+  pyo3 upgrade, not abandoned.
 
 ## Next Session Should
-1. #134 F lands with this branch's PR; tick item F on #134.
-2. #147 Rust 2024 edition once the MSRV policy is decided.
-3. #211 wasm vs native factor values: reproducible in this container
-   (`rustup target add wasm32-wasip1`, node 22). Narrow which reduction
-   breaks the cross-lane-width bit-exactness claim.
-4. CI does not lint examples/tests with clippy; consider adding
-   `--all-targets` for the feral crate to the pre-commit/CI hook.
+1. Release 0.24.0 (not 0.23.x): the MSRV rises to 1.85.
+2. Optional: a separate 2024-style rustfmt commit (drop rustfmt.toml).
+3. pyo3 upgrade, then python/ to edition 2024.
+4. #211 (wasm vs native factor values) — reproducible in the container.
 ```
 
 ## Git Status
 ```
-4ddae78 fix(examples): clippy field_reassign_with_default in scope probe
-f437ae4 test+docs(#134 F): pin and document the BK 1x1 test order
-f04ecce Merge pull request #239 from jkitchin/claude/blissful-ramanujan-w2nhfw
-3bfc393 test(#237): InfNorm reuse through a parallel Solver's pool
-62034af docs(session): 2026-11-19-02 checkpoint — #237 scope A/B, InfNorm reuse
+0152aca ci(#147): msrv job checks the workspace on Rust 1.85
+7c13b4e build(#147): Rust 2024 edition, resolver 3, rust-version 1.85
+3510a0c docs(#147): research note and plan for Rust 2024 edition + MSRV 1.85
+1ac83be Merge pull request #241 from jkitchin/claude/blissful-ramanujan-w2nhfw
+5f06f7a docs(session): 2026-11-19-03 checkpoint — triage, #213 closed, #134 F
 ```
 
 ## Test Status
@@ -84,13 +84,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 486 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.96s
+test result: ok. 486 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.87s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-03.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-04.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -101,41 +101,41 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-11-19-02.
+Identical to 2026-11-19-03.
 
 ```
 
 ## Recent Decisions
-254-258 -> 183-197 ms, refined residual unchanged (3.02e-13), analytic
-inertia. tests/issue237_infnorm_reuse.rs. Journal 2026-11-19-02.
-Revisit (default on) after a corpus run and the #237 reporter's in-loop
-A/B.
+A CI job (`msrv`) runs `cargo check --workspace --all-targets --locked` on
+toolchain 1.85. rustfmt is pinned to `style_edition = "2021"`
+(`rustfmt.toml`). The next release carrying this is 0.24.0, not a 0.23.x
+patch. MSRV 1.85 chosen by the user.
 
-## 2026-11-19 — Keep feral's 1×1 test order (swap-in before LAPACK extension); document and pin it (issue #134 F)
+**Why.** Edition 2024 makes the C ABI's unsafety explicit
+(`#[unsafe(no_mangle)]`) and requires `unsafe {}` around unsafe operations
+inside `unsafe fn` (each kept narrow, under the SAFETY comment that was
+already there). Editions are per crate, so 2021-edition dependents such as
+pounce are unaffected; the only downstream effect is the compiler floor,
+and releasing as 0.24.0 keeps older pounce releases (pinned to 0.23) off
+it. Resolver 3 only does something with a declared `rust-version`, hence
+the MSRV, and the CI job makes the declaration checked rather than
+aspirational. `python/` stays 2021 because pyo3 0.22's `#[pymethods]` /
+`#[pyfunction]` expansions produce ~190 `unsafe_op_in_unsafe_fn` warnings
+under 2024; revisit with a pyo3 upgrade. The 2021 rustfmt style keeps the
+diff to the edition change: the 2024 style would have reformatted ~320
+files (import ordering).
 
-**Decision.** In Bunch–Kaufman pivot selection, when `|a_kk| < α·γ_0`,
-feral tests the swap-in 1×1 (`|a_rr| >= α·γ_r`) before LAPACK's no-swap
-extension (`|a_kk|·γ_r >= α·γ_0²`). `dsytf2` and Bunch & Kaufman (1977,
-`bunch1977stable`) test them the other way round. The order is kept, and
-is now documented at all three sites: dense `factor`, frontal
-`scalar_pivot_step`, and the blocked panel path, whose bail-outs hand the
-same decision to the scalar path. It is pinned by
-`issue_134f_pivot_order_tests` in `src/dense/factor.rs`.
-
-**Why not reorder for LAPACK parity.** Both branches are bounded-growth
-1×1 pivots, and inertia is the same either way (any admissible pivot
-sequence is a congruence; Sylvester). Only L and perm differ, and only
-when both tests hold. Reordering would change pivot choices, and so
-factors, on every matrix that hits that case. That needs the corpus gate
-(inertia 100 %, residual partitions), which this container cannot run,
-and buys only bit-parity with a LAPACK oracle, which no test relies on.
-
-**Evidence.** Hand-oracle test on
-`[[0.5, 1, 0], [1, 1.5, 2], [0, 2, 3]]`: both 1×1 tests hold at step 1;
-feral pivots on 1.5 (perm `[1, 0, 2]`), then a 2×2 on the Schur
-complement `[[-1/6, -4/3], [-4/3, 1/3]]`; inertia (2, 1, 0); scalar and
-blocked kernels agree. With the swap test disabled (LAPACK order) the
-test fails with perm `[0, 1, 2]`. Journal 2026-11-19-03.
+**Evidence.** Exported `feral_*` symbols of `libferal.a` identical before
+and after (9). Harness solve digests identical (2b7436a25c646d27,
+e321bec7612e0d4f). `cargo test --release` 1058 passed, plus every
+ordering crate and feral-diagnostics green; clippy `--workspace
+--all-targets -D warnings` clean (with MSRV declared, clippy's
+`incompatible_msrv` now guards new code). Six post-1.85 API uses
+(`is_multiple_of`, `as_chunks`), all in tests and diagnostics tools,
+replaced; the published libraries already compiled on 1.85. Five
+`tail_expr_drop_order` notes reviewed: profiler mutex guards, a `Result`
+temporary and a diagnostics thread pool now drop earlier, which is
+harmless. Lockfiles unchanged. Journal 2026-11-19-04.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With

@@ -75,7 +75,9 @@ unsafe impl GlobalAlloc for ProbeAlloc {
                 return start as *mut u8;
             }
         }
-        UNDER.alloc(layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { UNDER.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let base = ARENA_BASE.load(Ordering::Relaxed);
@@ -84,7 +86,9 @@ unsafe impl GlobalAlloc for ProbeAlloc {
         if base != 0 && p >= base && p < base + len {
             return;
         }
-        UNDER.dealloc(ptr, layout)
+        // SAFETY: forwards this method's own `GlobalAlloc` contract
+        // (caller-provided `layout`/`ptr`) unchanged to the system allocator.
+        unsafe { UNDER.dealloc(ptr, layout) }
     }
 }
 

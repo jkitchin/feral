@@ -109,7 +109,9 @@ fn main() {
         block2[9].to_bits(),
         "paths diverged (byte check)"
     );
-    println!("tiny shape (nrow=10 ncol=1 ke=7): simd {simd_ns:.1} ns/call, scalar {scalar_ns:.1} ns/call");
+    println!(
+        "tiny shape (nrow=10 ncol=1 ke=7): simd {simd_ns:.1} ns/call, scalar {scalar_ns:.1} ns/call"
+    );
 
     // Frequency-license experiment (env FERAL_TINY_LICENSE=1): interleave
     // ONE tiny 256-bit kernel call with ~700 µs of scalar busywork per

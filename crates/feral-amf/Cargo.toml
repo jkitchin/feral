@@ -1,7 +1,8 @@
 [package]
 name = "feral-amf"
 version = "0.2.1"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Approximate Minimum Fill (AMF / HAMF4) fill-reducing ordering, quotient-graph algorithm (Amestoy 1999). Pure Rust, standalone."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]

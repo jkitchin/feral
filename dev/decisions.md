@@ -8338,3 +8338,39 @@ feral pivots on 1.5 (perm `[1, 0, 2]`), then a 2×2 on the Schur
 complement `[[-1/6, -4/3], [-4/3, 1/3]]`; inertia (2, 1, 0); scalar and
 blocked kernels agree. With the swap test disabled (LAPACK order) the
 test fails with perm `[0, 1, 2]`. Journal 2026-11-19-03.
+
+## 2026-11-19 — Rust 2024 edition, resolver 3, MSRV 1.85 (issue #147)
+
+**Decision.** The eight workspace crates move to edition 2024 with
+`rust-version = "1.85"`; the workspace resolver goes to 3. `python/`
+declares `rust-version = "1.85"` and resolver 3 but stays on edition 2021.
+A CI job (`msrv`) runs `cargo check --workspace --all-targets --locked` on
+toolchain 1.85. rustfmt is pinned to `style_edition = "2021"`
+(`rustfmt.toml`). The next release carrying this is 0.24.0, not a 0.23.x
+patch. MSRV 1.85 chosen by the user.
+
+**Why.** Edition 2024 makes the C ABI's unsafety explicit
+(`#[unsafe(no_mangle)]`) and requires `unsafe {}` around unsafe operations
+inside `unsafe fn` (each kept narrow, under the SAFETY comment that was
+already there). Editions are per crate, so 2021-edition dependents such as
+pounce are unaffected; the only downstream effect is the compiler floor,
+and releasing as 0.24.0 keeps older pounce releases (pinned to 0.23) off
+it. Resolver 3 only does something with a declared `rust-version`, hence
+the MSRV, and the CI job makes the declaration checked rather than
+aspirational. `python/` stays 2021 because pyo3 0.22's `#[pymethods]` /
+`#[pyfunction]` expansions produce ~190 `unsafe_op_in_unsafe_fn` warnings
+under 2024; revisit with a pyo3 upgrade. The 2021 rustfmt style keeps the
+diff to the edition change: the 2024 style would have reformatted ~320
+files (import ordering).
+
+**Evidence.** Exported `feral_*` symbols of `libferal.a` identical before
+and after (9). Harness solve digests identical (2b7436a25c646d27,
+e321bec7612e0d4f). `cargo test --release` 1058 passed, plus every
+ordering crate and feral-diagnostics green; clippy `--workspace
+--all-targets -D warnings` clean (with MSRV declared, clippy's
+`incompatible_msrv` now guards new code). Six post-1.85 API uses
+(`is_multiple_of`, `as_chunks`), all in tests and diagnostics tools,
+replaced; the published libraries already compiled on 1.85. Five
+`tail_expr_drop_order` notes reviewed: profiler mutex guards, a `Result`
+temporary and a diagnostics thread pool now drop earlier, which is
+harmless. Lockfiles unchanged. Journal 2026-11-19-04.

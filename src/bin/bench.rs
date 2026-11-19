@@ -1539,7 +1539,9 @@ fn main() {
     }
 
     if kkt_entries.is_empty() {
-        println!("\nno KKT matrices found under data/matrices/kkt* (run collect_kkt from ripopt or scripts/harvest-mittelmann-kkt.sh)");
+        println!(
+            "\nno KKT matrices found under data/matrices/kkt* (run collect_kkt from ripopt or scripts/harvest-mittelmann-kkt.sh)"
+        );
         return;
     }
 

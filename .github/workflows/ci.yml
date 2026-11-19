@@ -75,6 +75,19 @@ jobs:
         run: |
           git log --format="%B" -1 | awk 'NR==2{found=1} END{if(!found){print "WARNING: commit has no body";}}'
 
+  msrv:
+    # Issue #147: every crate declares `rust-version = "1.85"` (the
+    # edition-2024 floor). This job is what makes the declaration true:
+    # it type-checks the whole workspace, tests and tools included, on
+    # that exact toolchain. `cargo check` rather than `test` keeps it
+    # cheap; the `check` job above runs the tests on stable.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.85
+      - name: cargo check on the MSRV toolchain
+        run: cargo check --workspace --all-targets --locked
+
   stress-smoke:
     # M5 gate (issue #28). Runs the stress harness in synth + small-
     # SuiteSparse mode (n <= 1000) and fails the build if report.py

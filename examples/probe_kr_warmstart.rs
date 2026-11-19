@@ -122,7 +122,9 @@ fn main() {
         m.values.len(),
         drift
     );
-    println!("  KR iters: first-factor cold={it1}  next-factor cold={it_cold}  next-factor WARM={it_warm}");
+    println!(
+        "  KR iters: first-factor cold={it1}  next-factor cold={it_cold}  next-factor WARM={it_warm}"
+    );
     println!(
         "  cold-vs-warm converged d: max rel diff = {max_rel:.3e}, bit-identical = {identical}"
     );

@@ -181,10 +181,14 @@ fn run_one(matrix_name: &str) {
     let n_schur = schur.len();
     let bytes = std::fs::read(&bin_path).unwrap();
     let mumps: Vec<f64> = bytes
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|c| f64::from_le_bytes(*c))
+        // `chunks_exact` rather than `as_chunks` (stable only since 1.88):
+        // the workspace MSRV is 1.85 (issue #147).
+        .chunks_exact(8)
+        .map(|c| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(c);
+            f64::from_le_bytes(b)
+        })
         .collect();
 
     println!("  n={} n_schur={}", n, n_schur);

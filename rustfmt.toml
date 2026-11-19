@@ -1,0 +1,5 @@
+# Issue #147: the crates moved to edition 2024, which would also switch
+# rustfmt to the 2024 style edition and reformat ~320 files (import order,
+# etc.). Keep the 2021 style so the edition change stays reviewable; a
+# 2024-style reformat can be its own commit later.
+style_edition = "2021"

@@ -96,7 +96,12 @@ fn task_coarsened_parallel_is_byte_identical_to_serial() {
     let reference = factor_bits(&matrix, false);
 
     // Maximal task graph: every branching point becomes a boundary.
-    std::env::set_var("FERAL_PAR_TASK_MIN_FLOPS", "1");
+    // SAFETY (every set_var/remove_var in this test): `set_var` races
+    // with concurrent environment reads. This binary holds a single
+    // #[test] (module docs), so no other test thread exists, and the
+    // environment changes only between factorizations, while rayon's
+    // workers are idle; the knob is read on this thread at the next call.
+    unsafe { std::env::set_var("FERAL_PAR_TASK_MIN_FLOPS", "1") };
     let fine = factor_bits(&matrix, true);
     assert_eq!(
         fine, reference,
@@ -104,7 +109,8 @@ fn task_coarsened_parallel_is_byte_identical_to_serial() {
     );
 
     // Default cutoff.
-    std::env::remove_var("FERAL_PAR_TASK_MIN_FLOPS");
+    // SAFETY: see the comment on the first set_var above.
+    unsafe { std::env::remove_var("FERAL_PAR_TASK_MIN_FLOPS") };
     let default_plan = factor_bits(&matrix, true);
     assert_eq!(
         default_plan, reference,
@@ -112,9 +118,11 @@ fn task_coarsened_parallel_is_byte_identical_to_serial() {
     );
 
     // Huge cutoff: single task / serial fallback path.
-    std::env::set_var("FERAL_PAR_TASK_MIN_FLOPS", "18446744073709551615");
+    // SAFETY: see the comment on the first set_var above.
+    unsafe { std::env::set_var("FERAL_PAR_TASK_MIN_FLOPS", "18446744073709551615") };
     let coarse = factor_bits(&matrix, true);
-    std::env::remove_var("FERAL_PAR_TASK_MIN_FLOPS");
+    // SAFETY: see the comment on the first set_var above.
+    unsafe { std::env::remove_var("FERAL_PAR_TASK_MIN_FLOPS") };
     assert_eq!(
         coarse, reference,
         "serial-fallback path diverged from the sequential driver"
@@ -127,9 +135,11 @@ fn task_coarsened_parallel_is_byte_identical_to_serial() {
     // identical factors — the knob is scheduling-only, so it can be
     // calibrated for speed on real hardware with no numerical risk.
     for seeds in ["0", "1", "2", "4", "64", "18446744073709551615"] {
-        std::env::set_var("FERAL_PAR_MIN_SEEDS", seeds);
+        // SAFETY: see the comment on the first set_var above.
+        unsafe { std::env::set_var("FERAL_PAR_MIN_SEEDS", seeds) };
         let swept = factor_bits(&matrix, true);
-        std::env::remove_var("FERAL_PAR_MIN_SEEDS");
+        // SAFETY: see the comment on the first set_var above.
+        unsafe { std::env::remove_var("FERAL_PAR_MIN_SEEDS") };
         assert_eq!(
             swept, reference,
             "FERAL_PAR_MIN_SEEDS={seeds} diverged from the sequential driver"

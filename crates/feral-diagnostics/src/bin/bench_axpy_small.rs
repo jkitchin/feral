@@ -78,7 +78,9 @@ fn bench<F: FnMut(&mut [f64], &[f64], f64)>(name: &str, len: usize, mut f: F) ->
 
 fn main() {
     let lens = [3usize, 4, 5, 6, 8, 10, 16, 32, 64, 128];
-    println!("=== axpy_minus small-length microbench (min-of-{REPEAT}, {ITERS_PER_LEN} iters/measure) ===");
+    println!(
+        "=== axpy_minus small-length microbench (min-of-{REPEAT}, {ITERS_PER_LEN} iters/measure) ==="
+    );
     println!(
         "{:>4}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
         "len", "pulp_ns", "scalar_ns", "unroll4_ns", "pulp/scl", "pulp/u4"

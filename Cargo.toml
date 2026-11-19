@@ -6,12 +6,13 @@ members = [".", "crates/feral-ordering-core", "crates/feral-amd", "crates/feral-
 # NOT a dependency of `feral`, so the default build/test set never compiles its
 # ~144 one-off binaries (issue #71). Build them explicitly with
 # `cargo build -p feral-diagnostics`.
-resolver = "2"
+resolver = "3"
 
 [package]
 name = "feral"
 version = "0.23.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Sparse symmetric indefinite direct solver in pure Rust, with certified inertia counts."
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]

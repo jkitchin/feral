@@ -67,7 +67,10 @@ fn bench_one(label: &str, a: &CscMatrix) {
     let reps = 3;
 
     // OFF
-    std::env::set_var("FERAL_INTRAFRONT", "0");
+    // SAFETY (every set_var/remove_var here): single-threaded tool; the
+    // environment changes only between factorizations, while rayon's
+    // workers are idle, so nothing reads it concurrently.
+    unsafe { std::env::set_var("FERAL_INTRAFRONT", "0") };
     let (off_f, off_i) = factorize_multifrontal_supernodal_parallel(a, &sym, &params)
         .expect("factor (intrafront off)");
     let t_off = min_time(reps, || {
@@ -75,13 +78,15 @@ fn bench_one(label: &str, a: &CscMatrix) {
     });
 
     // ON
-    std::env::set_var("FERAL_INTRAFRONT", "1");
+    // SAFETY: see the comment on the first set_var above.
+    unsafe { std::env::set_var("FERAL_INTRAFRONT", "1") };
     let (on_f, on_i) = factorize_multifrontal_supernodal_parallel(a, &sym, &params)
         .expect("factor (intrafront on)");
     let t_on = min_time(reps, || {
         let _ = factorize_multifrontal_supernodal_parallel(a, &sym, &params).unwrap();
     });
-    std::env::remove_var("FERAL_INTRAFRONT");
+    // SAFETY: see the comment on the first set_var above.
+    unsafe { std::env::remove_var("FERAL_INTRAFRONT") };
 
     // Correctness: inertia equal, per-supernode L bit-identical.
     let inertia_ok = off_i == on_i;

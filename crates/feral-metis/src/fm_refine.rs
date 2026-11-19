@@ -784,7 +784,7 @@ mod tests {
             .map(|k| {
                 let r = (k as usize) / 4;
                 let c = (k as usize) % 4;
-                if (r + c).is_multiple_of(2) {
+                if (r + c) % 2 == 0 {
                     PART_A
                 } else {
                     PART_B

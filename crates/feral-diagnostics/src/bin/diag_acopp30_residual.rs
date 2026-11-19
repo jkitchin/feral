@@ -197,8 +197,7 @@ fn process(idx: usize) {
     let inertia_tag = if inertia_ok { "OK " } else { "MIS" };
     println!(
         "[{idx:04}] inertia {inertia_tag} feral=({}, {}, {}) exp=({}, {}, 0)  min|D|={:>9.2e}  rel_raw={:>9.2e}  rel_ref={:>9.2e}",
-        inertia.positive, inertia.negative, inertia.zero,
-        exp_pos, exp_neg, min_d, rel_raw, rel_ref,
+        inertia.positive, inertia.negative, inertia.zero, exp_pos, exp_neg, min_d, rel_raw, rel_ref,
     );
 }
 

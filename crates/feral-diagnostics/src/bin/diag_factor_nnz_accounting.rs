@@ -137,7 +137,9 @@ fn main() {
         }
     }
 
-    println!("matrix                 n  ferl_C  ferl_B  ferl_A    MUMPS    SSIDS  C/SSIDS  B/SSIDS  A/SSIDS  C/MUMPS  B/MUMPS  A/MUMPS  snodes  fronts(avg)");
+    println!(
+        "matrix                 n  ferl_C  ferl_B  ferl_A    MUMPS    SSIDS  C/SSIDS  B/SSIDS  A/SSIDS  C/MUMPS  B/MUMPS  A/MUMPS  snodes  fronts(avg)"
+    );
     println!("{}", "-".repeat(160));
 
     let mut all_c_ssids: Vec<f64> = Vec::new();
