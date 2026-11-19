@@ -145,6 +145,8 @@ pub struct FactorStats {
     #[pyo3(get)]
     pub n_cascade_break_nodes: usize,
     #[pyo3(get)]
+    pub n_cascade_break_chain_nodes: usize,
+    #[pyo3(get)]
     pub n_threshold_fail_accepts: usize,
 }
 
@@ -162,6 +164,7 @@ impl From<RustFactorStats> for FactorStats {
             ordering_info: (&s.ordering_info).into(),
             n_tiny: s.n_tiny,
             n_cascade_break_nodes: s.n_cascade_break_nodes,
+            n_cascade_break_chain_nodes: s.n_cascade_break_chain_nodes,
             n_threshold_fail_accepts: s.n_threshold_fail_accepts,
         }
     }
@@ -171,12 +174,13 @@ impl From<RustFactorStats> for FactorStats {
 impl FactorStats {
     fn __repr__(&self) -> String {
         format!(
-            "FactorStats(nnz_a={}, nnz_l={}, fill_ratio={:.3}, n_tiny={}, n_cascade_break_nodes={}, n_threshold_fail_accepts={})",
+            "FactorStats(nnz_a={}, nnz_l={}, fill_ratio={:.3}, n_tiny={}, n_cascade_break_nodes={}, n_cascade_break_chain_nodes={}, n_threshold_fail_accepts={})",
             self.nnz_a,
             self.nnz_l,
             self.fill_ratio,
             self.n_tiny,
             self.n_cascade_break_nodes,
+            self.n_cascade_break_chain_nodes,
             self.n_threshold_fail_accepts
         )
     }

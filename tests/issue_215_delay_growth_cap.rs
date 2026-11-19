@@ -69,7 +69,16 @@ fn factor_exact(m: &CscMatrix, want: Inertia, tag: &str) {
         Some(&want),
         "{tag}: wrong inertia, stats {st:?}"
     );
-    assert_eq!(st.n_cascade_break_nodes, 0, "{tag}: cascade-break engaged");
+    // #215 guards the per-front delay budget: it must not force
+    // cascade-break. The #221 delay-chain backstop is a separate,
+    // intentional carry-cost bound (qcqp1500-1nc trips it at 4 nodes
+    // with exact inertia and no floored pivot), so it is excluded here;
+    // the inertia and floored-pivot checks still cover its effect.
+    assert_eq!(
+        st.n_cascade_break_nodes - st.n_cascade_break_chain_nodes,
+        0,
+        "{tag}: budget-triggered cascade-break engaged, stats {st:?}"
+    );
     assert_eq!(st.inertia_uncertain(), 0, "{tag}: floored pivots");
 }
 

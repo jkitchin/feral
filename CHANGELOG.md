@@ -4,6 +4,17 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `FactorStats::n_cascade_break_chain_nodes`
+- New counter for the cascade-break nodes tripped only by the issue #221
+  delay-chain backstop, not by their own #215 delay budget. Also
+  `SparseFactors::n_cascade_break_chain_nodes()`,
+  `NodeFactors::cascade_break_chain`, and the Python `FactorStats` field.
+  `n_cascade_break_nodes` is unchanged (it still counts both triggers).
+- Fixes the local-only failure of
+  `qcqp1500_1nc_factors_without_cascade_break`: the #221 backstop fires at
+  4 fronts there (exact inertia, nothing floored), and the #215 test now
+  checks only budget-triggered cascade-break.
+
 **Release as 0.24.0** (not a 0.23.x patch): this release raises the minimum
 Rust compiler to 1.85.
 

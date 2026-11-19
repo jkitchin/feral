@@ -149,6 +149,11 @@ pub struct FactorStats {
     /// [`SparseFactors::n_cascade_break_nodes`](crate::numeric::factorize::SparseFactors::n_cascade_break_nodes).
     /// Issue #213.
     pub n_cascade_break_nodes: usize,
+    /// Subset of `n_cascade_break_nodes` triggered only by the issue
+    /// #221 delay-chain backstop (the node's own #215 delay budget was
+    /// not exceeded). Mirrors
+    /// [`SparseFactors::n_cascade_break_chain_nodes`](crate::numeric::factorize::SparseFactors::n_cascade_break_chain_nodes).
+    pub n_cascade_break_chain_nodes: usize,
     /// Number of 1×1 pivots that failed the threshold test and were
     /// accepted with their value unchanged because their front could not
     /// delay (root or cascade-break fronts), so their L column is not
@@ -3314,6 +3319,7 @@ impl Solver {
         let scaling_info = factors.scaling_info.clone();
         let n_tiny = factors.n_tiny();
         let n_cascade_break_nodes = factors.n_cascade_break_nodes();
+        let n_cascade_break_chain_nodes = factors.n_cascade_break_chain_nodes();
         let n_threshold_fail_accepts = factors.n_threshold_fail_accepts();
         let max_abs_l = factors.max_abs_l();
         let actual_flops = factors.actual_front_flops();
@@ -3346,6 +3352,7 @@ impl Solver {
             ordering_info,
             n_tiny,
             n_cascade_break_nodes,
+            n_cascade_break_chain_nodes,
             n_threshold_fail_accepts,
             max_abs_l,
             predicted_flops,

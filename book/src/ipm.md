@@ -100,6 +100,7 @@ After each `factor`, `Solver::last_factor_stats()` returns `FactorStats`:
 | `inertia`, `n_tiny`, `n_threshold_fail_accepts` | inertia, floored pivots, pivots force-accepted below the threshold |
 | `max_abs_l` | realized multiplier bound |
 | `n_cascade_break_nodes` | fronts whose delay budget was exceeded, so they could not delay further |
+| `n_cascade_break_chain_nodes` | the subset of those fronts tripped only by the delay-chain carry-cost backstop (#221), not their own budget |
 | `pattern_reused` | the cached analysis was reused |
 | `predicted_flops`, `actual_flops` | dense-front work predicted by the analysis, and actually done (delayed pivots inflate it) |
 | `reanalysed`, `reanalysis_count` | this factor adopted a new analysis; adoptions on this pattern |
