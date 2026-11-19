@@ -39,7 +39,7 @@ use crate::sparse::csc::CscMatrix;
 
 #[allow(dead_code)] // Real uses arrive in Step 3 of the implementation plan.
 mod hungarian;
-mod infnorm;
+pub(crate) mod infnorm;
 mod mc64;
 mod value_bound;
 

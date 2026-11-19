@@ -361,6 +361,49 @@ impl PatternFingerprint {
     }
 }
 
+/// Issue #237 / #202: opt-in reuse of a computed `InfNorm`
+/// (Knight–Ruiz ∞-norm) scaling vector across same-pattern
+/// factorizations. See [`Solver::with_infnorm_reuse`].
+///
+/// Reuse never changes inertia (`D·A·D` has the inertia of `A` for any
+/// positive diagonal `D`); it can change pivot choices and the residual
+/// before refinement, which is why it is opt-in and guarded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InfNormReuse {
+    /// Consecutive factorizations that may reuse one computed vector
+    /// before a fresh computation is forced. `0` never reuses.
+    pub max_age: usize,
+    /// Guard, `>= 1`: a cached vector `d` is reused only if every nonzero
+    /// row of `D·A·D` (current values) has ∞-norm in
+    /// `[1/max_row_ratio, max_row_ratio]`. Checked with one
+    /// equilibration pass, about a tenth of a fresh computation. A fresh
+    /// computation leaves rows within a few percent of 1.
+    /// `f64::INFINITY` disables the guard.
+    pub max_row_ratio: f64,
+}
+
+impl Default for InfNormReuse {
+    /// `max_age = 5`, `max_row_ratio = 2.0`: recompute at least every
+    /// sixth factorization, and whenever any row of the reused scaling
+    /// is off by more than a factor of 2.
+    fn default() -> Self {
+        Self {
+            max_age: 5,
+            max_row_ratio: 2.0,
+        }
+    }
+}
+
+/// Issue #237: the cached `InfNorm` vector behind [`InfNormReuse`].
+struct InfNormCache {
+    /// Pattern the vector was computed for.
+    fingerprint: PatternFingerprint,
+    /// User-order scaling vector from the last fresh computation.
+    scaling: Vec<f64>,
+    /// Reuses since that computation.
+    age: usize,
+}
+
 /// Solver-scope value-bounded MC64 scaling cache (Track B2).
 ///
 /// An IPM driver replays `factor()` on a bit-identical sparsity
@@ -677,6 +720,16 @@ pub struct Solver {
     /// the value-bounded MC64 scaling cache. Exposed via
     /// [`Solver::mc64_cache_hit_count`].
     mc64_cache_hit_count: usize,
+    /// Issue #237: opt-in `InfNorm` reuse policy; `None` (default)
+    /// recomputes on every factorization.
+    infnorm_reuse: Option<InfNormReuse>,
+    /// Issue #237: cached `InfNorm` vector; `Some` only with
+    /// `infnorm_reuse` set and after a fresh `InfNorm` factorization on
+    /// the current pattern. Cleared on pattern change.
+    infnorm_cache: Option<InfNormCache>,
+    /// Diagnostic counter: factorizations that reused the cached
+    /// `InfNorm` vector. See [`Solver::infnorm_reuse_hit_count`].
+    infnorm_reuse_hit_count: usize,
     /// Issue #51: sticky `Auto` scaling pick. When the configured
     /// scaling is `ScalingStrategy::Auto`, [`pick_scaling_strategy`] is
     /// consulted exactly *once* per pattern (on the first `factor()`
@@ -780,6 +833,9 @@ impl Solver {
             mc64_cache_enabled: true,
             mc64_scaling_cache: None,
             mc64_cache_hit_count: 0,
+            infnorm_reuse: None,
+            infnorm_cache: None,
+            infnorm_reuse_hit_count: 0,
             auto_picked_strategy: None,
             last_nnz_a: None,
             last_pattern_reused: None,
@@ -1060,6 +1116,33 @@ impl Solver {
         self.mc64_cache_enabled = on;
         if !on {
             self.mc64_scaling_cache = None;
+        }
+        self
+    }
+
+    /// Issue #237 / #202: reuse a computed `InfNorm` (Knight–Ruiz)
+    /// scaling vector across factorizations of the same pattern.
+    ///
+    /// `None` (the default) recomputes the scaling on every
+    /// factorization, as before. With `Some(policy)`, when the scaling
+    /// resolves to `InfNorm` (explicitly, or `Auto` pinned to it on the
+    /// first factorization of the pattern), the vector computed by one
+    /// factorization is reused by up to `policy.max_age` following ones,
+    /// as long as it still keeps every row of the scaled matrix within
+    /// `policy.max_row_ratio` of unit ∞-norm (one equilibration pass
+    /// checks this, about a tenth of a fresh computation). Otherwise the
+    /// scaling is recomputed and the cache refreshed. A pattern change
+    /// drops the cache.
+    ///
+    /// Inertia is unaffected (`D·A·D` has the inertia of `A`); pivot
+    /// choices and residuals before refinement can differ from per-call
+    /// scaling. Intended for interior-point hosts whose values drift
+    /// gradually between iterations. [`InfNormReuse::default`] is
+    /// `max_age = 5`, `max_row_ratio = 2.0`.
+    pub fn with_infnorm_reuse(mut self, policy: Option<InfNormReuse>) -> Self {
+        self.infnorm_reuse = policy;
+        if policy.is_none() {
+            self.infnorm_cache = None;
         }
         self
     }
@@ -1410,6 +1493,7 @@ impl Solver {
         p.ordering_escalation_growth = self.ordering_escalation_growth;
         p.auto_cascade_break_beta = self.auto_cascade_break_beta;
         p.mc64_cache_enabled = self.mc64_cache_enabled;
+        p.infnorm_reuse = self.infnorm_reuse;
         // Profiling is the one configuration deliberately *not*
         // inherited: a probe's profile is not the caller's, and
         // collecting it would slow the very thing being timed.
@@ -1884,6 +1968,8 @@ impl Solver {
             // Track B2: the MC64 scaling cache is keyed on the
             // pattern fingerprint; a new pattern voids it.
             self.mc64_scaling_cache = None;
+            // Issue #237: so is the InfNorm reuse cache.
+            self.infnorm_cache = None;
             // Issue #51: sticky Auto pick is also pattern-bound.
             self.auto_picked_strategy = None;
             // N4: the "MC64 retry tried and not adopted" latch is keyed on
@@ -2101,6 +2187,44 @@ impl Solver {
         // rejects and we fall through to a fresh MC64 — same path as
         // the cache being absent. See
         // `dev/plans/mc64-value-bounded-cache.md`.
+        // Issue #237: opt-in InfNorm reuse. Only on the InfNorm route
+        // (explicit, or Auto pinned to it above — the first call of a
+        // pattern is never pinned, so it always computes fresh), for the
+        // pattern the vector was computed on, within the age limit, and
+        // only if one equilibration pass says the vector still keeps
+        // every row of D·A·D within the ratio guard.
+        let infnorm_reuse_hit = match (&self.infnorm_reuse, &mut self.infnorm_cache) {
+            (Some(policy), Some(c))
+                if matches!(effective_params.scaling, ScalingStrategy::InfNorm)
+                    && c.fingerprint == fp
+                    && c.age < policy.max_age =>
+            {
+                let pass = match pool.as_ref() {
+                    Some(p) => p.install(|| {
+                        crate::scaling::infnorm::rows_within_ratio(
+                            matrix,
+                            &c.scaling,
+                            policy.max_row_ratio,
+                        )
+                    }),
+                    None => crate::scaling::infnorm::rows_within_ratio(
+                        matrix,
+                        &c.scaling,
+                        policy.max_row_ratio,
+                    ),
+                };
+                if pass {
+                    c.age += 1;
+                    effective_params.scaling = ScalingStrategy::External(c.scaling.clone());
+                }
+                pass
+            }
+            _ => false,
+        };
+        if infnorm_reuse_hit {
+            self.infnorm_reuse_hit_count += 1;
+        }
+
         let scaling_cache_hit = if self.mc64_cache_enabled {
             match &self.mc64_scaling_cache {
                 Some(c)
@@ -2339,6 +2463,28 @@ impl Solver {
                         }
                     };
                     self.auto_picked_strategy = Some(resolved);
+                }
+                // Issue #237: refresh the InfNorm reuse cache after a fresh
+                // InfNorm computation (route InfNorm now, explicit or
+                // pinned just above, and not a reuse hit). Any other
+                // route drops it.
+                if self.infnorm_reuse.is_some() && !infnorm_reuse_hit {
+                    let route_infnorm =
+                        matches!(effective_params.scaling, ScalingStrategy::InfNorm)
+                            || (matches!(effective_params.scaling, ScalingStrategy::Auto)
+                                && matches!(
+                                    self.auto_picked_strategy,
+                                    Some(ScalingStrategy::InfNorm)
+                                ));
+                    self.infnorm_cache = if route_infnorm && !mc64_fallback_adopted {
+                        Some(InfNormCache {
+                            fingerprint: fp,
+                            scaling: factors.scaling.clone(),
+                            age: 0,
+                        })
+                    } else {
+                        None
+                    };
                 }
                 // Issue #24: bump the MC64-fallback counter so callers
                 // can poll a single number to detect "Auto promised
@@ -3129,6 +3275,12 @@ impl Solver {
     /// per-factor state. See `dev/plans/mc64-value-bounded-cache.md`.
     pub fn mc64_cache_hit_count(&self) -> usize {
         self.mc64_cache_hit_count
+    }
+
+    /// Issue #237: number of `factor()` calls that reused the cached
+    /// `InfNorm` scaling vector (see [`Solver::with_infnorm_reuse`]).
+    pub fn infnorm_reuse_hit_count(&self) -> usize {
+        self.infnorm_reuse_hit_count
     }
 
     /// Issue #52 (Phase A): snapshot of per-`factor()` diagnostic

@@ -83,6 +83,34 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     (d, ScalingInfo::Applied)
 }
 
+/// Issue #237: does the scaling `d` still equilibrate `matrix`? One
+/// Knight–Ruiz pass computes the row ∞-norms of `D·A·D`; returns `true`
+/// iff every nonzero row norm lies in `[1/max_row_ratio, max_row_ratio]`.
+/// Rows whose norm is zero are ignored, as `compute_infnorm` ignores
+/// them. Uses the parallel pass on a rayon worker, like
+/// `compute_infnorm`. `false` on a length mismatch or a NaN or `< 1`
+/// `max_row_ratio` (no row could pass a reversed interval). As in
+/// `compute_infnorm`, a NaN entry never wins a row maximum; `Solver`
+/// rejects non-finite input before scaling runs.
+pub(crate) fn rows_within_ratio(matrix: &CscMatrix, d: &[f64], max_row_ratio: f64) -> bool {
+    let n = matrix.n;
+    if d.len() != n || max_row_ratio.is_nan() || max_row_ratio < 1.0 {
+        return false;
+    }
+    if n == 0 {
+        return true;
+    }
+    let mut row_max = vec![0.0f64; n];
+    match ParallelSweep::plan(matrix).as_mut() {
+        Some(p) => p.sweep(matrix, d, &mut row_max),
+        None => sweep_serial(matrix, d, &mut row_max),
+    }
+    let lo = 1.0 / max_row_ratio;
+    row_max
+        .iter()
+        .all(|&m| m == 0.0 || (m >= lo && m <= max_row_ratio))
+}
+
 /// One serial pass: `row_max[i] = max_j |d[i]·a[i,j]·d[j]|` over the full
 /// symmetric matrix, from its lower-triangle storage.
 fn sweep_serial(matrix: &CscMatrix, d: &[f64], row_max: &mut [f64]) {
@@ -730,5 +758,31 @@ mod tests {
             let pb: Vec<u64> = par.iter().map(|v| v.to_bits()).collect();
             assert_eq!(sb, pb, "threads={threads}");
         }
+    }
+
+    /// Issue #237: guard oracle by hand. `diag(4, 9)` scaled by
+    /// `d = (1/2, 1/3)` has row norms (1, 1); unscaled, (4, 9). A zero
+    /// row is ignored; a NaN entry never wins a row max (as in
+    /// `compute_infnorm`), so a NaN-only row reads as zero.
+    #[test]
+    fn rows_within_ratio_hand_cases_issue_237() {
+        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[4.0, 9.0]).unwrap();
+        assert!(rows_within_ratio(&m, &[0.5, 1.0 / 3.0], 1.01));
+        assert!(!rows_within_ratio(&m, &[1.0, 1.0], 2.0));
+        assert!(rows_within_ratio(&m, &[1.0, 1.0], 9.0));
+        assert!(!rows_within_ratio(&m, &[1.0, 1.0], 8.99));
+        // Lower bound: d = (1/4, 1/4) gives norms (1/4, 9/16).
+        assert!(!rows_within_ratio(&m, &[0.25, 0.25], 3.99));
+        assert!(rows_within_ratio(&m, &[0.25, 0.25], 4.0));
+        // Wrong length, reversed interval.
+        assert!(!rows_within_ratio(&m, &[1.0], 100.0));
+        assert!(!rows_within_ratio(&m, &[0.5, 1.0 / 3.0], 0.5));
+        // Zero row ignored: 3x3 with an empty middle row/column.
+        let z = CscMatrix::from_triplets(3, &[0, 2], &[0, 2], &[1.0, 1.0]).unwrap();
+        assert!(rows_within_ratio(&z, &[1.0, 1.0, 1.0], 1.0));
+        // NaN entry ignored like compute_infnorm; NaN ratio rejected.
+        let nan = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[f64::NAN, 1.0]).unwrap();
+        assert!(rows_within_ratio(&nan, &[1.0, 1.0], 1.0));
+        assert!(!rows_within_ratio(&m, &[0.5, 1.0 / 3.0], f64::NAN));
     }
 }
