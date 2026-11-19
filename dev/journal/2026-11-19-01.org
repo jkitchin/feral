@@ -1,0 +1,36 @@
+#+TITLE: Journal 2026-11-19 session 01 — #237 step 3: parallel Knight-Ruiz sweeps
+#+STARTUP: showall
+
+* 09:00 :issue-237:scaling:infnorm:history:
+Read tried-and-rejected 2026-08-09 and 2026-08-15 (KR warm start,
+reduced caps: rejected; the sweep is cap-bound, runs all 10 passes from
+IPM iterate 1 on) and dev/research/scaling-warm-start-2026-08-09.md
+(options all change numerics). Parallel sweeps are not on that list and
+are bit-identical by construction (max is exact and order independent;
+every comparison is `v > acc`, which ignores NaN in any order). No
+prior attempt in tried-and-rejected.
+
+* 09:10 :issue-237:scaling:infnorm:measure:baseline:
+Harness now reports profiled scaling_us. Chain KKT t=2600 nx=30 (n =
+155 970, nnz = 5.97 M), Auto -> InfNorm, 6 timed calls, two runs:
+  sequential driver:            scaling 203.6 / 223.7 ms of 1310 / 1325 ms
+  sequential on a rayon worker: scaling 238.3 / 283.6 ms
+~10 sweeps x 6 M nnz serial (~20-28 ms per sweep). 15-20 % of the
+factorization here; the issue measured 72 ms of 256 ms (28 %).
+
+* 10:05 :issue-237:scaling:infnorm:parallel:result:
+ParallelSweep (column ranges of ~equal nnz, private row-max buffers over
+[j0, n), parallel per-row merge), gated to a rayon worker and nnz >=
+2^18. Tests: chunked pass == serial bitwise at 1/2/3/4/7 ranges over
+10 passes; compute_infnorm on 2/3/4-thread workers == serial.
+Harness, 6 calls, two runs:
+  on a 4-thread worker:  scaling 238.3 / 283.6 ms -> 98.5 / 99.0 ms
+  sequential driver off a worker (serial path, unchanged): 206-211 ms
+  parallel driver factor wall: 1174 / 1084 ms (was 1114-1356 across
+  earlier runs; within container noise)
+Digests unchanged at 4 calls (both sizes) and 6 calls (0ac00187...).
+Bandwidth estimate: 10 passes x 5.97 M x 16 B (value + index) ~ 0.95 GB
+per call -> ~100 ms is near this container's memory bandwidth; further
+gains would need less traffic per pass (e.g. u32 row indices), not
+more threads. Not pursued.
+1048 tests pass. bench identical to 2026-11-18-02.

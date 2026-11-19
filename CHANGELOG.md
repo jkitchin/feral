@@ -23,6 +23,13 @@ All notable changes to FERAL will be documented in this file.
   instead of two (and is skipped when it cannot apply). On the same
   KKT, per-call work outside the numeric factorization drops from
   ~65-80 ms to ~20 ms. Results are bit-identical.
+- `InfNorm` (Knight–Ruiz) scaling, including `Auto` resolved to it, runs
+  each equilibration pass over column ranges in parallel when the
+  factorization runs on a thread pool (a parallel `Solver`) and the
+  matrix has at least 2^18 stored entries. Scaling vectors are
+  bit-identical to the serial pass. On the same KKT: 204-284 ms ->
+  99 ms per factorization at 4 threads. Extra memory during the call:
+  one row-max buffer per thread (at most threads x n f64).
 
 ## [0.23.0] - 2026-11-14
 

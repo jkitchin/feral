@@ -1,30 +1,31 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-18T23:49:15Z
+Generated: 2026-11-19T00:42:13Z
 
 ## Latest Session
-File: dev/sessions/2026-11-18-02.md
+File: dev/sessions/2026-11-19-01.md
 ```
-# Session 2026-11-18-02
+# Session 2026-11-19-01
 
 ## Goal
-Issue #237 step 2 (#202 Defect 2): per-call work in `Solver::factor`
-outside the numeric driver. Attribute it first, then decide on a
-caller-asserted unchanged-pattern opt-in.
+Issue #237 step 3: parallel Knight–Ruiz (`InfNorm`) sweeps, keeping
+the scaling vector bit-identical.
 
 ## Accomplished
-- Attribution (throwaway timers, chain KKT n = 155 970, nnz = 5.97 M,
-  80 490 supernodes, warm calls): fingerprint SipHash 31-44 ms, finite
-  scan 10-13, exact compare 6-9, begin_recycle 4-7, post-dispatch
-  escalation check 6-10 ms. ~65-80 ms total.
-- 376f6d4: exact compare first, stored fingerprint reused on exact
-  match (hash only on mismatch / first call); chunked branch-free
-  finite scan. Hash+compare 37-51 -> 6.4-8.8 ms; scan -> 4.9-7.7 ms.
-- 0854fde: #102 escalation check tests the O(1) preprocess condition
-  first and computes pivot extent in one pass: 5.7-9.7 -> 0.7-0.9 ms.
-- Outside-driver work per warm call: ~65-80 ms -> ~20 ms. Solve digests
-  unchanged at both harness sizes, every driver mode. cargo test
-  --release: 1046 passed, 0 failed (2 new tests).
+- Read tried-and-rejected 2026-08-09 / 2026-08-15 and
+  scaling-warm-start-2026-08-09.md: KR is cap-bound (all 10 passes from
+  IPM iterate 1); warm starts and lower caps rejected. Parallel passes
+  were not tried before.
+- 9c9a138: research note + plan
+  (`dev/research/issue-237-parallel-kr-sweeps-2026-11-19.md`).
+- ff7f8bb: `ParallelSweep` in `src/scaling/infnorm.rs`; harness
+  reports `scaling_us`. Chain KKT (n = 155 970, nnz = 5.97 M), on a
+  4-thread worker: scaling 238–284 ms -> 98.5–99.0 ms. Serial path off a
+  worker unchanged. Digests unchanged; 1048 tests pass (2 new).
+
+**Limit:** ~100 ms is near this container's memory bandwidth (10 passes
+x ~96 MB). More threads will not help much here; less traffic per pass
+would. The issue's 16-thread machine was not measured.
 
 ## Benchmark Results
 ```
@@ -38,32 +39,31 @@ Sparse solver: 2/2 total
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 ```
-Identical to 2026-11-18-01.
+Identical to 2026-11-18-02.
 
 ## Decisions Made
-- No `trust_pattern` / `factor_assume_same_pattern` API (user's
-  decision; dev/decisions.md 2026-11-18).
+- None beyond the design in the research note (same rayon-worker gate
+  as the step-1 permute gather).
 
 ## Abandoned Approaches
-- None tried and dropped. begin_recycle lazy-take left as a lead (below).
+- None.
 
 ## Next Session Should
-1. #237 step 3: parallel Knight–Ruiz sweeps (max reductions are order
-   independent, so bit-identical by construction; verify by digest).
-2. #237 step 4 / #202 Defect 1: InfNorm reuse across same-pattern calls
-   with a value-drift guard or host refresh interval. Do NOT retry
-   warm-starting KR (tried-and-rejected 2026-08-09).
-3. Lead: begin_recycle (4-7 ms at 80k supernodes) — take buffers lazily
-   per node in the drivers instead of moving them all up front.
+1. #237 step 4 / #202 Defect 1: InfNorm reuse across same-pattern calls
+   (value-drift-guarded cache like MC64's, or a host refresh interval).
+   This changes numerics: needs a corpus gate. Do NOT retry KR warm
+   starts or lower caps (tried-and-rejected 2026-08-09, 2026-08-15).
+2. Ask the #237 reporter to remeasure at 8/16 threads on this branch
+   (steps 1–3 are all bit-identical, so they can A/B directly).
 ```
 
 ## Git Status
 ```
+ff7f8bb perf(#237): parallel Knight-Ruiz sweeps on a rayon worker
+9c9a138 docs(#237): research note and plan for parallel Knight-Ruiz sweeps
+df03150 docs(session): 2026-11-18-02 checkpoint — #237 step 2 per-call checks
 0854fde perf(#237): pivot-growth escalation check in one pass, cheap test first
 376f6d4 perf(#237): skip re-hashing an unchanged pattern; vectorized finite scan
-803f513 docs(session): 2026-11-18-01 checkpoint — #237 step 1 permute warm path
-6e894b0 perf(#237): permute warm path gathers, in parallel on a rayon worker
-8d01094 perf(#237): permute warm path reuses the permuted matrix in place
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 482 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.32s
+test result: ok. 484 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.69s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-18-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-01.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -103,7 +103,7 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-11-18-01.
+Identical to 2026-11-18-02.
 
 ```
 
