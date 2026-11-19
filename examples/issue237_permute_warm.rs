@@ -99,6 +99,14 @@ fn run(base: &CscMatrix, parallel: bool, profiling: bool, iters: usize) -> (f64,
     let mut solver = Solver::new()
         .with_parallel(parallel)
         .with_profiling(profiling);
+    // ISSUE237_METIS=1: MetisND (POUNCE's #237 configuration).
+    // ISSUE237_REUSE=1: opt-in InfNorm reuse with the default policy.
+    if std::env::var("ISSUE237_METIS").is_ok() {
+        solver = solver.with_ordering(feral::symbolic::OrderingMethod::MetisND);
+    }
+    if std::env::var("ISSUE237_REUSE").is_ok() {
+        solver = solver.with_infnorm_reuse(Some(feral::InfNormReuse::default()));
+    }
     let mut walls = Vec::with_capacity(iters);
     let mut permutes = Vec::with_capacity(iters);
     let mut scalings = Vec::with_capacity(iters);
@@ -130,6 +138,26 @@ fn run(base: &CscMatrix, parallel: bool, profiling: bool, iters: usize) -> (f64,
             std::process::exit(1);
         }
     };
+    // Refined solve of the last system: relative residual, as a check
+    // that reuse does not cost accuracy after refinement.
+    let refined_rel_res = match solver.solve_refined(&m, &rhs) {
+        Ok(xr) => {
+            let mut r = rhs.clone();
+            for j in 0..n {
+                for k in m.col_ptr[j]..m.col_ptr[j + 1] {
+                    let i = m.row_idx[k];
+                    r[i] -= m.values[k] * xr[j];
+                    if i != j {
+                        r[j] -= m.values[k] * xr[i];
+                    }
+                }
+            }
+            let nr = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let nb = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+            nr / nb
+        }
+        Err(_) => f64::NAN,
+    };
     let mut h: u64 = 0xcbf29ce484222325;
     for v in &x {
         h ^= v.to_bits();
@@ -137,13 +165,16 @@ fn run(base: &CscMatrix, parallel: bool, profiling: bool, iters: usize) -> (f64,
     }
     println!(
         "  driver={} profiling={} inertia(+,-,0)={:?} factor_median_ms={:.2} \
-         permute_median_ms={:.3} scaling_median_ms={:.3} solve_digest={:016x}",
+         permute_median_ms={:.3} scaling_median_ms={:.3} reuse_hits={} \
+         refined_rel_res={:.2e} solve_digest={:016x}",
         if parallel { "parallel" } else { "sequential" },
         profiling,
         n_vars_neg,
         median(walls.clone()),
         median(permutes),
         median(scalings),
+        solver.infnorm_reuse_hit_count(),
+        refined_rel_res,
         h
     );
     (median(walls), 0.0, h)

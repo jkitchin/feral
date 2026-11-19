@@ -8289,3 +8289,26 @@ failure class). Decided with the user, 2026-11-18.
 went from ~65-80 ms to ~20 ms with no API change (hash 31-44 ms -> 0,
 finite scan 10-13 -> 5-8 ms, escalation check 6-10 -> 0.7 ms); the
 compare (6-9 ms) and begin_recycle (4-7 ms) remain.
+
+## 2026-11-19 — Opt-in, guarded InfNorm scaling reuse (issue #237 step 4, #202 Defect 1)
+
+**Decision.** `Solver::with_infnorm_reuse(Option<InfNormReuse>)` lets a
+host reuse a computed `InfNorm` vector across same-pattern factorizations
+(age limit + one-pass row-norm ratio guard; default policy max_age 5,
+ratio 2). The default stays `None`: per-call recomputation, bit-identical
+to before.
+
+**Why.** The scaling is cap-bound (warm starts and lower caps rejected
+2026-08-09 / 2026-08-15), so only skipping it saves time. Making it the
+default changes numerics and needs the corpus gate, unavailable here.
+This is not the #49 defect recorded on 2026-05-2x: that was the MC64
+cache *unintentionally* replaying an InfNorm vector with no guard of its
+own. Here reuse is explicit, InfNorm-only, age-bounded and checked
+against the current values; inertia cannot change (D·A·D has the
+inertia of A for any positive diagonal D).
+
+**Evidence.** Chain KKT n = 155 970 (MetisND, 4 threads): warm factor
+254-258 -> 183-197 ms, refined residual unchanged (3.02e-13), analytic
+inertia. tests/issue237_infnorm_reuse.rs. Journal 2026-11-19-02.
+Revisit (default on) after a corpus run and the #237 reporter's in-loop
+A/B.

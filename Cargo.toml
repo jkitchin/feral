@@ -144,6 +144,9 @@ name = "lu_markowitz_triangular"
 name = "issue237_permute_warm"
 
 [[example]]
+name = "issue237_scope_probe"
+
+[[example]]
 name = "lu_fill_orderings"
 
 [[example]]
