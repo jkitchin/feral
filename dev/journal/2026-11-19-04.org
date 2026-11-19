@@ -1,0 +1,44 @@
+#+TITLE: Journal 2026-11-19 session 04 — #147 Rust 2024 edition, MSRV 1.85
+#+STARTUP: showall
+
+* 18:45 :issue-147:edition:msrv:analysis:
+User asked about downsides / downstream (pounce). cargo metadata:
+feral's library dependency tree's highest rust-version is rayon 1.11
+(1.80); clap (1.85) is tools-only. Editions are per crate; only the
+rustc floor (1.85) reaches downstream; release as 0.24.0 keeps older
+pounce (feral = "0.23") off it. User chose MSRV 1.85.
+
+* 19:00 :issue-147:edition:migration:
+Baselines: 9 exported feral_* symbols in libferal.a; digests
+2b7436a25c646d27 / e321bec7612e0d4f. `cargo fix --edition` touched 9
+files; wrapped whole unsafe-fn bodies in `unsafe {}` (capi.rs, test /
+diagnostics GlobalAlloc impls) and left FIXMEs on set_var. Redone by
+hand: capi.rs = attribute rename + 11 narrow unsafe blocks under the
+existing SAFETY comments; allocators = 13 narrow wraps of System calls
+with SAFETY comments; FIXMEs replaced (single-#[test] binary, env
+changed only between factorizations while rayon workers are idle);
+`r#gen` renamed. Five tail_expr_drop_order notes: profiler MutexGuards
+(factorize.rs 2606/2660/4330), a Result temp (bench.rs), a diagnostics
+ThreadPool -- all drop earlier, harmless.
+
+* 19:20 :issue-147:rustfmt:python:
+2024 style edition reformatted 320 files -> rustfmt.toml style_edition =
+"2021"; remaining fmt changes (~20 files) are macro-argument wrapping
+from the 2024 parser, whitespace only. python/: edition 2024 raised
+warnings 14 -> 205, ~190 E0133 from pyo3 0.22 macro expansions
+(BoundRef::ref_from_ptr); kept python/ at edition 2021 (+ rust-version
+1.85, resolver 3).
+
+* 19:35 :issue-147:msrv:verify:
+clippy incompatible_msrv flagged as_chunks (1.88); `cargo +1.85 check
+--workspace --all-targets --keep-going`: 6 sites (is_multiple_of x4,
+as_chunks x2), all tests/diagnostics; published libs already 1.85-clean.
+Replaced with `% k == 0` / chunks_exact. After: 1.85 check clean,
+python 1.85 check clean, clippy --workspace --all-targets clean, fmt
+clean, symbols identical, digests identical, cargo test --release 1058
+passed 0 failed, ordering crates 69/12/10/67/45/63 and diagnostics 9
+passed. Lockfiles unchanged. Disk filled mid-run (22 GB target/debug);
+deleted my own build dirs (target/debug, target/msrv185*, the 0.23.0
+worktree target) and reran.
+CI: new `msrv` job, dtolnay/rust-toolchain@1.85, cargo check --workspace
+--all-targets --locked (reproduced locally).

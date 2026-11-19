@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+**Release as 0.24.0** (not a 0.23.x patch): this release raises the minimum
+Rust compiler to 1.85.
+
+### Changed — Rust 2024 edition, MSRV 1.85 (issue #147)
+
+- All crates now declare `rust-version = "1.85"`; the solver and ordering
+  crates use edition 2024 and the workspace resolver 3. Building feral now
+  needs rustc 1.85 or newer (previously about 1.80 in practice, never
+  declared). Crates that depend on feral can use any edition; nothing else
+  changes for them.
+- The C API keeps the same symbols and ABI (`#[no_mangle]` is now spelled
+  `#[unsafe(no_mangle)]`). Results are bit-identical.
+
 ### Added
 
 - `Solver::with_infnorm_reuse(Option<InfNormReuse>)` (issue #237,
