@@ -1,31 +1,40 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-19T00:42:13Z
+Generated: 2026-11-19T12:52:17Z
 
 ## Latest Session
-File: dev/sessions/2026-11-19-01.md
+File: dev/sessions/2026-11-19-02.md
 ```
-# Session 2026-11-19-01
+# Session 2026-11-19-02
 
 ## Goal
-Issue #237 step 3: parallel Knight–Ruiz (`InfNorm`) sweeps, keeping
-the scaling vector bit-identical.
+#237 follow-up after the reporter confirmed PR #238 (warm factor
+-25..-28 %, FERAL level with / ahead of MA97): (1) check their 8-thread
+"scope" slowdown, (2) opt-in InfNorm reuse, (3) begin_recycle if simple.
 
 ## Accomplished
-- Read tried-and-rejected 2026-08-09 / 2026-08-15 and
-  scaling-warm-start-2026-08-09.md: KR is cap-bound (all 10 passes from
-  IPM iterate 1); warm starts and lower caps rejected. Parallel passes
-  were not tried before.
-- 9c9a138: research note + plan
-  (`dev/research/issue-237-parallel-kr-sweeps-2026-11-19.md`).
-- ff7f8bb: `ParallelSweep` in `src/scaling/infnorm.rs`; harness
-  reports `scaling_us`. Chain KKT (n = 155 970, nnz = 5.97 M), on a
-  4-thread worker: scaling 238–284 ms -> 98.5–99.0 ms. Serial path off a
-  worker unchanged. Digests unchanged; 1048 tests pass (2 new).
+- 5684b6b: `examples/issue237_scope_probe.rs` (parallel-driver phase
+  telemetry; builds against 0.23.0 too). A/B vs 0.23.0, MetisND,
+  alternating builds: scope 124-134 vs 121-134 ms (4 thr), 218-225 vs
+  217-224 ms (2 thr) — no regression. Warm factor 522-564 -> 254-279 ms
+  (4 thr). 8 threads not testable here.
+- 6094066 / 0761a18: `Solver::with_infnorm_reuse`, `InfNormReuse`,
+  `infnorm_reuse_hit_count`, `scaling::infnorm::rows_within_ratio`.
+  Default off (digests unchanged). With the default policy: warm factor
+  254-258 -> 183-197 ms (MetisND, 4 thr), refined residual unchanged,
+  analytic inertia. 8 new tests; mutation-checked.
+- `cargo test --release`: 1056 passed, 0 failed.
 
-**Limit:** ~100 ms is near this container's memory bandwidth (10 passes
-x ~96 MB). More threads will not help much here; less traffic per pass
-would. The issue's 16-thread machine was not measured.
+**Side finding (not acted on):** on the chain KKT the default ordering
+(Auto -> Amf, 80 490 supernodes) is ~4x slower than MetisND (1081 vs
+283 ms per warm factor, 4 thr). Belongs to #203 / #209 ordering choice.
+
+**Not done:** begin_recycle lazy take (journal 12:45: needs reworking
+4 consumers + the parallel driver's slot mutexes for ~4 ms).
+
+**Not pushed:** PR #238 is unmerged; these commits are on local branch
+`issue237-followup` and go to `claude/blissful-ramanujan-w2nhfw` once
+#238 merges (the branch is restarted from main then).
 
 ## Benchmark Results
 ```
@@ -39,60 +48,51 @@ Sparse solver: 2/2 total
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 ```
-Identical to 2026-11-18-02.
+Identical to 2026-11-19-01.
 
 ## Decisions Made
-- None beyond the design in the research note (same rayon-worker gate
-  as the step-1 permute gather).
+- Opt-in guarded InfNorm reuse, default off (dev/decisions.md 2026-11-19).
 
 ## Abandoned Approaches
 - None.
-
-## Next Session Should
-1. #237 step 4 / #202 Defect 1: InfNorm reuse across same-pattern calls
-   (value-drift-guarded cache like MC64's, or a host refresh interval).
-   This changes numerics: needs a corpus gate. Do NOT retry KR warm
-   starts or lower caps (tried-and-rejected 2026-08-09, 2026-08-15).
-2. Ask the #237 reporter to remeasure at 8/16 threads on this branch
-   (steps 1–3 are all bit-identical, so they can A/B directly).
 ```
 
 ## Git Status
 ```
+0761a18 feat(#237): opt-in InfNorm scaling reuse across same-pattern factors
+6094066 docs(#237): research note and plan for opt-in InfNorm reuse
+5684b6b bench(#237): parallel-driver phase probe for build-to-build A/B
+441ff73 docs(session): 2026-11-19-01 checkpoint — #237 step 3 parallel KR sweeps
 ff7f8bb perf(#237): parallel Knight-Ruiz sweeps on a rayon worker
-9c9a138 docs(#237): research note and plan for parallel Knight-Ruiz sweeps
-df03150 docs(session): 2026-11-18-02 checkpoint — #237 step 2 per-call checks
-0854fde perf(#237): pivot-growth escalation check in one pass, cheap test first
-376f6d4 perf(#237): skip re-hashing an unchanged pattern; vectorized finite scan
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_single_schur_index ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 484 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.69s
+test result: ok. 485 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.72s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-02.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -103,34 +103,11 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-11-18-02.
+Identical to 2026-11-19-01.
 
 ```
 
 ## Recent Decisions
-and the warm path then skips its own `O(nnz)` re-comparison (the `O(n)`
-`perm_inv` check stays). `NumericParams` is not used for this signal: it
-is public with all-public fields, and its `pattern_reused_hint` can be set
-by direct-API callers, so it cannot carry a "pattern already checked"
-guarantee.
-
-**Why.** The warm permute is serial work outside the parallel tree; it
-cloned the cached pattern and allocated a fresh values array every call.
-
-**Evidence.** Chain KKT n = 155 970, nnz = 5.97 M: warm permute 74.8 ms
--> 6-9 ms on 4 threads, solve digests identical to 0.23.0. Journal
-2026-11-18-01; `dev/research/issue-237-permute-warm-path-2026-11-18.md`.
-
-## 2026-11-18 — No caller-asserted "same pattern" entry point (issue #237 step 2, #202 Defect 2)
-
-**Decision.** `Solver` does not get `trust_pattern` /
-`factor_assume_same_pattern`. Each `factor()` still compares the input
-pattern exactly against the stored one (issue #121), and still scans the
-values for non-finite entries.
-
-**Why.** Once the repeat-call path stopped re-hashing a matching pattern
-(the stored fingerprint is reused on an exact match), the opt-in could
-only remove the exact compare: ~7 ms per call on a 6 M-nnz KKT, against a
 public API whose misuse returns a silently wrong factor (the REG-1 / #121
 failure class). Decided with the user, 2026-11-18.
 
@@ -138,6 +115,29 @@ failure class). Decided with the user, 2026-11-18.
 went from ~65-80 ms to ~20 ms with no API change (hash 31-44 ms -> 0,
 finite scan 10-13 -> 5-8 ms, escalation check 6-10 -> 0.7 ms); the
 compare (6-9 ms) and begin_recycle (4-7 ms) remain.
+
+## 2026-11-19 — Opt-in, guarded InfNorm scaling reuse (issue #237 step 4, #202 Defect 1)
+
+**Decision.** `Solver::with_infnorm_reuse(Option<InfNormReuse>)` lets a
+host reuse a computed `InfNorm` vector across same-pattern factorizations
+(age limit + one-pass row-norm ratio guard; default policy max_age 5,
+ratio 2). The default stays `None`: per-call recomputation, bit-identical
+to before.
+
+**Why.** The scaling is cap-bound (warm starts and lower caps rejected
+2026-08-09 / 2026-08-15), so only skipping it saves time. Making it the
+default changes numerics and needs the corpus gate, unavailable here.
+This is not the #49 defect recorded on 2026-05-2x: that was the MC64
+cache *unintentionally* replaying an InfNorm vector with no guard of its
+own. Here reuse is explicit, InfNorm-only, age-bounded and checked
+against the current values; inertia cannot change (D·A·D has the
+inertia of A for any positive diagonal D).
+
+**Evidence.** Chain KKT n = 155 970 (MetisND, 4 threads): warm factor
+254-258 -> 183-197 ms, refined residual unchanged (3.02e-13), analytic
+inertia. tests/issue237_infnorm_reuse.rs. Journal 2026-11-19-02.
+Revisit (default on) after a corpus run and the #237 reporter's in-loop
+A/B.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
@@ -269,6 +269,7 @@ tests/issue205_ordering_info.rs
 tests/issue227_flops.rs
 tests/issue227_never_golden.rs
 tests/issue227_reanalysis.rs
+tests/issue237_infnorm_reuse.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs

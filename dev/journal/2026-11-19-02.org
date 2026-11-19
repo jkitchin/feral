@@ -1,0 +1,60 @@
+#+TITLE: Journal 2026-11-19 session 02 — #237 follow-up: scope A/B, opt-in InfNorm reuse
+#+STARTUP: showall
+
+* 11:00 :issue-237:reporter:result:
+Reporter (#237 comment 7000018006) built POUNCE on PR #238 head 441ff73:
+logs bit-identical to 0.23.0; offline warm factor 0.254 -> 0.182 s (16
+thr), 0.261 -> 0.197 s (8 thr); scaling 0.068 -> 0.032-0.036 s, permute
+0.023 -> 0.004 s; in-loop factorization/iter 465 -> 386 ms. Solver
+time/iter 1349 ms vs MA97 1365 (8 thr) / 1455 (16 thr). Open question:
+their 8-thread "scope" read 148-185 ms vs 137-139 on 0.23.0 (2 runs).
+#238 not merged yet; this work is on local branch issue237-followup.
+
+* 11:20 :issue-237:scope:parallel:measure:
+examples/issue237_scope_probe.rs: parallel Solver with
+NumericParams::parallel_telemetry, per-call deltas of phase_scaling /
+permute / scope. Same file built against a 0.23.0 worktree (0e7cc5f).
+Finding 1: on the chain KKT with the DEFAULT ordering (Auto -> Amf,
+80 490 supernodes) the task graph never runs (telemetry all zero: the
+dispatcher hands the tree to the sequential driver). Forcing it
+(FERAL_PAR_MIN_SEEDS=0) is slower: 1423 vs 1123 ms.
+Finding 2 (out of scope, recorded for #203/#209): MetisND on the same
+matrix: 28 950 supernodes, 283 ms vs Amf 1081 ms per warm factor (4
+thr) -- ~4x. The default pick is badly wrong on this collocation shape.
+A/B with ISSUE237_METIS=1 (POUNCE's config), alternating builds, 4
+rounds x 10 calls, medians per run (ms):
+  4 thr  old: wall 522-564 scaling 210-230 permute 77-80 scope 124-134
+         new: wall 254-279 scaling 73-84  permute 3.9-4.6 scope 121-134
+  2 thr  old: wall 603-642 scaling 209-222 permute 78-81 scope 218-225
+         new: wall 406-416 scaling 121-134 permute 8-9 scope 217-224
+No scope regression at 2 or 4 threads. Warm factor ~halves at 4 thr.
+8 threads not testable on this 4-core container.
+Also default ordering, alternating builds (task graph unused): wall
+1322-1418 -> 1124-1139 ms (4 thr), 1420-1496 -> 1143-1208 (2 thr).
+
+* 12:30 :issue-237:scaling:infnorm:reuse:result:
+Solver::with_infnorm_reuse(Option<InfNormReuse{max_age, max_row_ratio}>),
+default None. Guard: scaling::infnorm::rows_within_ratio (one pass, the
+step-3 parallel sweep on the pool). First guard test failed on my own
+wrong claim (NaN row norm "fails"): the pass ignores NaN like
+compute_infnorm, so a NaN-only row reads 0 and is skipped; doc + test
+corrected (Solver rejects non-finite input earlier anyway).
+tests/issue237_infnorm_reuse.rs: 7 tests, oracle = pre-existing
+compute_scaling(InfNorm) bitwise + analytic chain inertia. Mutation
+check: guard forced true -> guard test fails; age not incremented ->
+max_age test fails.
+Chain KKT, MetisND, 4 thr, 14 calls (12 timed), two runs:
+  default: parallel factor 254-258 ms, refined rel res 3.02e-13
+  reuse (default policy): 183-197 ms, 11 hits (fresh every 6th call),
+    inertia (78000, 77970, 0), refined rel res 3.02e-13.
+Default digests unchanged. 1056 tests pass.
+
+* 12:45 :issue-237:recycle:decision:
+begin_recycle lazy take not done: recycled slots are consumed at 4 sites
+(sequential, schur, small-leaf batch, parallel task) and the parallel
+driver re-wraps every slot in a Mutex in another serial pass; a lazy
+per-node take needs reworking that plumbing for ~4 ms (~2 % of 190 ms).
+
+* 12:50 :issue-237:bench:session-end:
+bench identical to 2026-11-19-01. PR #238 still unmerged: this
+session's commits are on local branch issue237-followup, not pushed.

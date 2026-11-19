@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `Solver::with_infnorm_reuse(Option<InfNormReuse>)` (issue #237,
+  #202): opt-in reuse of a computed `InfNorm` (Knight–Ruiz) scaling
+  vector across factorizations of the same pattern, for up to
+  `max_age` calls and only while one equilibration pass shows the
+  reused vector keeps every row of the scaled matrix within
+  `max_row_ratio` of unit norm. Default `None` keeps per-call scaling
+  (bit-identical). Inertia is unaffected; pivots and unrefined
+  residuals can differ. `Solver::infnorm_reuse_hit_count()` reports
+  reuses. On a 156k-row block-banded KKT (METIS, 4 threads) the warm
+  factorization drops from ~255 to ~190 ms with the default policy.
+
 ### Changed — faster same-pattern refactorization (issue #237, step 1)
 
 - The value permutation on a repeated factorization of an unchanged
