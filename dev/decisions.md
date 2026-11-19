@@ -8374,3 +8374,21 @@ replaced; the published libraries already compiled on 1.85. Five
 `tail_expr_drop_order` notes reviewed: profiler mutex guards, a `Result`
 temporary and a diagnostics thread pool now drop earlier, which is
 harmless. Lockfiles unchanged. Journal 2026-11-19-04.
+
+## 2026-11-19 — Count chain-triggered cascade-break separately; #215 test checks only budget-triggered CB
+
+**Context.** `qcqp1500_1nc_factors_without_cascade_break` (#215) asserted
+`n_cascade_break_nodes == 0`. Since e702ac9 (#221) the delay-chain
+backstop trips at 4 fronts on that matrix (chain/subtree ratios 10.4–20.0
+against `DELAY_CHAIN_GROWTH` = 10). The #215 budget is never exceeded there.
+Inertia is exact; `n_tiny` and `inertia_uncertain()` are both 0.
+**Decision.** Add `n_cascade_break_chain_nodes` (`NodeFactors::cascade_break_chain`,
+`SparseFactors`, `FactorStats`, Python). The #215 test asserts zero
+*non-chain* cascade-break, and keeps its exact-inertia and no-floored-pivot
+checks. This relaxes the assertion, and the user approved it in session
+2026-11-19-06.
+**Rejected.** Dropping the count assertion: it would no longer say which
+trigger fired. Retuning `DELAY_CHAIN_GROWTH`: there is no wrong answer to
+justify moving #221's tuning.
+**Evidence.** dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md. Mutation-checked.
+`cargo test --release`: 1060/0.

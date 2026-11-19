@@ -1,0 +1,20 @@
+* 21:00 :test:cascade-break:issue215:issue221:
+qcqp1500_1nc_factors_without_cascade_break (gitignored fixture, CI skips)
+fails on main 1f04040: "cascade-break engaged left: 4 right: 0".
+Bisect: e8b6153 good, e702ac9 (#221 chain backstop + 1e-14 floor) first bad.
+A temporary [sn-trace] field showed all 4 CB nodes (sn 10493/10496/10502/10522)
+fire on chain_exceeded with budget_exceeded=false. Chain/subtree ratios are
+20.0, 13.2, 12.2 and 10.4 against DELAY_CHAIN_GROWTH=10. Inertia is exact
+(neg 10508, numpy oracle), n_tiny=0, inertia_uncertain=0. Column25 congruence
+(ignored) passes with 0 CB. Conclusion: the #221 backstop, intended for speed,
+trips a #215 assertion that was meant for the per-front budget.
+Research: dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md.
+
+* 21:20 :test:cascade-break:api:
+User chose to split the counter over dropping the assertion or retuning
+DELAY_CHAIN_GROWTH. Added NodeFactors::cascade_break_chain,
+SparseFactors::n_cascade_break_chain_nodes, FactorStats field (+ Python).
+The test now asserts zero non-chain CB. Mutation (flag forced false) makes it
+fail again: "budget-triggered cascade-break engaged". Both issue_215 tests
+pass (incl. ignored); cargo test --release: 1060 passed, 0 failed.
+No solver behavior change.

@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-19T18:57:45Z
+Generated: 2026-11-19T22:25:59Z
 
 ## Latest Session
 File: dev/sessions/2026-11-19-04.md
@@ -57,34 +57,34 @@ Identical to 2026-11-19-03.
 
 ## Git Status
 ```
+0d630ff fix(test): split cascade-break count by trigger; #215 test checks budget CB only
+aedbb79 docs: research note and plan for qcqp1500-1nc chain cascade-break
+1f04040 Merge pull request #242 from jkitchin/claude/blissful-ramanujan-w2nhfw
+3983846 docs(#147): decisions, CHANGELOG, journal and session checkpoint
 0152aca ci(#147): msrv job checks the workspace on Rust 1.85
-7c13b4e build(#147): Rust 2024 edition, resolver 3, rust-version 1.85
-3510a0c docs(#147): research note and plan for Rust 2024 edition + MSRV 1.85
-1ac83be Merge pull request #241 from jkitchin/claude/blissful-ramanujan-w2nhfw
-5f06f7a docs(session): 2026-11-19-03 checkpoint — triage, #213 closed, #134 F
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::infnorm::tests::compute_infnorm_on_worker_matches_serial_issue_237 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test dense::factor::contrib_layout_tests::packed_contribution_is_the_square_lower_triangle ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
+test scaling::infnorm::tests::chunked_sweep_matches_serial_bitwise_issue_237 ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 486 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.87s
+test result: ok. 488 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.76s
 
 ```
 
@@ -106,24 +106,6 @@ Identical to 2026-11-19-03.
 ```
 
 ## Recent Decisions
-A CI job (`msrv`) runs `cargo check --workspace --all-targets --locked` on
-toolchain 1.85. rustfmt is pinned to `style_edition = "2021"`
-(`rustfmt.toml`). The next release carrying this is 0.24.0, not a 0.23.x
-patch. MSRV 1.85 chosen by the user.
-
-**Why.** Edition 2024 makes the C ABI's unsafety explicit
-(`#[unsafe(no_mangle)]`) and requires `unsafe {}` around unsafe operations
-inside `unsafe fn` (each kept narrow, under the SAFETY comment that was
-already there). Editions are per crate, so 2021-edition dependents such as
-pounce are unaffected; the only downstream effect is the compiler floor,
-and releasing as 0.24.0 keeps older pounce releases (pinned to 0.23) off
-it. Resolver 3 only does something with a declared `rust-version`, hence
-the MSRV, and the CI job makes the declaration checked rather than
-aspirational. `python/` stays 2021 because pyo3 0.22's `#[pymethods]` /
-`#[pyfunction]` expansions produce ~190 `unsafe_op_in_unsafe_fn` warnings
-under 2024; revisit with a pyo3 upgrade. The 2021 rustfmt style keeps the
-diff to the edition change: the 2024 style would have reformatted ~320
-files (import ordering).
 
 **Evidence.** Exported `feral_*` symbols of `libferal.a` identical before
 and after (9). Harness solve digests identical (2b7436a25c646d27,
@@ -136,6 +118,24 @@ replaced; the published libraries already compiled on 1.85. Five
 `tail_expr_drop_order` notes reviewed: profiler mutex guards, a `Result`
 temporary and a diagnostics thread pool now drop earlier, which is
 harmless. Lockfiles unchanged. Journal 2026-11-19-04.
+
+## 2026-11-19 — Count chain-triggered cascade-break separately; #215 test checks only budget-triggered CB
+
+**Context.** `qcqp1500_1nc_factors_without_cascade_break` (#215) asserted
+`n_cascade_break_nodes == 0`. Since e702ac9 (#221) the delay-chain
+backstop trips at 4 fronts on that matrix (chain/subtree ratios 10.4–20.0
+against `DELAY_CHAIN_GROWTH` = 10). The #215 budget is never exceeded there.
+Inertia is exact; `n_tiny` and `inertia_uncertain()` are both 0.
+**Decision.** Add `n_cascade_break_chain_nodes` (`NodeFactors::cascade_break_chain`,
+`SparseFactors`, `FactorStats`, Python). The #215 test asserts zero
+*non-chain* cascade-break, and keeps its exact-inertia and no-floored-pivot
+checks. This relaxes the assertion, and the user approved it in session
+2026-11-19-06.
+**Rejected.** Dropping the count assertion: it would no longer say which
+trigger fired. Retuning `DELAY_CHAIN_GROWTH`: there is no wrong answer to
+justify moving #221's tuning.
+**Evidence.** dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md. Mutation-checked.
+`cargo test --release`: 1060/0.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
@@ -232,8 +232,8 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/common227/mod.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
@@ -252,6 +252,20 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_215_delay_growth_cap.rs
+tests/issue_221_delay_chain_backstop.rs
+tests/issue_221_forced_front_parity.rs
+tests/issue_221_fully_summed_2x2_partner.rs
+tests/issue_221_quality_rung.rs
+tests/issue_221_tpp_tail.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -274,38 +288,24 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_215_delay_growth_cap.rs
-tests/issue_221_delay_chain_backstop.rs
-tests/issue_221_forced_front_parity.rs
-tests/issue_221_fully_summed_2x2_partner.rs
-tests/issue_221_quality_rung.rs
-tests/issue_221_tpp_tail.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
-tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
+tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
-tests/lu_markowitz.rs
 tests/lu_markowitz_golden.rs
+tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_refactor_inplace.rs
 tests/lu_scaling.rs
-tests/lu_sparse.rs
 tests/lu_sparse_rhs.rs
+tests/lu_sparse.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -318,13 +318,13 @@ tests/n4_mc64_retry_latch.rs
 tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
-tests/pounce710_refine_cap_nrhs2.rs
 tests/pounce_interface.rs
+tests/pounce710_refine_cap_nrhs2.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
 tests/refined_solve_core_stability.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
