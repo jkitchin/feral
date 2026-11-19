@@ -89,8 +89,10 @@ fn main() {
     let iters: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(10);
     let base = chain_kkt(t, nx);
     let stats = Arc::new(AtomicLockStats::default());
-    let mut np = NumericParams::default();
-    np.parallel_telemetry = Some(Arc::clone(&stats));
+    let np = NumericParams {
+        parallel_telemetry: Some(Arc::clone(&stats)),
+        ..NumericParams::default()
+    };
     let mut solver = Solver::with_params(np, Default::default()).with_parallel(true);
     // ISSUE237_METIS=1 forces METIS nested dissection (what POUNCE
     // configures in #237); otherwise FERAL's default ordering.
