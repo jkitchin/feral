@@ -159,10 +159,26 @@ match solver.factor(&kkt, None) {
 There are two checks. The first runs right after the ordering, on the
 predicted factor size, before the analysis allocates anything that scales
 with the factor. The second runs at the end of the analysis, on the full
-predicted peak (factor plus multifrontal working storage). Both predictions
-assume no delayed pivots, so leave some headroom below physical memory. The
-same budget is available as `SupernodeParams::max_factor_bytes` for callers
-of `symbolic_factorize_with_method`.
+predicted peak (factor plus multifrontal working storage). The same budget is
+available as `SupernodeParams::max_factor_bytes` for callers of
+`symbolic_factorize_with_method`.
+
+**The budget bounds the prediction, not the process.** Measured high-water
+memory runs above `WorkEstimate::peak_bytes`, and by different amounts for
+the two numeric drivers:
+
+| driver | real high-water / predicted `peak_bytes` | measured on |
+|---|---|---|
+| sequential (`with_parallel(false)`) | 1.4–1.8× | Primal2_1000 LP KKT, n = 3.86M, AMD and AMF |
+| parallel (default) | ≈ 2.6× | the same matrix, AMF: 9.36 GB vs 3.53 GB |
+
+The prediction assumes no delayed pivots, and it covers only the factor and
+the contribution blocks. The gap has not been broken down yet. Plausible
+contributors are the input matrix, scaling and solve workspaces, and the
+extra fronts the parallel driver keeps live at once. Until it is closed, set
+the budget to
+roughly a third of the memory you can spare for the parallel driver, or
+half for the sequential one.
 
 ## References
 

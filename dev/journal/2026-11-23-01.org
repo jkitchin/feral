@@ -173,3 +173,16 @@ sets with_parallel explicitly. Draft routing change (n > 100k && avg_deg < 5
 the powerflow22 / PDE2 A/B (maintainer machine) disagrees. No decisions.md
 entry until it is accepted. cargo test --workspace --release with the draft:
 1340/0.
+
+* 23:40 :issue-246:pr-247:review:
+PR jkitchin/feral#247 opened as a draft; CI green (check, msrv,
+stress-smoke, wheels, codecov patch 94.96%). The pounce-side review
+(comment 7116780548) approves steps 1–3 and asks for: (1) the
+real-vs-predicted memory gap in the book next to the API; (2) a time limit
+for the symbolic phase, since `symbolic_factorize_with_method` cannot be
+interrupted (L2CTA3D METIS never finished; fhnw 595 s vs the cpo3 300 s
+limit), via a deadline/cancel hook on SupernodeParams returning a typed
+error; (3) wider AutoRace candidates at large n (SCOTCH, AMF); (4) a #208
+laptime re-check before step 2 ships (needs pounce). Did (1): a book table
+with 1.4–1.8× (sequential) and ≈2.6× (parallel), framed as prediction ≠
+process cap, with sizing advice.
