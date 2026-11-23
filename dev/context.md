@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-23T18:04:26Z
+Generated: 2026-11-23T19:24:34Z
 
 ## Latest Session
 File: dev/sessions/2026-11-23-01.md
@@ -38,55 +38,55 @@ AMD 4× fill on Primal2_1000), diagnose it, and land step 1 of the fix.
   Amf gives 2.08e8 and 3.53 GB. AMF is unaffected by the fix.
 - Posted the diagnosis and the end-to-end result on issue #246. Installed
   the pre-commit hooks (they were missing in this clone).
-
-## Benchmark Results
-```
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-```
-
-## Decisions Made
-- AMF score quantization is monotone, a deliberate deviation from MUMPS
-  (dev/decisions.md 2026-11-23).
+- **Step 3 (8452d92): memory budget.** `SupernodeParams::max_factor_bytes`,
+  `Solver::with_max_factor_bytes`, and `FeralError::MemoryBudgetExceeded
+  { predicted_bytes, budget_bytes, stage }`. The check runs on the prefix's
+  factor bytes before `symbolic_finish` ("factor"), then on `peak_bytes`
+  after it ("peak"). Python gets `feral.MemoryBudgetExceeded`, and there is
+  a book section. Tests were written first against the hand oracle
+  tridiag(10) = 176 bytes; 4 new tests. Workspace: 1340 passed, 0 failed.
+  **Source-compat:** the new public field breaks full struct literals of
+  `SupernodeParams` (feral-diagnostics had five; fixed), and exhaustive
+  matches on `FeralError` need an arm. The CHANGELOG flags both.
+- **Step 2 DRAFT (1de3977): `n > 100k && avg_deg < 5` → AMF.** Across
+  five public LP KKTs in the regime, AMF fill is ≤ AMD everywhere (1.6–1.8×
+  lower on Primal2 and dlr1, within 0.6% on the network LPs). Primal2
+  sequential refactor: AMD 999 s vs AMF 84 s, identical exact inertia.
+  It is a separate commit so it can be dropped if the powerflow22 / PDE2
+  A/B regresses. There is no decisions.md entry until it is accepted.
+- **Finding (pre-existing):** measured memory high-water exceeds
 ```
 
 ## Git Status
 ```
-0f6eb9c fix(amf): monotone RMF score quantization (issue #246)
-ed366f4 docs: research note and plan for issue #246 AMF quantization
-6bea9f9 journal: issue #246 diagnosis — AMF RMF/N quantization inversion
-3d4d64c Merge pull request #244 from jkitchin/release-0.24.0
-dcd8fe6 release: feral 0.24.0
+1de3977 DRAFT feat(ordering): route n>100k avg_deg<5 Auto to AMF (issue #246 step 2)
+68370f6 docs: research note and plan for issue #246 step 2 (low-degree routing)
+8452d92 feat(symbolic): max_factor_bytes memory budget (issue #246 step 3)
+7d4efe7 docs: research note and plan for issue #246 step 3 (memory budget)
+ef83385 session: 2026-11-23-01 checkpoint (issue #246 step 1)
 ```
 
 ## Test Status
 ```
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 486 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.56s
+test result: ok. 490 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.46s
 
 ```
 
