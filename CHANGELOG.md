@@ -4,6 +4,14 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `Auto` routes very-large low-degree matrices to AMF, not AMD (#246, pending validation)
+- `n > 100_000` with full average degree < 5 now resolves to `Amf` (was
+  `Amd`, #50). On the Primal2_1000 LP KKT (n = 3.86M), nnz(L) drops from
+  3.69e8 to 2.08e8, the predicted peak from 8.30 GB to 3.53 GB, and
+  sequential refactor time from 999 s to 84 s, with identical inertia. On
+  the network LPs measured, fill is within 0.6% of AMD's.
+- Pending a powerflow22 / PDE2 regression check before release.
+
 ### Added — memory budget for the analysis: `max_factor_bytes` (#246)
 - `Solver::with_max_factor_bytes(Some(bytes))` and
   `SupernodeParams::max_factor_bytes` make the symbolic phase return the

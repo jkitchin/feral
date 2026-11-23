@@ -81,7 +81,8 @@ pub enum OrderingMethod {
     /// Issue #50 plus its F11 follow-up (2026-05-23) collapsed the
     /// per-shape branches to one very-large-and-sparse catch on top
     /// of [`pick_default_method`]:
-    ///   - very-large-and-sparse (n > 100_000, full nnz/n < 5) → `Amd`
+    ///   - very-large-and-sparse (n > 100_000, full nnz/n < 5) → `Amf`
+    ///     (issue #246; `Amd` from #50 until then)
     ///   - everything else delegates to [`pick_default_method`]
     ///     (`n <= 10_000 → Amf`, `n > 10_000 → MetisND`).
     ///
@@ -215,12 +216,13 @@ pub(crate) fn validate_external_perm(perm: &[usize], n: usize) -> Result<(), Fer
 ///
 /// The rule set adds shape-bakeoff branches on top of
 /// [`pick_default_method`]:
-///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amd`
+///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amf`
+///     (issue #246; `Amd` from #50 until then)
 ///   - arrow/bordered (issue #64): whenever the size rule would pick
 ///     `MetisND` (`n > 10_000`) but [`is_arrow_bordered`] detects a
 ///     dense border concentrating the nonzeros, override to `Amf`.
 ///   - thin-large (issues #67 + #73): whenever the size rule would still
-///     pick `MetisND` (after the avg_deg<5 → AMD and arrow → AMF catches),
+///     pick `MetisND` (after the avg_deg<5 → AMF and arrow → AMF catches),
 ///     override to `Amf` at every `n`. Corpus A/Bs on real factor+solve
 ///     wall-time found AMF wins or ties MetisND across the whole population
 ///     — 36/36 in the `(10_000, 100_000]` band (#67) and every measured
@@ -277,8 +279,17 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
         return OrderingMethod::Amd;
     }
     let avg_deg = full_nnz as f64 / n as f64;
+    // Issue #246 (DRAFT pending the powerflow22 A/B): very-large-and-
+    // sparse routes to AMF, not AMD. With AMF's score quantization
+    // monotone (0f6eb9c), AMF's fill is <= AMD's on every measured member
+    // of this regime and far lower on LP KKTs: Primal2_1000 nnz(L)
+    // 1.80e8 vs 3.19e8 (flop proxy 4.1e11 vs 2.4e12), dlr1 1.18e8 vs
+    // 1.90e8, and lo10 / long15 / netlarge2 within 0.6%. The ordering costs
+    // 1.3-1.6x AMD's (seconds). The issue #50 rationale (avoid nested
+    // dissection's symbolic cost) is kept: AMF is a local ordering too.
+    // See `dev/research/issue-246-low-degree-routing.md`.
     if n > 100_000 && avg_deg < 5.0 {
-        return OrderingMethod::Amd;
+        return OrderingMethod::Amf;
     }
     // Convert full-symmetric nnz back to a stored-lower-triangle
     // equivalent so `pick_default_method`'s thresholds (calibrated on
@@ -292,7 +303,7 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     // very-high-degree columns concentrating the nonzeros) and the LDLᵀ
     // factor blows up ~7-9× vs AMF/AMD. Override MetisND → AMF on the
     // arrow signature. Only the would-be-MetisND decision is touched;
-    // the `n <= 10_000 → AMF` and `n > 100_000 && avg_deg < 5 → AMD`
+    // the `n <= 10_000 → AMF` and `n > 100_000 && avg_deg < 5 → AMF` (#246)
     // (returned above) paths are untouched. See
     // `dev/research/issue-64-arrow-bordered-ordering.md`.
     if base == OrderingMethod::MetisND && is_arrow_bordered(pattern) {
@@ -647,7 +658,7 @@ fn compute_static_row_indices(
 /// walk). Narrow on purpose — see comment on `Auto` for why a broad
 /// dispatcher regressed the IPM bench. `choose_adaptive` calls this for
 /// the bulk of patterns, then layers the pattern-aware catches on top
-/// (very-large-and-sparse → AMD; arrow/bordered → AMF, issue #64).
+/// (very-large-and-sparse → AMF (#246); arrow/bordered → AMF, issue #64).
 ///
 /// Current rule (mirrors MUMPS's `ana_set_ordering.F` AMF-vs-METIS
 /// heuristic):
@@ -2861,9 +2872,9 @@ mod tests {
             col_ptr.push(row_idx.len());
             (col_ptr, row_idx)
         }
-        // Very-large-and-sparse (n > 100_000, avg_deg < 5.0) → AMD.
-        // Issue #50 swap (2026-05-23): pre-fix this was the ScotchND
-        // branch; see choose_adaptive's doc comment.
+        // Very-large-and-sparse (n > 100_000, avg_deg < 5.0) → AMF.
+        // Issue #50 swap (2026-05-23) made this ScotchND → AMD; issue
+        // #246 made it AMD → AMF. See choose_adaptive's doc comment.
         let (cp, ri) = pat_bufs(200_000, 3);
         let p = CscPattern {
             n: 200_000,
@@ -2872,7 +2883,7 @@ mod tests {
         };
         assert_eq!(
             choose_adaptive(&p, OrderingMethod::Auto),
-            OrderingMethod::Amd
+            OrderingMethod::Amf
         );
         // Small-and-sparse (n<10_000, avg_deg<15) → delegates to
         // pick_default_method, which routes n≤10_000 to AMF. The F11
@@ -2911,7 +2922,7 @@ mod tests {
         // Large-dense (n > 100_000, avg_deg >= 5, non-arrow) now also routes
         // to AMF (issue #73): the real factor+solve A/B found AMF wins on
         // every measured matrix in this regime, so the would-be-MetisND
-        // decision is overridden to AMF at every n. The #50 avg_deg < 5 → AMD
+        // decision is overridden to AMF at every n. The avg_deg < 5 catch (AMF since #246)
         // catch fires first and is unaffected. (n=150_000, avg_deg=10, uniform
         // → not arrow.)
         let (cp, ri) = pat_bufs(150_000, 10);
