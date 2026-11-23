@@ -31,6 +31,10 @@ create_exception!(_feral, FeralIOError, FeralError);
 // / `except FeralError` handlers keep working — additive.
 create_exception!(_feral, SingularBasisError, FactorError);
 create_exception!(_feral, NeedsRefactorError, FeralError);
+// Issue #246: the analysis predicts more memory than
+// `max_factor_bytes` allows. A `FactorError` (the factorization was
+// refused), so existing `except FactorError` handlers catch it.
+create_exception!(_feral, MemoryBudgetExceeded, FactorError);
 
 pub(crate) fn map_feral_err(e: RustFeralError) -> PyErr {
     match e {
@@ -64,6 +68,9 @@ pub(crate) fn map_feral_err(e: RustFeralError) -> PyErr {
         RustFeralError::NeedsRefactor => NeedsRefactorError::new_err(
             "LU basis update requires a refactor (update or stability budget reached)",
         ),
+        e @ RustFeralError::MemoryBudgetExceeded { .. } => {
+            MemoryBudgetExceeded::new_err(e.to_string())
+        }
     }
 }
 
@@ -71,6 +78,10 @@ pub(crate) fn map_feral_err(e: RustFeralError) -> PyErr {
 pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("FeralError", py.get_type_bound::<FeralError>())?;
     m.add("FactorError", py.get_type_bound::<FactorError>())?;
+    m.add(
+        "MemoryBudgetExceeded",
+        py.get_type_bound::<MemoryBudgetExceeded>(),
+    )?;
     m.add("SingularError", py.get_type_bound::<SingularError>())?;
     m.add(
         "WrongInertiaError",

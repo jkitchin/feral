@@ -105,6 +105,27 @@ pub struct SupernodeParams {
     /// — zero overhead. See
     /// `dev/research/phase-2.13b-symbolic-profiler.md`.
     pub symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
+
+    /// Memory budget for the analysis, in bytes (issue #246). `None`
+    /// (default) means unlimited.
+    ///
+    /// When set, the symbolic phase returns
+    /// [`FeralError::MemoryBudgetExceeded`] instead of a result whose
+    /// factorization would not fit. There are two checks:
+    /// 1. after ordering and column counts, *before* the supernodal
+    ///    finish, against the predicted factor bytes
+    ///    ([`WorkEstimate::factor_bytes`]). This stops a bad ordering
+    ///    before the finish's O(factor) allocations;
+    /// 2. after the finish, against the full predicted peak
+    ///    ([`WorkEstimate::peak_bytes`]: factor plus contribution blocks).
+    ///
+    /// The prediction assumes no delayed pivots. Numeric delays can grow
+    /// fronts past it, so leave headroom against physical memory.
+    ///
+    /// [`FeralError::MemoryBudgetExceeded`]: crate::error::FeralError::MemoryBudgetExceeded
+    /// [`WorkEstimate::factor_bytes`]: crate::symbolic::WorkEstimate::factor_bytes
+    /// [`WorkEstimate::peak_bytes`]: crate::symbolic::WorkEstimate::peak_bytes
+    pub max_factor_bytes: Option<usize>,
 }
 
 /// Phase 2.12 amalgamation strategy selector. See
@@ -162,6 +183,7 @@ impl Default for SupernodeParams {
             small_leaf: SmallLeafParams::default(),
             amalgamation_strategy: AmalgamationStrategy::default(),
             symbolic_profiler: None,
+            max_factor_bytes: None,
         }
     }
 }

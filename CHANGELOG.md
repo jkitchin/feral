@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — memory budget for the analysis: `max_factor_bytes` (#246)
+- `Solver::with_max_factor_bytes(Some(bytes))` and
+  `SupernodeParams::max_factor_bytes` make the symbolic phase return the
+  new `FeralError::MemoryBudgetExceeded { predicted_bytes, budget_bytes,
+  stage }` instead of an analysis whose factorization would not fit.
+  `stage` is `"factor"` when the predicted factor bytes, checked right
+  after ordering and *before* the supernodal finish allocates, are over
+  the budget. It is `"peak"` when the full predicted peak
+  (`WorkEstimate::peak_bytes`) is over. Through `Solver::factor` the error
+  arrives as `FactorStatus::FatalError`. Python raises the new
+  `feral.MemoryBudgetExceeded`, a `FactorError`.
+- Default `None`: no behaviour change.
+- **Source-compatibility note.** `SupernodeParams` gains a public field,
+  so code that builds it with a full struct literal (no
+  `..Default::default()`) must add `max_factor_bytes: None`. Code that
+  matches `FeralError` exhaustively needs an arm for the new variant.
+
 ### Fixed — AMF ordering no longer inverts its fill priority at large n (#246)
 - `OrderingMethod::Amf` (and `Auto` where it resolves to AMF) used MUMPS
   HAMF4's score quantization, which stores a fill score `>= i32::MAX` as

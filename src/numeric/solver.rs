@@ -1370,6 +1370,20 @@ impl Solver {
         self
     }
 
+    /// Refuse analyses whose predicted memory exceeds `bytes` (issue
+    /// #246). Sets [`SupernodeParams::max_factor_bytes`]: the symbolic
+    /// phase checks the predicted factor bytes before its supernodal
+    /// finish, and the full predicted peak (factor plus contribution
+    /// blocks) after it. A refusal surfaces from [`Solver::factor`] as
+    /// `FactorStatus::FatalError(FeralError::MemoryBudgetExceeded { .. })`,
+    /// so a host can give up cleanly instead of being killed for running
+    /// out of memory. `None` (default) is unlimited. Ordering-race arms
+    /// over the budget fail their probe and are skipped.
+    pub fn with_max_factor_bytes(mut self, bytes: Option<usize>) -> Self {
+        self.snode_params.max_factor_bytes = bytes;
+        self
+    }
+
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
@@ -6067,5 +6081,31 @@ mod tests {
         assert_eq!(s.symbolic_call_count(), 2, "pattern change must re-analyse");
         assert_eq!(s.last_pattern_fingerprint, Some(PatternFingerprint::of(&b)));
         assert_eq!(*s.inertia().expect("B inertia"), Inertia::new(2, 1, 0));
+    }
+
+    /// Issue #246 step 3: a `Solver` with a factor-memory budget refuses
+    /// cleanly through `FactorStatus::FatalError`, without panicking, and
+    /// an unbudgeted `Solver` on the same matrix still factors.
+    #[test]
+    fn max_factor_bytes_refuses_through_factor_status() {
+        let m = tridiag(10, 4.0, -1.0);
+        let mut s = Solver::new().with_max_factor_bytes(Some(1));
+        match s.factor(&m, None) {
+            FactorStatus::FatalError(FeralError::MemoryBudgetExceeded {
+                budget_bytes,
+                stage,
+                ..
+            }) => {
+                assert_eq!(budget_bytes, 1);
+                assert_eq!(stage, "factor");
+            }
+            other => panic!("expected MemoryBudgetExceeded, got {other:?}"),
+        }
+        assert!(
+            s.symbolic().is_none(),
+            "a refused analysis must not be cached"
+        );
+        let mut ok = Solver::new().with_max_factor_bytes(None);
+        assert!(matches!(ok.factor(&m, None), FactorStatus::Success));
     }
 }

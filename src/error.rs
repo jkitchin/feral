@@ -76,6 +76,25 @@ pub enum FeralError {
     /// ill-conditioning failure (refine and retry) from a mere update-count
     /// budget trip (just refactor). See issue #95.
     NeedsRefactor,
+
+    /// The symbolic analysis predicts more memory than the caller's
+    /// [`SupernodeParams::max_factor_bytes`] budget allows (issue #246).
+    ///
+    /// `stage` says which check fired. `"factor"` means the factor bytes
+    /// predicted by the cheap ordering/column-count prefix, checked
+    /// *before* the supernodal finish allocates anything that scales with
+    /// the factor. `"peak"` means the full predicted peak
+    /// ([`WorkEstimate::peak_bytes`]: factor plus contribution blocks),
+    /// checked after the finish and before any numeric work.
+    /// `predicted_bytes` is the figure that exceeded `budget_bytes`.
+    ///
+    /// [`SupernodeParams::max_factor_bytes`]: crate::symbolic::supernode::SupernodeParams::max_factor_bytes
+    /// [`WorkEstimate::peak_bytes`]: crate::symbolic::WorkEstimate::peak_bytes
+    MemoryBudgetExceeded {
+        predicted_bytes: usize,
+        budget_bytes: usize,
+        stage: &'static str,
+    },
 }
 
 impl std::fmt::Display for FeralError {
@@ -122,6 +141,15 @@ impl std::fmt::Display for FeralError {
                     "LU basis update budget exceeded; refactor required (issue #81)"
                 )
             }
+            FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage,
+            } => write!(
+                f,
+                "predicted {stage} memory {predicted_bytes} bytes exceeds \
+                 max_factor_bytes budget {budget_bytes} (issue #246)"
+            ),
         }
     }
 }

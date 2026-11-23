@@ -139,6 +139,31 @@ of 31 matrices. It costs a few extra factorizations once per pattern, which
 breaks even after roughly 15 — free inside a solve, a loss for a one-shot
 factorization.
 
+## Bounding memory
+
+On very large systems, the wrong ordering can need more memory than the
+machine has, and the process can be killed during analysis, before any
+factorization starts. `Solver::with_max_factor_bytes(Some(bytes))` turns that
+into an error you can handle:
+
+```rust,ignore
+let mut solver = Solver::new().with_max_factor_bytes(Some(8 << 30)); // 8 GiB
+match solver.factor(&kkt, None) {
+    FactorStatus::FatalError(FeralError::MemoryBudgetExceeded {
+        predicted_bytes, stage, ..
+    }) => { /* fall back: another ordering, a smaller model, ... */ }
+    status => { /* as usual */ }
+}
+```
+
+There are two checks. The first runs right after the ordering, on the
+predicted factor size, before the analysis allocates anything that scales
+with the factor. The second runs at the end of the analysis, on the full
+predicted peak (factor plus multifrontal working storage). Both predictions
+assume no delayed pivots, so leave some headroom below physical memory. The
+same budget is available as `SupernodeParams::max_factor_bytes` for callers
+of `symbolic_factorize_with_method`.
+
 ## References
 
 Greedy orderings:

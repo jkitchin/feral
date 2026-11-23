@@ -1092,10 +1092,7 @@ fn symbolic_factorize_race(
             FeralError::InvalidInput("AutoRace: no candidates available".to_string())
         })
     })?;
-    Ok(finish_and_copy(
-        best,
-        snode_params.symbolic_profiler.as_ref(),
-    ))
+    finish_checked(best, snode_params)
 }
 
 /// Resolve [`OrderingPreprocess::Auto`] by verifying fill rather than
@@ -1214,10 +1211,7 @@ pub fn symbolic_factorize_with_method(
     // `AutoRace` races decide on `factor_nnz_estimate` alone, so they race
     // prefixes and finish only the winner — the losers never pay the tail.
     let prefix = resolve_prefix(matrix, snode_params, method)?;
-    Ok(finish_and_copy(
-        prefix,
-        snode_params.symbolic_profiler.as_ref(),
-    ))
+    finish_checked(prefix, snode_params)
 }
 
 /// The intermediate produced by the symbolic pipeline *prefix* (issue
@@ -1711,6 +1705,47 @@ fn finish_and_copy(
         }
     }
     sym
+}
+
+/// [`finish_and_copy`] guarded by [`SupernodeParams::max_factor_bytes`]
+/// (issue #246). Check 1 runs on the prefix, *before* the finish: the
+/// predicted factor bytes are `factor_nnz_estimate · size_of::<f64>()`,
+/// exactly [`WorkEstimate::factor_bytes`] of the eventual analysis. This
+/// stops a bad ordering before `symbolic_finish` allocates O(factor)
+/// structure. Check 2 runs after the finish, against
+/// [`WorkEstimate::peak_bytes`].
+///
+/// The budget is read from `budget_params` (the caller's params), not the
+/// prefix's `effective_params`, so a raced arm cannot shadow it.
+fn finish_checked(
+    prefix: SymbolicPrefix,
+    budget_params: &SupernodeParams,
+) -> Result<SymbolicFactorization, FeralError> {
+    let budget = budget_params.max_factor_bytes;
+    if let Some(budget_bytes) = budget {
+        let predicted_bytes = prefix
+            .factor_nnz_estimate
+            .saturating_mul(std::mem::size_of::<f64>());
+        if predicted_bytes > budget_bytes {
+            return Err(FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage: "factor",
+            });
+        }
+    }
+    let sym = finish_and_copy(prefix, budget_params.symbolic_profiler.as_ref());
+    if let Some(budget_bytes) = budget {
+        let predicted_bytes = sym.work_estimate().peak_bytes;
+        if predicted_bytes > budget_bytes {
+            return Err(FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage: "peak",
+            });
+        }
+    }
+    Ok(sym)
 }
 
 /// Symbolic factorization with a user-supplied Schur tail (F3.2a).
@@ -2342,6 +2377,102 @@ mod tests {
             1,
             "AutoRace must finish exactly one prefix (the winner)",
         );
+    }
+
+    /// Issue #246 step 3: `max_factor_bytes` check 1 fires on the prefix,
+    /// before the finish. Oracle (hand arithmetic): a path graph has no
+    /// fill under any ordering, so Σ colcount = 2n − 1 = 19 for n = 10,
+    /// `factor_nnz_estimate = floor(19 · 1.2) = 22`, factor bytes = 176.
+    #[test]
+    fn max_factor_bytes_check1_fires_before_finish() {
+        let m = tridiag(10);
+        for method in [
+            OrderingMethod::Amd,
+            OrderingMethod::Amf,
+            OrderingMethod::AutoRace,
+        ] {
+            let params = SupernodeParams {
+                max_factor_bytes: Some(175),
+                ..Default::default()
+            };
+            FINISH_RUNS.with(|c| c.set(0));
+            match symbolic_factorize_with_method(&m, &params, method.clone()) {
+                Err(FeralError::MemoryBudgetExceeded {
+                    predicted_bytes,
+                    budget_bytes,
+                    stage,
+                }) => {
+                    assert_eq!(predicted_bytes, 176, "{method:?}");
+                    assert_eq!(budget_bytes, 175, "{method:?}");
+                    assert_eq!(stage, "factor", "{method:?}");
+                }
+                other => panic!("{method:?}: expected MemoryBudgetExceeded, got {other:?}"),
+            }
+            assert_eq!(
+                FINISH_RUNS.with(|c| c.get()),
+                0,
+                "{method:?}: check 1 must reject before symbolic_finish runs"
+            );
+        }
+    }
+
+    /// Issue #246 step 3: a budget at exactly the factor bytes passes
+    /// check 1; `None` and `usize::MAX` leave the analysis unchanged.
+    #[test]
+    fn max_factor_bytes_generous_budget_is_a_no_op() {
+        let m = tridiag(10);
+        let base =
+            symbolic_factorize_with_method(&m, &SupernodeParams::default(), OrderingMethod::Amd)
+                .expect("unbudgeted");
+        let w = base.work_estimate();
+        assert_eq!(w.factor_bytes, 176, "hand oracle: 22 slacked entries x 8 B");
+        for budget in [Some(usize::MAX), Some(w.peak_bytes)] {
+            let params = SupernodeParams {
+                max_factor_bytes: budget,
+                ..Default::default()
+            };
+            let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd)
+                .expect("within budget");
+            assert_eq!(sym.perm, base.perm);
+            assert_eq!(sym.work_estimate(), w);
+        }
+    }
+
+    /// Issue #246 step 3: check 2 compares the full predicted peak
+    /// (factor + contribution blocks). With `nemin = 1` every column of a
+    /// path is its own supernode and passes a 1x1 contribution block up,
+    /// so `peak_bytes > factor_bytes`; a budget equal to `factor_bytes`
+    /// passes check 1 and must fail check 2.
+    #[test]
+    fn max_factor_bytes_check2_uses_peak_bytes() {
+        let m = tridiag(10);
+        let p0 = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
+        let w = symbolic_factorize_with_method(&m, &p0, OrderingMethod::Amd)
+            .expect("unbudgeted")
+            .work_estimate();
+        assert!(
+            w.peak_bytes > w.factor_bytes,
+            "fixture must have a contribution block: {w:?}"
+        );
+        let params = SupernodeParams {
+            max_factor_bytes: Some(w.factor_bytes),
+            ..p0
+        };
+        match symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd) {
+            Err(FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage,
+            }) => {
+                assert_eq!(predicted_bytes, w.peak_bytes);
+                assert_eq!(budget_bytes, w.factor_bytes);
+                assert_eq!(stage, "peak");
+            }
+            other => panic!("expected a peak-stage MemoryBudgetExceeded, got {other:?}"),
+        }
     }
 
     #[test]

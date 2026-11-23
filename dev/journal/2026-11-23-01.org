@@ -104,3 +104,27 @@ fixtures (corpus data/matrices/ absent in this container): KKT 2 matrices,
 sparse inertia 2/2, residual 2/2. Not comparable to the 156 929-matrix
 figures in 2026-11-19-06.
 Posted the diagnosis and the end-to-end result on issue #246.
+
+* 20:30 :issue-246:memory-budget:api:
+Step 3: `SupernodeParams::max_factor_bytes` + `FeralError::MemoryBudgetExceeded
+{predicted_bytes, budget_bytes, stage}` + `Solver::with_max_factor_bytes`.
+Research dev/research/issue-246-memory-budget.md, plan
+dev/plans/issue-246-memory-budget.md, written first. One helper
+`finish_checked` replaces both `finish_and_copy` call sites (concrete path and
+AutoRace winner): check 1 on the prefix's `factor_nnz_estimate·8` (== the
+eventual WorkEstimate::factor_bytes) before `symbolic_finish`, check 2 on
+`work_estimate().peak_bytes` after it. Tests written first; they failed to
+compile (no field/variant/builder — 13 errors). Hand oracle: tridiag(10) has
+no fill, Σcc = 19, floor(19·1.2) = 22, 176 bytes. With budget 175, AMD, AMF
+and AutoRace all return predicted 176 / stage "factor" with FINISH_RUNS == 0.
+Check 2: nemin = 1 gives peak > factor, and budget = factor_bytes gives stage
+"peak". Solver budget 1 → FactorStatus::FatalError(MemoryBudgetExceeded),
+nothing cached. All 4 pass.
+Surprise: the first workspace run failed to compile feral-diagnostics
+(diag_dense_tail.rs builds SupernodeParams with full struct literals, E0063
+×5). Fixed there, and flagged in the CHANGELOG as a source-compatibility note:
+downstream full literals (possibly pounce) need `max_factor_bytes: None`.
+Rerun: cargo test --workspace --release 1340 passed / 0 failed. Python
+bindings map the variant to feral.MemoryBudgetExceeded (a FactorError);
+`cargo check` on python/ is clean apart from the existing gil-refs warnings.
+Not exposed as a Python Solver knob (out of scope).
