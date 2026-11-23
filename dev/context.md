@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-23T17:23:33Z
+Generated: 2026-11-23T18:04:26Z
 
 ## Latest Session
-File: dev/sessions/2026-11-19-06.md
+File: dev/sessions/2026-11-23-01.md
 ```
-# Session 2026-11-19-06
+# Session 2026-11-23-01
+
+**Benchmark caveat (read first):** this container has no KKT corpus
+(`data/matrices/` absent), so the bench covered only the 2 committed
+fixtures. The numbers below are not comparable to 2026-11-19-06's
+156 929-matrix run. No regression is shown, and none is ruled out on the
+corpus. The next session with the corpus must re-run the bench.
 
 ## Goal
-Fix `issue_215_delay_growth_cap::qcqp1500_1nc_factors_without_cascade_break`,
-which fails locally on main. The fixture is gitignored, so CI skips it.
+Review issue #246 (Auto at n ≳ 1M: AMF symbolic OOM on fhnw-binschedule1;
+AMD 4× fill on Primal2_1000), diagnose it, and land step 1 of the fix.
 
 ## Accomplished
-- Diagnosis: bisect gives e702ac9 (#221) as first bad. All 4 CB nodes fire on
-  the #221 delay-chain backstop (chain/subtree ratio 10.4–20.0 vs
-  `DELAY_CHAIN_GROWTH` 10); the #215 budget is never exceeded. Inertia is
-  exact, `n_tiny` 0, `inertia_uncertain()` 0. Research note
-  `dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md`; plan
-  `dev/plans/qcqp1500-1nc-chain-cb.md` (aedbb79).
-- 0d630ff: new `n_cascade_break_chain_nodes` (`NodeFactors::cascade_break_chain`,
-  `SparseFactors`, `FactorStats`, Python, book). The test asserts zero
-  non-chain CB. No solver behavior change.
-- Both issue_215 tests pass (including the ignored column25 seeds 1/4/8).
-  The mutation (flag forced false) is caught. `cargo test --release`:
-  1060 passed, 0 failed.
-
-## Test assertion relaxed (human-approved)
-The assertion `n_cascade_break_nodes == 0` became
-`n_cascade_break_nodes - n_cascade_break_chain_nodes == 0`.
-Justification: the #221 backstop is an intentional carry-cost bound added
-after this #215 test was written. On this matrix it produces an exact
-factor with no floored pivots, and the test still checks both of those
-properties. The user chose this option over (a) dropping the assertion
-and (b) retuning `DELAY_CHAIN_GROWTH`.
+- Reproduced both matrices without pounce: `dev/scripts/mps_to_kkt.py`
+  converts the Mittelmann MPS files to `[[I, Aᵀ], [A, −1e-8 I]]`. fhnw is
+  within 0.2% of the issue's KKT. Primal2 is n = 3.86M (pounce: 5.10M) and
+  takes the same routing branch.
+- Diagnosis. The fhnw abort is a bad AMF ordering: prefix nnz(L) 1.39e10
+  (AMD 4.37e8, MetisND 4.03e8), prefix RSS 1.3 GB. The cause is HAMF4's
+  non-monotone `RMF / N` quantization, which is verbatim MUMPS 5.8.2
+  (ana_orderings.F:4985-4994). Two inferences in the issue were wrong
+  (AutoRace never runs AMF; prefixes are O(n + nnz(A))).
+- 0f6eb9c: monotone `amf_quantize_score` (i64, clamp(round(rmf), 1, 1e18)).
+  Tests first: 2 of 3 hand-arithmetic unit tests failed on the old code
+  (3e9 → 1567) and pass after. The fixture-gated
+  `tests/issue246_amf_quantization.rs` gives AMF 183 467 409 ≤ AMD
+  436 861 025. `cargo test --workspace --release`: 1336 passed, 0 failed.
+- End to end, fhnw `Auto` now completes under 13 GB: Amf/LdltCompress,
+  nnz(L) 2.72e8, peak 4.27 GB, VmHWM 2.1 GB, 595 s.
+- Primal2: `Auto` → AMD reproduces the issue (3.69e8, 8.30 GB). Explicit
+  Amf gives 2.08e8 and 3.53 GB. AMF is unaffected by the fix.
+- Posted the diagnosis and the end-to-end result on issue #246. Installed
+  the pre-commit hooks (they were missing in this clone).
 
 ## Benchmark Results
-Full local corpus. Identical to 2026-11-19-05 except that sparse p90 is
-1.58 vs 1.59 and dense small p90 is 1.43 vs 1.44 (noise).
 ```
-KKT summary: 156929 matrices (154482 dense-eligible n <= 1000, 108 skipped n > 1000, 2339 parse-skipped)
-  Inertia match: 154429/154482 (100.0%)
-  Residual pass: 154207/154482 (99.8%)
-  Worst residual: 2.46e-1 (POLAK6_0021)
-Sparse solver: 154590/156929 total
-  Inertia match vs MUMPS: 154531/154590 (100.0%)
-  Residual pass: 154258/154590 (99.8%)
-  Worst residual: 2.94e-4 (ERRINBAR_0824)
-Dense Phase 2.8.1:  small p90 1.43 (<=2.0 PASS), medium p90 1.96 (<=3.0 PASS)
-Sparse Phase 2.8.1: small p90 1.58 (<=2.0 PASS), medium p90 1.58 (<=3.0 PASS)
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 ```
 
 ## Decisions Made
-- Count chain-triggered cascade-break separately (dev/decisions.md 2026-11-19).
-
-## Abandoned Approaches
-- None.
+- AMF score quantization is monotone, a deliberate deviation from MUMPS
+  (dev/decisions.md 2026-11-23).
 ```
 
 ## Git Status
 ```
+0f6eb9c fix(amf): monotone RMF score quantization (issue #246)
+ed366f4 docs: research note and plan for issue #246 AMF quantization
+6bea9f9 journal: issue #246 diagnosis — AMF RMF/N quantization inversion
 3d4d64c Merge pull request #244 from jkitchin/release-0.24.0
 dcd8fe6 release: feral 0.24.0
-e8f47fb Merge pull request #245 from jkitchin/fix-qcqp1500-cascade-break
-e2fd07c docs: session 2026-11-19-06 checkpoint, journal, decision
-0d630ff fix(test): split cascade-break count by trigger; #215 test checks budget CB only
 ```
 
 ## Test Status
@@ -86,60 +86,57 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 486 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.48s
+test result: ok. 486 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.56s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-06.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-23-01.md)
 
-Full local corpus. Identical to 2026-11-19-05 except that sparse p90 is
-1.58 vs 1.59 and dense small p90 is 1.43 vs 1.44 (noise).
-KKT summary: 156929 matrices (154482 dense-eligible n <= 1000, 108 skipped n > 1000, 2339 parse-skipped)
-  Inertia match: 154429/154482 (100.0%)
-  Residual pass: 154207/154482 (99.8%)
-  Worst residual: 2.46e-1 (POLAK6_0021)
-Sparse solver: 154590/156929 total
-  Inertia match vs MUMPS: 154531/154590 (100.0%)
-  Residual pass: 154258/154590 (99.8%)
-  Worst residual: 2.94e-4 (ERRINBAR_0824)
-Dense Phase 2.8.1:  small p90 1.43 (<=2.0 PASS), medium p90 1.96 (<=3.0 PASS)
-Sparse Phase 2.8.1: small p90 1.58 (<=2.0 PASS), medium p90 1.58 (<=3.0 PASS)
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 
 ```
 
 ## Recent Decisions
-
-**Evidence.** Exported `feral_*` symbols of `libferal.a` identical before
-and after (9). Harness solve digests identical (2b7436a25c646d27,
-e321bec7612e0d4f). `cargo test --release` 1058 passed, plus every
-ordering crate and feral-diagnostics green; clippy `--workspace
---all-targets -D warnings` clean (with MSRV declared, clippy's
-`incompatible_msrv` now guards new code). Six post-1.85 API uses
-(`is_multiple_of`, `as_chunks`), all in tests and diagnostics tools,
-replaced; the published libraries already compiled on 1.85. Five
-`tail_expr_drop_order` notes reviewed: profiler mutex guards, a `Result`
-temporary and a diagnostics thread pool now drop earlier, which is
-harmless. Lockfiles unchanged. Journal 2026-11-19-04.
-
-## 2026-11-19 — Count chain-triggered cascade-break separately; #215 test checks only budget-triggered CB
-
-**Context.** `qcqp1500_1nc_factors_without_cascade_break` (#215) asserted
-`n_cascade_break_nodes == 0`. Since e702ac9 (#221) the delay-chain
-backstop trips at 4 fronts on that matrix (chain/subtree ratios 10.4–20.0
-against `DELAY_CHAIN_GROWTH` = 10). The #215 budget is never exceeded there.
-Inertia is exact; `n_tiny` and `inertia_uncertain()` are both 0.
-**Decision.** Add `n_cascade_break_chain_nodes` (`NodeFactors::cascade_break_chain`,
-`SparseFactors`, `FactorStats`, Python). The #215 test asserts zero
-*non-chain* cascade-break, and keeps its exact-inertia and no-floored-pivot
-checks. This relaxes the assertion, and the user approved it in session
-2026-11-19-06.
-**Rejected.** Dropping the count assertion: it would no longer say which
 trigger fired. Retuning `DELAY_CHAIN_GROWTH`: there is no wrong answer to
 justify moving #221's tuning.
 **Evidence.** dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md. Mutation-checked.
 `cargo test --release`: 1060/0.
+
+## 2026-11-23 — AMF score quantization is monotone; drop MUMPS's `RMF / N` fall-through
+
+**Context.** Issue #246: `Auto` → AMF on the fhnw-binschedule1 LP KKT
+(n = 1.9M) exhausts 11–13 GB in the symbolic phase. The AMF ordering's
+nnz(L) is 1.39e10, 32× AMD's. MUMPS 5.8.2 HAMF4 (`ana_orderings.F:4985-4994`)
+stores the fill score in a 32-bit `INTEGER`, and for `RMF >= huge-1` it
+stores `round(RMF / N)`. That map is not monotone: at n = 1.9M a score of
+3e9 becomes ~1.6e3, so near-dense variables are filed as cheap. feral's
+port copied this verbatim.
+**Decision.** Quantize to `clamp(round(RMF), 1, 1e18)` in `i64`
+(`amf_quantize_score`, `crates/feral-ordering-core/src/quotient_graph/algo.rs`).
+This is a deliberate deviation from the MUMPS reference. Below `2^31` it
+is bit-identical to MUMPS. Above that, feral's AMF no longer reproduces
+MUMPS orderings.
+**Rejected.** Keeping the `/N` branch but routing large n away from AMF:
+that hides an ordering defect that also hits AMF users who pick it
+explicitly. Clamping overflowed scores to `i32::MAX - 1` (last bucket):
+monotone, but it throws away the order among saturated scores, which
+`select_pivot_amf` can compare exactly for free with `i64` keys.
+**Evidence.** `dev/research/issue-246-amf-quantization.md`. fhnw AMF
+nnz(L) 1.388e10 → 1.835e8 (AMD 4.369e8, MetisND 4.031e8), Σc² 1.49e15 →
+5.11e11. Primal2_1000 AMF is unchanged (1.802e8). Ordering time on fhnw
+goes from 39 s to 128 s (accepted). The AMF corpus oracle bounds feral's
+nnz_L from above, so it still holds where MUMPS itself inverts.
+Journal 2026-11-23-01.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
@@ -272,6 +269,7 @@ tests/issue227_flops.rs
 tests/issue227_never_golden.rs
 tests/issue227_reanalysis.rs
 tests/issue237_infnorm_reuse.rs
+tests/issue246_amf_quantization.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs

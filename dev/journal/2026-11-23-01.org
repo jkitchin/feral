@@ -90,3 +90,17 @@ and dev/scripts/mps_to_kkt.py to regenerate the fixture.
 Decision recorded in dev/decisions.md (deviation from MUMPS).
 Pre-commit hooks were not installed in this clone; installed them
 (`pre-commit install`).
+
+* 19:40 :issue-246:amf:end-to-end:bench:
+After 0f6eb9c, the full production path on fhnw (symbolic_factorize_with_method
+Auto, default SupernodeParams, RLIMIT_AS 13 GB): resolved Amf/LdltCompress,
+nnz(L) 2.716e8, 816 539 supernodes, predicted peak 4.27 GB, VmHWM 2.13 GB,
+595 s. Before the fix this aborted at 11 GB (issue). The preprocess race
+keeps LdltCompress (2.716e8) over None (1.835e8 prefix) because the
+inflation limit is 2× — by design (#91), but here it costs 1.5× fill.
+595 s symbolic is slow (issue: AMD 318 s on pounce's hardware); unprofiled.
+Bench (`cargo run --bin bench --release`) here covers only the 2 committed
+fixtures (corpus data/matrices/ absent in this container): KKT 2 matrices,
+sparse inertia 2/2, residual 2/2. Not comparable to the 156 929-matrix
+figures in 2026-11-19-06.
+Posted the diagnosis and the end-to-end result on issue #246.
