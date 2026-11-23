@@ -1,0 +1,75 @@
+* 17:30 :issue-246:ordering:amf:diagnosis:
+Reviewed issue #246 against 0.24.0 source. Two inferences in the issue do not
+hold. (1) AutoRace races RACE_CANDIDATES = {Amd, MetisND}
+(src/symbolic/mod.rs:1035); AMF is never run, so "AutoRace gets through ⇒ AMF's
+prefix is not where memory goes" is unsupported. (2) A SymbolicPrefix holds
+O(n + nnz(A)) state, so the preprocess-Auto race holding two prefixes cannot
+reach 11 GB at n=1.9M. The AMF ordering workspace is the same i32 quotient
+graph as AMD (iwlen = 1.2*nzaat + n, workspace.rs:181) plus an n-length i64 WF
+array. Remaining candidate: the finish, whose memory scales with Σ nrow over
+supernodes (placeholder row_indices at supernode.rs:505 plus static rows
+`flat` at mod.rs:567, both Vec<usize>). Hypothesis: AMF's ordering has far
+more fill than AMD's on fhnw. Test: run the prefix only (ordering → etree →
+column counts) for AMD/AMF/MetisND and compare nnz(L).
+
+Repro matrices: MPS from plato.asu.edu converted to the IPM augmented system
+[[I, Aᵀ],[A, -1e-8 I]] (scratch converter mps_to_kkt.py, highspy reader).
+fhnw-binschedule1: n=1 914 525, stored nnz 10 525 851 (issue: 1 911 607 /
+10 517 895, i.e. same pattern up to pounce's HSDE extras). Primal2_1000:
+n=3 858 760, stored nnz 9 356 900 (issue: 5 097 520 / 11 834 420; pounce adds
+~1.24M slack/bound rows). Both still route the same way under Auto
+(fhnw avg_deg ≈ 10 → AMF; Primal2 ≈ 3.85 → AMD).
+
+* 17:45 :issue-246:ordering:amf:primal2:
+Prefix-only probe (ordering → postorder → etree → column_counts_gnp,
+preprocess None, scratch crate) on Primal2_1000 KKT (n=3 858 760):
+| ordering | nnz(L)  | max colcount | Σc² (flop proxy) | order time |
+| AMD      | 3.187e8 | 15 815       | 2.41e12          | 1.7 s      |
+| AMF      | 1.802e8 |  5 066       | 4.09e11          | 2.0 s      |
+| MetisND  | 1.998e8 |  2 887       | 2.94e11          | 32.3 s     |
+Same shape as the issue's figures (AMD 3.72e8 / 2.5e12 flops vs METIS
+2.14e8 / 3.2e11, with ldlt_compress). New: AMF is within 1.4× of METIS on
+flops and 6× better than AMD, at AMD's ordering cost. So on this matrix the
+avg_deg<5 → AMD branch (#50, calibrated on powerflow22) is the wrong call and
+AMF would be a cheap fix — if AMF behaves on fhnw.
+Process HWM 1.6–1.7 GB: the prefix itself is cheap here.
+Note: the first probe run used `column_counts` (the O(nnz(L)) elimination
+simulator) instead of `column_counts_gnp` and took minutes; restarted.
+
+* 18:20 :issue-246:ordering:amf:root-cause:mumps:
+fhnw-binschedule1 KKT (n=1 914 525), prefix-only probe, preprocess None:
+| ordering | nnz(L)   | max colcount | Σc²      | order time |
+| AMD      | 4.369e8  |  24 445      | 5.56e12  | 86.3 s     |
+| AMF      | 1.388e10 | 155 589      | 1.49e15  | 39.0 s     |
+| MetisND  | 4.031e8  |  21 754      | 3.65e12  | 80.7 s     |
+Prefix HWM 1.3–1.9 GB. AMF's ordering is 32× AMD's fill, so the issue's 11 GB
+abort is symbolic_finish building structure for a 1.4e10-entry factor: a bad
+ordering, not a leak. Degree profile: median 5, p99 54, 8 692 cols > 100,
+216 > 1000, 4 cols at 56 842 and 2 at 454 823 (only those 6 exceed the
+dense threshold 13 836).
+
+Primal2 full production path (symbolic_factorize_with_method, default
+params): Auto → Amd/LdltCompress nnz(L)=3.692e8 peak 8.30 GB (issue: 3.72e8,
+8.33 GB — reproduced). Amf/LdltCompress nnz(L)=2.079e8 peak 3.53 GB.
+
+Root cause: AMF RMF quantization (algo.rs re-insertion): rmf ≥ i32::MAX-1 is
+stored as round(rmf/n). At n=1.9M a score of 3e9 becomes ~1 600, i.e. a
+near-dense variable is filed as *cheap* — a priority inversion. mumps-expert
+confirmed this is verbatim MUMPS 5.8.2 HAMF4 (ana_orderings.F:4985-4994, also
+MUMPS_CST_AMF :8074-8079; WF is 32-bit INTEGER, no guard, no 64-bit variant).
+So feral is a faithful port of a MUMPS quirk that only bites at large n with
+high-degree rows (RMF can exceed 2^31 once degrees reach ~27k).
+
+Experiment (local, reverted): monotone quantization — store round(rmf) as
+i64 (wf is already Vec<i64>), no /n fall-through.
+  fhnw    AMF: nnz(L) 1.388e10 → 1.835e8, max colcount 10 623, Σc² 5.11e11,
+               order time 127.6 s. Now 2.4× less fill and 11× fewer flops
+               than AMD, 2.2× / 7× better than MetisND.
+  Primal2 AMF: unchanged (1.802e8) — the overflow branch never fires there.
+Conclusion: one root cause behind the fhnw half of #246. With monotone
+quantization, Auto → AMF becomes the best choice on fhnw, and AMF is also
+the cheap fix for Primal2 (vs AMD) — the latter needs the powerflow22
+regression check (not available in this container; GAMS-licensed, lives in
+pounce). The fix deviates from MUMPS, so the AMF corpus oracle
+(tests/amf_corpus_oracle.rs, MUMPS HAMF4 sidecars, 10% nnz_L margin) may move
+on large high-degree matrices; needs a decisions.md entry.
