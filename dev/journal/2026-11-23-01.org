@@ -128,3 +128,48 @@ Rerun: cargo test --workspace --release 1340 passed / 0 failed. Python
 bindings map the variant to feral.MemoryBudgetExceeded (a FactorError);
 `cargo check` on python/ is clean apart from the existing gil-refs warnings.
 Not exposed as a Python Solver knob (out of scope).
+
+* 21:15 :issue-246:routing:low-degree:evidence:
+Draft of step 2: `n > 100k && avg_deg < 5` → Amf (was Amd, #50). powerflow22
+(the #50 calibration case) is not available here, so the evidence is public
+LP KKTs in the regime, converted with dev/scripts/mps_to_kkt.py (Mittelmann
+plato.asu.edu; SuiteSparse returned 403 through the proxy; the older
+pds/misc LPs are netlib-compressed "emps" files HiGHS cannot read).
+Prefix probe, fixed AMF, preprocess None:
+| matrix    | n     | avg | AMD nnz(L) / Σc²  | AMF nnz(L) / Σc²  | MetisND nnz(L) | AMD/AMF order |
+| Primal2   | 3.86M | 3.85| 3.187e8 / 2.41e12 | 1.802e8 / 4.09e11 | 1.998e8        | 1.7 / 2.0 s   |
+| dlr1      | 10.9M | 4.38| 1.903e8 / 7.09e11 | 1.176e8 / 2.38e11 | (not run)      | 9.3 / 13.1 s  |
+| lo10      | 453k  | 4.59| 3.071e8 / 5.01e12 | 3.051e8 / 4.95e12 | 5.100e8        | 0.8 / 1.3 s   |
+| long15    | 786k  | 4.83| 3.697e8 / 6.61e12 | 3.692e8 / 6.59e12 | 4.594e8        | 1.9 / 2.7 s   |
+| netlarge2 | 1.2M  | 4.87| 4.952e8 / 1.02e13 | 4.945e8 / 1.02e13 | 6.361e8        | 2.9 / 4.4 s   |
+(wide15 is byte-identical to long15, so it is dropped.) AMF ≤ AMD on fill
+everywhere: 1.8×/1.6× lower on the two LP KKTs, within 0.6% on the network
+LPs. MetisND is worse than both on every network LP.
+
+Numeric (Solver, default *parallel* driver, 4 cores, RLIMIT_AS 13.5 GB):
+Primal2 AMF first factor 63.5 s, refactor 46.3 s, inertia
+(+2 559 380, −1 299 380, 0) = (nvar, ncon) exact. Its VmHWM was 9.36 GB
+against a predicted peak_bytes of 3.53 GB. The AMD run in the same process,
+and lo10 AMF, then aborted on allocation failure (extract_contrib /
+grow_pooled_front). FINDING (pre-existing, not from this session's changes):
+the parallel driver's real memory is ~2.6× WorkEstimate::peak_bytes on
+Primal2, so neither peak_bytes nor the new max_factor_bytes budget bounds
+it. Rerunning sequentially (with_parallel(false)) for the AMD/AMF timing.
+Also: FERAL_PARALLEL is read only by the C API (capi.rs:161), not by
+Solver::new().
+
+* 23:05 :issue-246:routing:numeric:
+Primal2 numeric A/B, sequential driver (with_parallel(false)), one process
+per ordering, RLIMIT_AS 14 GB:
+  AMD: first 1010.2 s, refactor 999.2 s, inertia (+2 559 380, −1 299 380, 0),
+       VmHWM 11.49 GB vs predicted peak 8.30 GB
+  AMF:   first 95.9 s, refactor 83.8 s, identical inertia,
+       VmHWM 6.37 GB vs predicted 3.53 GB
+AMF refactor is 11.9× faster (flop-proxy ratio 5.9×). lo10 numeric was
+stopped (projected > 1 h per factor here; fill within 0.6%), so it is not
+measured. Probe gotcha: FERAL_PARALLEL is ignored by Solver::new(); the probe
+sets with_parallel explicitly. Draft routing change (n > 100k && avg_deg < 5
+→ Amf) committed separately with its CHANGELOG lines, so it can be dropped if
+the powerflow22 / PDE2 A/B (maintainer machine) disagrees. No decisions.md
+entry until it is accepted. cargo test --workspace --release with the draft:
+1340/0.
