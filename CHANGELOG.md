@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — AMF ordering no longer inverts its fill priority at large n (#246)
+- `OrderingMethod::Amf` (and `Auto` where it resolves to AMF) used MUMPS
+  HAMF4's score quantization, which stores a fill score `>= i32::MAX` as
+  `score / n`. On large matrices with high-degree rows, that filed
+  near-dense variables as cheap. On the fhnw-binschedule1 LP KKT
+  (n = 1.9M), AMF's predicted nnz(L) was 1.39e10 (32× AMD), and the
+  symbolic phase ran out of memory. Scores are now kept exact in `i64`:
+  fhnw AMF nnz(L) is 1.84e8, below both AMD (4.37e8) and MetisND (4.03e8).
+  Orderings are unchanged wherever every score stays below 2³¹, which
+  covers all small and medium matrices.
+- This deliberately deviates from MUMPS; see `dev/decisions.md`
+  (2026-11-23).
+
 ## [0.24.0] - 2026-11-19
 
 A minor release, not a 0.23.x patch, because it raises the minimum

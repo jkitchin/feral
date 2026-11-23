@@ -8392,3 +8392,29 @@ trigger fired. Retuning `DELAY_CHAIN_GROWTH`: there is no wrong answer to
 justify moving #221's tuning.
 **Evidence.** dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md. Mutation-checked.
 `cargo test --release`: 1060/0.
+
+## 2026-11-23 — AMF score quantization is monotone; drop MUMPS's `RMF / N` fall-through
+
+**Context.** Issue #246: `Auto` → AMF on the fhnw-binschedule1 LP KKT
+(n = 1.9M) exhausts 11–13 GB in the symbolic phase. The AMF ordering's
+nnz(L) is 1.39e10, 32× AMD's. MUMPS 5.8.2 HAMF4 (`ana_orderings.F:4985-4994`)
+stores the fill score in a 32-bit `INTEGER`, and for `RMF >= huge-1` it
+stores `round(RMF / N)`. That map is not monotone: at n = 1.9M a score of
+3e9 becomes ~1.6e3, so near-dense variables are filed as cheap. feral's
+port copied this verbatim.
+**Decision.** Quantize to `clamp(round(RMF), 1, 1e18)` in `i64`
+(`amf_quantize_score`, `crates/feral-ordering-core/src/quotient_graph/algo.rs`).
+This is a deliberate deviation from the MUMPS reference. Below `2^31` it
+is bit-identical to MUMPS. Above that, feral's AMF no longer reproduces
+MUMPS orderings.
+**Rejected.** Keeping the `/N` branch but routing large n away from AMF:
+that hides an ordering defect that also hits AMF users who pick it
+explicitly. Clamping overflowed scores to `i32::MAX - 1` (last bucket):
+monotone, but it throws away the order among saturated scores, which
+`select_pivot_amf` can compare exactly for free with `i64` keys.
+**Evidence.** `dev/research/issue-246-amf-quantization.md`. fhnw AMF
+nnz(L) 1.388e10 → 1.835e8 (AMD 4.369e8, MetisND 4.031e8), Σc² 1.49e15 →
+5.11e11. Primal2_1000 AMF is unchanged (1.802e8). Ordering time on fhnw
+goes from 39 s to 128 s (accepted). The AMF corpus oracle bounds feral's
+nnz_L from above, so it still holds where MUMPS itself inverts.
+Journal 2026-11-23-01.

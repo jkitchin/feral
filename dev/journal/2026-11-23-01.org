@@ -73,3 +73,20 @@ regression check (not available in this container; GAMS-licensed, lives in
 pounce). The fix deviates from MUMPS, so the AMF corpus oracle
 (tests/amf_corpus_oracle.rs, MUMPS HAMF4 sidecars, 10% nnz_L margin) may move
 on large high-degree matrices; needs a decisions.md entry.
+
+* 18:45 :issue-246:amf:tests-first:
+Research note dev/research/issue-246-amf-quantization.md and plan
+dev/plans/issue-246-amf-quantization.md written before code. Tests first:
+extracted the MUMPS-verbatim quantization into a helper (n pinned to fhnw's
+1 914 525) and added hand-arithmetic unit tests in feral-ordering-core.
+Against the old behaviour: 2 of 3 failed as predicted —
+`amf_quantize_score(3.0e9)` returned 1567 (= round(3e9/1 914 525)) vs the
+expected 3 000 000 000, and the monotonicity test tripped at 2.2e9 → 3e9.
+(The floor/cap test passed on old code only because its cap was the old
+dummy.) After the fix (clamp(round(rmf), 1, 1e18) as i64) all 3 pass.
+Added a fixture-gated, #[ignore]d integration test
+tests/issue246_amf_quantization.rs (oracle: AMD nnz(L) on the same pattern)
+and dev/scripts/mps_to_kkt.py to regenerate the fixture.
+Decision recorded in dev/decisions.md (deviation from MUMPS).
+Pre-commit hooks were not installed in this clone; installed them
+(`pre-commit install`).

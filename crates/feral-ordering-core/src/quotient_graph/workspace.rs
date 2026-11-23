@@ -91,7 +91,9 @@ pub struct Workspace {
     /// for `n` ≳ 46k before being consumed as `f64` in the RMF score
     /// (O1, `dev/research/repo-review-2026-06-09.md`). MUMPS computes
     /// the RMF in DBLE for the same reason. The post-quantization RMF
-    /// score stored here later is bounded by `i32::MAX - 1`.
+    /// score stored here later is the exact rounded score, bounded by
+    /// `AMF_SCORE_CAP` (1e18; issue #246 dropped MUMPS's non-monotone
+    /// `i32` quantization).
     pub wf: Vec<i64>,
 
     /// Generation counter for the mark array `w`.
