@@ -1,0 +1,118 @@
+* 03:10 :issue-249:memory:probe:evidence:
+Issue #249: real high-water vs WorkEstimate::peak_bytes. New probe
+examples/issue249_memory_breakdown.rs (counting global allocator, 250 ms
+window-peak sampler, post-factor census of retained structures by
+capacity()). Primal2_1000 KKT rebuilt here (plato.asu.edu MPS +
+dev/scripts/mps_to_kkt.py; n = 3 858 760, stored nnz 9 356 900; input CSC
+0.181 GB). AMF, 4 cores:
+| driver        | heap peak - input | retained after | VmHWM   | wall   |
+| sequential    | 4.870 GB          | 4.549 GB       | 4.93 GB | 106 s  |
+| parallel, 1 t | 5.425 GB          | 4.387 GB       | 6.07 GB | 113 s  |
+| parallel, 2 t | 6.953 GB          | 4.387 GB       | 6.69 GB |  78 s  |
+| parallel, 4 t | 7.675 GB          | 4.387 GB       | 7.38 GB |  69 s  |
+Predicted: factor_bytes 1.996, peak_contrib 1.534, peak_bytes 3.530 GB.
+(The journal's 6.37 GB sequential VmHWM from 2026-11-23 is not reproduced
+here: 4.93 GB. That run read the matrix differently; the ratio to
+peak_bytes is still 1.4x here.)
+Retained census (AMF):
+- L values: 2.487 GB = exactly Σ_snodes nrow·ncol·8 (3.109e8 entries).
+  factor_bytes is 1.2 × Σ col_counts = 2.495e8 entries: the col counts are
+  pre-amalgamation (2.079e8), and amalgamation added 1.50x. The 1.2 slack
+  does not cover it. 0.20 GB of L is the strict upper triangle of each
+  diagonal block (stored rectangle).
+- per-node metadata 0.78 GB: BK perm+perm_inv 0.298 (length nrow each),
+  row_indices 0.149, Vec<NodeFactors> 720 331 × 352 B = 0.254, D 0.078.
+- symbolic retained 0.772 GB (static_row_flat 0.268, permuted_pattern
+  0.150, supernode rows 0.146, ...).
+- Solver workspace/caches ~0.4 GB (permute cache, last_pattern, pools).
+Timeline (parallel, 4 t): live heap climbs to 7.86 GB at t = 28.5 s and
+then falls ~0.12 GB per 4-5 s to 5.8 GB at the end: the off-chain
+subtrees finish early and their (square) blocks wait for the long top
+chain. Sequential climbs monotonically to its peak near the end; its
+transient above the final retained set is only 0.32 GB (packed blocks),
+under the 1.53 GB square model.
+Conclusion: the gap is (1) amalgamation fill missing from factor_bytes,
+(2) unmodelled per-node index metadata and the analysis itself, (3) under
+the parallel driver, a frontier of completed task blocks far larger than
+the postorder model. Max antichain of contribution blocks over the whole
+supernode tree is 6.03 GB here (a schedule-free bound, but 2x loose).
+
+* 04:05 :issue-249:memory:estimate:
+Commit 5895c4b: WorkEstimate gains factor_stored_bytes (Σ nrow·ncol·8),
+factor_index_bytes, analysis_bytes, workspace_bytes, numeric_peak_bytes (a
+postorder walk of stored factor + live blocks + frontal pool), and
+peak_bytes = analysis + workspace + numeric_peak. Parallel:
+peak_bytes_parallel(threads) = everything + task-plan frontier (max
+antichain of task-root blocks) + per running task. Probe (heap peak above
+input): Primal2 AMF seq 5.06 predicted vs 4.87 measured (old 3.53);
+small-matrix test seq 1.03-1.08x, par 1.21-1.28x, old 0.29-0.34x.
+
+* 04:30 :issue-249:parallel:packed:allocation:
+The parallel driver held square blocks only because the packing work
+(decisions 2026-11-12) scoped itself to the sequential drivers;
+factor_one_supernode is generic over the layout. Switched the parallel
+driver to Packed (3 type sites; Square now test-only). Primal2 AMF, 4
+threads: heap peak 7.63 -> 6.12 GB (-20%), VmHWM 7.38 -> 6.9 GB, wall
+68.6/69.6 s -> 63.1/61.8 s. Frontier bound halves 5.76 -> 2.89 GB. AMD, 4
+threads: 12.27 GB measured (was > 13.5 GB RLIMIT_AS on the maintainer's run
+with square blocks).
+
+* 04:50 :issue-249:contrib-pool:allocation:
+AMD sequential under-predicted by 0.5% (9.317 vs 9.364 GB). Cause: the
+single-slot contribution pool. assemble_children puts each consumed child's
+buffer in the pool; extract_contrib reused it with clear()+reserve(len), so
+a block kept a larger recycled buffer's capacity (pinned until its parent),
+and a smaller one was realloc'ed (moved: no saving) and doubled. Simulating
+that exactly gave 9.528 (bounds). But for the parallel model, which buffer a
+worker recycles depends on the schedule, so no bound below 2x the largest
+block existed. Fix: recycle only when len <= cap <= len + max(len/8, 512),
+else allocate exactly. Values unchanged (bit-exact); block capacity <=
+1.125 len + 4 KiB, which the model now uses.
+
+* 05:00 :issue-249:parallel:budget:decision:
+The parallel bound is loose where many tasks have big fronts: AMD 4 threads
+31.7 GB bound vs 12.27 measured (2.6x); per-worker frontal pools (each up to
+2x its largest front, 1.7 GB fronts on AMD) dominate. Refusing on it would
+reject jobs that fit. Instead: when max_factor_bytes admits peak_bytes but
+not peak_bytes_parallel(threads), Solver runs that factorization on the
+sequential driver (bit-exact, same factors; Solver::ran_sequential_for_budget
+reports it). A first version refused with stage "peak_parallel"; replaced
+before commit.
+
+* 05:40 :issue-249:correction:
+Correction to the 05:00 entry: the "peak_parallel" refusal was committed in
+5895c4b, not replaced before commit; 1e51c36 replaces it with the
+sequential fallback. AMD parallel with the final code (packed + close-fit
+recycling): heap peak 12.01 GB above input, VmHWM 12.63 GB, wall 421.8 s;
+bound 34.87 GB (2.90x). Commits: 5895c4b (estimate), b2ce4b1 (packed
+parallel blocks + recycle rule + model), 1e51c36 (Solver fallback).
+
+* 07:10 :issue-249:contrib-pool:bugfix:evidence:
+AMD sequential with the close-fit rule measured 8.906 GB vs 8.557
+predicted (0.96x, under). Timeline: a ~0.35 GB spike for ~0.25 s at every
+top-chain front. Cause: in `match pool.take() { Some(buf) if fits => buf,
+_ => Vec::with_capacity(len) }` the unfit buffer is the scrutinee's
+temporary and drops at the end of the match, after the new allocation.
+Dropping it first (5a2dd0a): measured 8.555 GB; prediction 8.557 + the
+kernel's pooled panel scratch (3·nrow·64 entries, 0.023 GB) ~ 8.58
+(1.003x). Final batch, same binary: AMF seq 4.862 meas / 4.924 pred, 98.3 s;
+AMF par 4t 5.894 / 10.145, 59.3 and 60.3 s; AMD par 11.743 / 34.873,
+429 s. cargo test --workspace --release 1371/0; bench unchanged (2
+fixtures).
+
+* 14:00 :issue-249:pr-251:review:contrib-pool:perf:
+PR #251 review (jkitchin): close-fit recycle rule = 1.164x geomean refactor
+on the 61 parity KKTs (max 1.70 SSI_2597), 1.019 with main's reuse. Not
+reproduced here: A/B harness (default Solver, 30 refactors, best-of-3
+medians, alternating builds) gave PR/main 0.959-0.977 over 8 rounds;
+allocation counts per warm refactor identical (18 109 summed) for main/PR/fix
+on both drivers. Tiny KKTs are ~1.5 us of factor inside ~30 us of pool
+dispatch on the default Solver; jitter dominates. Sequential driver: PR/main
+0.982, fix/main 1.001; single matrices swing 12-19% between runs.
+Fix anyway (it is main's behaviour for small blocks): reuse when len <= cap
+<= len + max(len/8, RECYCLE_SMALL), grow a smaller buffer in place when len
+<= RECYCLE_SMALL, else free + exact; RECYCLE_SMALL 1<<13 (Primal2 AMF par
+bound 10.27 -> 10.51; 1<<17 gave 16.97). recycled_block_cap shared by kernel
+and model, pinned by a unit test. cargo test 1374/0. Primal2 AMF memory
+unchanged (seq 4.862 pred 4.924; par 5.894); wall drifted (machine slower:
+PR build 79-81 s, fix 76-77 s in the same window).

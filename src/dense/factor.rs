@@ -1749,6 +1749,42 @@ pub(crate) fn packed_lower_len(dim: usize, cols: usize) -> usize {
     cols * (2 * dim - cols + 1) / 2
 }
 
+/// Largest capacity (entries) any contribution block extracted by
+/// [`extract_contrib`] can have, for a block of `len` entries (issue #249):
+/// `len` plus an eighth, or plus [`RECYCLE_SMALL`] entries for blocks under
+/// `8 · RECYCLE_SMALL`. The memory model (`numeric::memory_model`) relies
+/// on this bound.
+#[inline]
+pub(crate) fn recycle_cap_limit(len: usize) -> usize {
+    len + (len / 8).max(RECYCLE_SMALL)
+}
+
+/// Slack (entries; 64 KiB) a recycled contribution buffer may always carry,
+/// and the block size up to which a too-small pooled buffer is grown in
+/// place rather than replaced. Below it the pool keeps the malloc
+/// amortisation of issue #13 Phase C for small fronts, where a close-fit
+/// rule alone cost ~14% refactor time on the parity KKTs (PR #251 review);
+/// above it pinned slack is at most an eighth of the block.
+pub(crate) const RECYCLE_SMALL: usize = 1 << 13;
+
+/// Capacity (entries) of the block [`extract_contrib`] builds for `len`
+/// entries from a pooled buffer of capacity `pool` (or none). Exactly the
+/// rule `extract_contrib` applies, shared with the memory model:
+/// - a buffer with `len ≤ capacity ≤ recycle_cap_limit(len)` is reused;
+/// - a smaller buffer, for a block of at most [`RECYCLE_SMALL`] entries,
+///   is grown by `Vec`'s amortized rule (`max(2 · capacity, len, 4)`);
+/// - anything else is freed and the block allocated exactly.
+///
+/// Never above `recycle_cap_limit(len)`.
+#[inline]
+pub(crate) fn recycled_block_cap(pool: Option<usize>, len: usize) -> usize {
+    match pool {
+        Some(cap) if (len..=recycle_cap_limit(len)).contains(&cap) => cap,
+        Some(cap) if cap < len && len <= RECYCLE_SMALL => (2 * cap).max(len).max(4),
+        _ => len,
+    }
+}
+
 /// Extract the trailing `(n − offset)²` block of the `n × n` column-major
 /// `data` (lower triangle authoritative) in `layout`, into a buffer taken
 /// from `pool` (fresh if it is empty). An empty block takes nothing: it
@@ -1774,7 +1810,22 @@ fn extract_contrib(
     if len == 0 {
         return Vec::new();
     }
-    let mut contrib = pool.take().unwrap_or_default();
+    // Issue #249 (rule: `recycled_block_cap`): reuse the pooled buffer when
+    // it fits this block within `recycle_cap_limit`, or when it is smaller
+    // and the block is small (grown in place, the issue #13 Phase C pool).
+    // A much larger buffer would pin its excess for the block's whole life
+    // (until the parent assembles it); a smaller one for a large block
+    // would be reallocated (copied) and doubled. Otherwise free it and
+    // allocate exactly — free it *first*: left to the end of the `match`,
+    // it would be live beside the new block.
+    let mut contrib = match pool.take() {
+        Some(buf) if (len..=recycle_cap_limit(len)).contains(&buf.capacity()) => buf,
+        Some(buf) if buf.capacity() < len && len <= RECYCLE_SMALL => buf,
+        unfit => {
+            drop(unfit);
+            Vec::with_capacity(len)
+        }
+    };
     contrib.clear();
     contrib.reserve(len);
     {
@@ -1796,8 +1847,9 @@ fn extract_contrib(
         debug_assert_eq!(at, len);
     }
     let _pt_zf = phase_timing::start();
-    // SAFETY: the loop above initialized every element in 0..len of the
-    // spare capacity that `reserve(len)` guaranteed exists; `f64` has no
+    // SAFETY: `contrib` is empty with capacity >= len (`reserve(len)` on
+    // the cleared buffer guarantees it), and the loop above initialized every element
+    // in 0..len of that spare capacity; `f64` has no
     // Drop, so growing the length exposes only initialized values.
     // CONTRIBZEROFILL_NS brackets only this O(1) length carve-out.
     unsafe {
@@ -6345,6 +6397,46 @@ mod growth_flag_tests {
         let mut flag = false;
         flag_growth_for_refinement(&l_inf, &mut flag);
         assert!(flag, "Inf entry must trigger");
+    }
+}
+
+#[cfg(test)]
+mod recycle_tests {
+    use super::*;
+
+    /// Issue #249 / PR #251 review: the capacity `extract_contrib` gives a
+    /// block is exactly `recycled_block_cap` (which the memory model
+    /// simulates), never above `recycle_cap_limit`, and the values are the
+    /// trailing block whatever buffer was recycled.
+    #[test]
+    fn extract_contrib_capacity_follows_the_shared_rule() {
+        for cdim in [1usize, 3, 20, 511, 512, 1500] {
+            let n = cdim + 2;
+            let data: Vec<f64> = (0..n * n).map(|k| k as f64).collect();
+            let len = packed_lower_len(cdim, cdim);
+            let limit = recycle_cap_limit(len);
+            let mut pools = vec![None, Some(0), Some(1), Some(3), Some(len / 2)];
+            pools.extend([len - 1, len, len + len / 8, limit, limit + 1, 3 * len].map(Some));
+            for pool_cap in pools {
+                let mut pool = pool_cap.map(Vec::<f64>::with_capacity);
+                let actual_pool = pool.as_ref().map(Vec::capacity);
+                let block = extract_contrib(&data, n, 2, ContribLayout::PackedLower, &mut pool);
+                assert_eq!(block.len(), len);
+                assert_eq!(
+                    block.capacity(),
+                    recycled_block_cap(actual_pool, len),
+                    "cdim {cdim}, pool {actual_pool:?}"
+                );
+                assert!(
+                    block.capacity() <= limit,
+                    "cdim {cdim}, pool {actual_pool:?}"
+                );
+                assert!(pool.is_none(), "the pool is always consumed");
+                // Column 0 of the block is column 2 of `data` from row 2.
+                assert_eq!(block[0], data[2 * n + 2]);
+                assert_eq!(block[len - 1], data[(n - 1) * n + n - 1]);
+            }
+        }
     }
 }
 

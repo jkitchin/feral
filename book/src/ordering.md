@@ -158,27 +158,40 @@ match solver.factor(&kkt, None) {
 
 There are two checks. The first runs right after the ordering, on the
 predicted factor size, before the analysis allocates anything that scales
-with the factor. The second runs at the end of the analysis, on the full
-predicted peak (factor plus multifrontal working storage). The same budget is
-available as `SupernodeParams::max_factor_bytes` for callers of
+with the factor. The second runs at the end of the analysis, on
+`WorkEstimate::peak_bytes`: the predicted high-water of `Solver::factor` on
+the sequential driver. That figure counts the factor as stored (dense
+supernode blocks, including the explicit zeros amalgamation adds), each
+supernode's index data, the analysis the `Solver` keeps, the numeric
+workspace and caches, and the contribution blocks, walked in the order the
+driver allocates and frees them. The same budget is available as
+`SupernodeParams::max_factor_bytes` for callers of
 `symbolic_factorize_with_method`.
 
-**The budget bounds the prediction, not the process.** Measured high-water
-memory runs above `WorkEstimate::peak_bytes`, and by different amounts for
-the two numeric drivers:
+The parallel driver holds more at once: blocks of finished subtrees waiting
+for their parent, and one workspace and frontal buffer per worker.
+`WorkEstimate::peak_bytes_parallel(threads)` bounds that over every
+schedule. When the budget admits `peak_bytes` but not the parallel bound,
+the `Solver` runs that factorization on the sequential driver instead of
+refusing (same factors, slower); `Solver::ran_sequential_for_budget()` says
+when this happened.
 
-| driver | real high-water / predicted `peak_bytes` | measured on |
-|---|---|---|
-| sequential (`with_parallel(false)`) | 1.4–1.8× | Primal2_1000 LP KKT, n = 3.86M, AMD and AMF |
-| parallel (default) | ≈ 2.6× | the same matrix, AMF: 9.36 GB vs 3.53 GB |
+Measured heap high-water against the prediction (the input matrix, which is
+yours, excluded):
 
-The prediction assumes no delayed pivots, and it covers only the factor and
-the contribution blocks. The gap has not been broken down yet. Plausible
-contributors are the input matrix, scaling and solve workspaces, and the
-extra fronts the parallel driver keeps live at once. Until it is closed, set
-the budget to
-roughly a third of the memory you can spare for the parallel driver, or
-half for the sequential one.
+| matrix | driver | predicted | measured |
+|---|---|---|---|
+| Primal2_1000 LP KKT, n = 3.86M, AMF | sequential | 4.92 GB | 4.86 GB |
+| the same, AMD | sequential | 8.58 GB | 8.56 GB |
+| the same, AMF | parallel, 4 threads | 10.1 GB (bound) | 5.9 GB |
+| the same, AMD | parallel, 4 threads | 34.9 GB (bound) | 11.7 GB |
+
+The sequential prediction is close. The parallel bound is loose when many
+subtrees have large fronts, which is why it switches drivers rather than
+refusing. Both assume no delayed pivots, which move columns into larger
+fronts; on hard indefinite systems leave some headroom. The process also
+pays allocator overhead on top of the heap (10–15% with 4 threads on
+the matrix above).
 
 ## Bounding time
 

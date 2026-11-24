@@ -8485,3 +8485,42 @@ worse on the five public LPs measured.
 
 The corpus subset (n > 100k, average degree < 5) and `amf_corpus_oracle.rs`
 were not run. See dev/research/issue-246-low-degree-routing.md "Gate results".
+
+## 2026-11-24 — `peak_bytes` models the real high-water; the parallel driver holds packed blocks (#249)
+
+**Decision.** `WorkEstimate::peak_bytes` is the predicted high-water of
+`Solver::factor` on the sequential driver: `analysis_bytes +
+workspace_bytes + numeric_peak_bytes`, where the numeric peak walks the
+postorder as the driver allocates. Each node adds its stored dense
+`nrow·ncol` block and index data, children's blocks pass through the
+single-slot contribution pool, and the frontal pool grows by
+`grow_pooled_front`. `peak_bytes_parallel(threads)` bounds the parallel
+driver over every schedule: the task-plan frontier (max-weight antichain
+of task-root blocks) plus `threads + 1` running tasks. A parallel `Solver`
+whose budget admits `peak_bytes` but not the parallel bound runs the
+sequential driver for that factorization; it does not refuse. Two
+allocation changes make the model hold:
+- the parallel driver holds packed blocks;
+- `extract_contrib` recycles a pooled buffer only when
+  `len ≤ cap ≤ len + max(len/8, 512)`, so every block's capacity is
+  bounded. An unfit buffer is freed before the new block is allocated.
+
+**Why.** The old `factor_bytes + peak_contrib_bytes` missed four things:
+amalgamation fill (1.50× the column counts on Primal2 AMF), per-node index
+data (0.78 GB), the analysis (0.77 GB) and the workspace. It ran
+1.4–2.6× below the measured memory, so `max_factor_bytes` did not protect
+the process. Square blocks in the parallel driver were a scoping leftover
+of the 2026-11-12 packing decision, not a requirement. The pool's
+`reserve` reuse let a block keep a larger buffer's capacity, which no
+schedule-free bound could cover. The parallel bound is loose (1.7× on AMF,
+3.0× on AMD), so refusing on it would reject jobs that fit. Falling back
+to the bit-exact sequential driver costs only time.
+
+**Evidence.** `dev/research/issue-249-memory-gap.md` and journal
+2026-11-24-03. Primal2, sequential: AMF predicted 4.92 vs measured
+4.86 GB (old 3.53); AMD 8.58 vs 8.56 (old 8.30). AMF parallel, 4
+threads: 7.63 → 5.89 GB, wall 69 → 60 s. `tests/issue249_memory_model.rs`: the prediction bounds the
+measured heap peak on grids and a KKT, within 1.03–1.08× sequential and
+1.20–1.25× parallel. Stored terms equal the factors' real buffer lengths.
+`peak_contrib_bytes` keeps its classic square meaning (tried-and-rejected
+2026-11-12).

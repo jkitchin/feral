@@ -939,12 +939,71 @@ pub struct WorkEstimate {
     /// of the resident factor and is invisible to a caller who only
     /// measures the factor. Blocks are counted square under the classic
     /// scheme: without delayed pivots this bounds every driver under
-    /// `EarlyAssembly::Off` and `EarlyAssembly::WideParents` (the
-    /// sequential drivers hold packed blocks, about half as large).
+    /// `EarlyAssembly::Off` and `EarlyAssembly::WideParents` (every
+    /// driver holds packed blocks, about half as large; the parallel one
+    /// since issue #249). [`Self::numeric_peak_bytes`] models the packed
+    /// blocks.
     pub peak_contrib_bytes: usize,
-    /// `factor_bytes + peak_contrib_bytes` — the headline number to
-    /// compare against a memory budget.
+    /// Bytes the numeric phase stores for the factor values (issue #249):
+    /// each supernode keeps a dense `nrow × ncol` block, so this is
+    /// `Σ nrow·ncol · 8` over the supernodes, absent delayed pivots.
+    /// Larger than [`Self::factor_bytes`] whenever amalgamation adds
+    /// explicit zeros beyond the 1.2 slack: 1.25× on the Primal2_1000 KKT.
+    pub factor_stored_bytes: usize,
+    /// Bytes the numeric phase stores per supernode beside the values:
+    /// row indices, the in-front pivot permutation and its inverse (each
+    /// `nrow` long), the `D` vectors and the node record (issue #249).
+    pub factor_index_bytes: usize,
+    /// Heap bytes of the analysis itself, which a `Solver` keeps cached
+    /// (issue #249). Exact: read off this analysis by capacity.
+    pub analysis_bytes: usize,
+    /// Numeric workspace and `Solver` caches of the sequential path,
+    /// proportional to the input: the permuted copy of the matrix, the
+    /// permute cache, the pattern kept for the fingerprint check, and
+    /// `O(n)` scratch (issue #249). The input matrix itself is the
+    /// caller's and is not counted.
+    pub workspace_bytes: usize,
+    /// Predicted high-water of the sequential numeric phase over the
+    /// analysis and workspace: a postorder walk adding each node's stored
+    /// factor ([`Self::factor_stored_bytes`] +
+    /// [`Self::factor_index_bytes`]), its contribution block (packed
+    /// lower triangle plus row indices, as every driver holds it) and the
+    /// frontal pool, freeing blocks as their parents assemble them, and
+    /// keeping the largest total.
+    pub numeric_peak_bytes: usize,
+    /// Predicted high-water of `Solver::factor` under the sequential
+    /// driver: `analysis_bytes + workspace_bytes + numeric_peak_bytes`.
+    /// The headline number to compare against a memory budget; for the
+    /// parallel driver use [`Self::peak_bytes_parallel`]. Before issue
+    /// #249 this was `factor_bytes + peak_contrib_bytes`, which ran
+    /// 1.4–2.6× below the measured high-water on large KKTs.
+    ///
+    /// Assumes no delayed pivots, which move columns into larger parent
+    /// fronts; and `Solver` use (a direct driver caller holds no
+    /// fingerprint pattern or permute cache).
     pub peak_bytes: usize,
+    /// The parallel task-graph driver's frontier (issue #249): the largest
+    /// total of finished subtree tasks' contribution blocks that can wait
+    /// for their parent task at once, under any schedule. `None` when the
+    /// tree has too little task parallelism and the parallel driver would
+    /// run the sequential path.
+    pub parallel_frontier_bytes: Option<usize>,
+    /// The parallel driver's running-task bytes:
+    /// `parallel_running_bytes[k]` bounds what `k + 1` workers hold
+    /// beside the factor and the frontier (each worker's fixed workspace,
+    /// plus the `k + 1` largest per-task frontal pools and live-block
+    /// peaks). At most 1024 entries; empty when
+    /// [`Self::parallel_frontier_bytes`] is `None`.
+    pub parallel_running_bytes: Vec<usize>,
+    /// One parallel worker's fixed workspace (`row_map`, `build_seen`,
+    /// its contribution-slot vector): what a worker beyond
+    /// [`Self::parallel_running_bytes`] adds. Zero when
+    /// [`Self::parallel_frontier_bytes`] is `None`.
+    pub parallel_worker_bytes: usize,
+    /// The parallel driver's thread-independent bytes beside the factor:
+    /// its shared slot vectors and the task plan. Zero when
+    /// [`Self::parallel_frontier_bytes`] is `None`.
+    pub parallel_shared_bytes: usize,
     /// Rows in the largest frontal matrix. Bounds the biggest dense
     /// block the numeric phase will work on.
     pub max_front_rows: usize,
@@ -971,6 +1030,13 @@ impl SymbolicFactorization {
         }
         let factor_nnz: usize = self.col_counts.iter().sum();
         let factor_bytes = self.factor_nnz_estimate * vb;
+        use crate::numeric::memory_model as mm;
+        let factor_stored_bytes = self.supernodes.iter().map(mm::node_value_bytes).sum();
+        let factor_index_bytes = self.supernodes.iter().map(mm::node_index_bytes).sum();
+        let analysis_bytes = mm::analysis_heap_bytes(self);
+        let workspace_bytes = mm::workspace_bytes(self);
+        let numeric_peak_bytes = mm::sequential_numeric_peak(self);
+        let par = crate::numeric::factorize::parallel_memory_model(self);
         WorkEstimate {
             n: self.n,
             n_supernodes: self.supernodes.len(),
@@ -978,11 +1044,62 @@ impl SymbolicFactorization {
             factor_alloc_nnz: self.factor_nnz_estimate,
             factor_bytes,
             peak_contrib_bytes: self.peak_contrib_bytes,
-            peak_bytes: factor_bytes + self.peak_contrib_bytes,
+            factor_stored_bytes,
+            factor_index_bytes,
+            analysis_bytes,
+            workspace_bytes,
+            numeric_peak_bytes,
+            peak_bytes: analysis_bytes + workspace_bytes + numeric_peak_bytes,
+            parallel_frontier_bytes: par.as_ref().map(|p| p.frontier_bytes),
+            parallel_worker_bytes: par.as_ref().map_or(0, |p| p.worker_fixed_bytes),
+            parallel_shared_bytes: par.as_ref().map_or(0, |p| p.shared_bytes),
+            parallel_running_bytes: par.map(|p| p.running_bytes).unwrap_or_default(),
             max_front_rows,
             max_front_bytes: max_front_rows * max_front_rows * vb,
             factor_flops: flops,
         }
+    }
+}
+
+impl WorkEstimate {
+    /// Predicted high-water of `Solver::factor` under the parallel driver
+    /// with `threads` worker threads (issue #249): the analysis, the
+    /// workspace, the whole stored factor, the driver's shared vectors,
+    /// its frontier ([`Self::parallel_frontier_bytes`]) and
+    /// [`Self::parallel_running_bytes`] for `threads + 1` running tasks
+    /// (the workers and the calling thread). Never below
+    /// [`Self::peak_bytes`]; equal to it when the parallel driver would
+    /// run the sequential path.
+    ///
+    /// The frontier term is a bound over every schedule, so this is
+    /// conservative: on the Primal2_1000 KKT with 4 threads it is 1.7×
+    /// the measured heap high-water under AMF and 3.0× under AMD, whose
+    /// many large fronts each charge a worker a frontal pool. A parallel
+    /// `Solver` over budget on this figure runs the sequential driver
+    /// rather than refusing. It assumes at most `threads + 1` tasks
+    /// run at once (a task stolen inside a wide front's intra-front
+    /// parallel loop can add one more), and no delayed pivots.
+    pub fn peak_bytes_parallel(&self, threads: usize) -> usize {
+        let Some(frontier) = self.parallel_frontier_bytes else {
+            return self.peak_bytes;
+        };
+        // The workers plus the calling thread, which also runs tasks.
+        let running = threads.max(1).saturating_add(1);
+        let held = match self.parallel_running_bytes.len() {
+            0 => running.saturating_mul(self.parallel_worker_bytes),
+            len if running <= len => self.parallel_running_bytes[running - 1],
+            len => self.parallel_running_bytes[len - 1]
+                .saturating_add((running - len).saturating_mul(self.parallel_worker_bytes)),
+        };
+        let par = self
+            .analysis_bytes
+            .saturating_add(self.workspace_bytes)
+            .saturating_add(self.factor_stored_bytes)
+            .saturating_add(self.factor_index_bytes)
+            .saturating_add(self.parallel_shared_bytes)
+            .saturating_add(frontier)
+            .saturating_add(held);
+        par.max(self.peak_bytes)
     }
 }
 

@@ -8,7 +8,6 @@ use crate::error::FeralError;
 use crate::inertia::Inertia;
 use crate::numeric::contrib::{
     extend_add, Accumulator, Accumulators, AssemblyInputs, BlockLayout, ContribBlock, Packed,
-    Square,
 };
 use crate::scaling::{compute_scaling_dense_fast, compute_scaling_with_cache, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
@@ -1664,7 +1663,7 @@ pub struct FactorWorkspace {
     /// are guaranteed `None` between tasks, so no clearing is needed.
     /// Pre-sized to `n_snodes` once per worker by the parallel driver;
     /// sequential drivers don't touch this field.
-    local_contribs: Vec<Option<ContribBlock<Square>>>,
+    local_contribs: Vec<Option<ContribBlock<Packed>>>,
     /// Issue #13 Phase A: pooled `subdiag` + `d_panel` working buffers
     /// for `factor_frontal_blocked_in_place_with_scratch`. Reused
     /// across supernodes within a single workspace lifetime; the
@@ -2749,8 +2748,8 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
 ///   (via `Option::take`) — children must have been produced by a prior
 ///   call for this same `contrib_blocks`, and `accumulator` taken by
 ///   [`Accumulators::take`]. Blocks are held in layout `L`: packed in
-///   the sequential drivers, square in the parallel one, which never
-///   passes an accumulator.
+///   every driver since issue #249 (the parallel one held them square
+///   before); the parallel driver never passes an accumulator.
 /// * Writes the produced contribution block (if any) into
 ///   `contrib_blocks[snode_idx]`.
 /// * Uses `ws.row_map`, `ws.frontal_values`, `ws.build_delayed`,
@@ -3751,7 +3750,7 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
         .collect();
 
     // Shared state: contrib blocks, result slots, first error.
-    let contrib_blocks: Mutex<Vec<Option<ContribBlock<Square>>>> =
+    let contrib_blocks: Mutex<Vec<Option<ContribBlock<Packed>>>> =
         Mutex::new((0..n_snodes).map(|_| None).collect());
     let node_factors_out: Mutex<Vec<Option<NodeFactors>>> =
         Mutex::new((0..n_snodes).map(|_| None).collect());
@@ -4127,6 +4126,28 @@ fn build_task_plan(symbolic: &SymbolicFactorization, min_seeds: usize) -> Option
     })
 }
 
+/// The parallel driver's memory terms for this analysis (issue #249), from
+/// the same task plan the driver would build. `None` when the plan has too
+/// few seed tasks, so the driver would run the sequential path instead.
+pub(crate) fn parallel_memory_model(
+    symbolic: &SymbolicFactorization,
+) -> Option<crate::numeric::memory_model::ParallelModel> {
+    let plan = build_task_plan(symbolic, par_min_seeds())?;
+    let tasks: Vec<(usize, &[usize])> = (0..symbolic.supernodes.len())
+        .filter(|&i| {
+            plan.parent_task[i].is_some()
+                || plan.task_pending_init[i] > 0
+                || plan.seeds.binary_search(&i).is_ok()
+        })
+        .map(|i| (i, plan.owned[i].as_slice()))
+        .collect();
+    Some(crate::numeric::memory_model::parallel_model(
+        symbolic,
+        &tasks,
+        &plan.parent_task,
+    ))
+}
+
 /// Spawn one *task* — a subtree of supernodes per [`TaskPlan`] — into
 /// the rayon scope (issue #148: task-per-subtree, not per-supernode).
 ///
@@ -4180,7 +4201,7 @@ fn run_parallel_task<'a>(
     params: &'a NumericParams,
     plan: &'a TaskPlan,
     pending: &'a [std::sync::atomic::AtomicUsize],
-    contrib_blocks: &'a std::sync::Mutex<Vec<Option<ContribBlock<Square>>>>,
+    contrib_blocks: &'a std::sync::Mutex<Vec<Option<ContribBlock<Packed>>>>,
     node_factors_out: &'a std::sync::Mutex<Vec<Option<NodeFactors>>>,
     first_error: &'a std::sync::Mutex<Option<FeralError>>,
     thread_ws: &'a [std::sync::Mutex<FactorWorkspace>],

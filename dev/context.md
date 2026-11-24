@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-24T03:14:39Z
+Generated: 2026-11-24T12:44:28Z
 
 ## Latest Session
-File: dev/sessions/2026-11-24-02.md
+File: dev/sessions/2026-11-24-03.md
 ```
-# Session 2026-11-24-02
+# Session 2026-11-24-03
 
-**Benchmark caveat:** no KKT corpus in this container; the bench covers
-only the 2 committed fixtures (unchanged from 2026-11-24-01).
+**Benchmark caveat (read first):** no KKT corpus in this container
+(`data/matrices/` absent). The bench covered only the 2 committed fixtures
+(unchanged from 2026-11-24-01). The evidence for this session is Primal2_1000
+(n = 3.86M), rebuilt here from plato.asu.edu with `dev/scripts/mps_to_kkt.py`.
+No timing regressed on it; the parallel and sequential AMF factors got faster.
 
 ## Goal
-Issue #248: AutoRace recomputed the MC64 matching in every arm (fhnw-binschedule1:
-1294 s for the four-arm race). Share it, keep selection bit-identical, and
-re-measure fhnw-binschedule1 with a per-stage profile.
+Issue #249: real memory high-water was 1.4–2.6× `WorkEstimate::peak_bytes`,
+so `max_factor_bytes` bounded the prediction, not the process. Break the gap
+down, fix the estimate or the allocation, tighten the book's advice.
 
 ## Accomplished
-- 01003e7: `Mc64Memo` in src/symbolic/mod.rs, one per race, threaded
-  through resolve_prefix → symbolic_prefix_preprocess_auto →
-  symbolic_prefix_concrete. Stores only an uninterrupted Ok matching (the
-  #246 interrupt check moved into `get_or_compute`).
-  `symbolic_factorize_race_over` takes the candidate list for tests.
-  examples/issue248_race_mc64.rs times a race on a .mtx file.
-  Plan: dev/plans/issue-248-shared-mc64.md.
-- Tests: `autorace_computes_mc64_once_per_race` (mutation with a per-arm
-  memo fails it, 2 vs 1) and
-  `autorace_shared_mc64_selection_matches_independent_arms`. Its oracle is
-  each candidate run alone, then min factor_nnz_estimate, first wins on
-  ties. It gives the same perm on 3 matrices, for both candidate sets.
-  cargo test --workspace --release: 1370 passed, 0 failed.
-- fhnw-binschedule1 (rebuilt from plato.asu.edu MPS, n=1 914 525, nnz 10 525 851):
-  four-arm AutoRace **1007.3 s** (was 1294.4 s). MC64 ran once (51.8 s).
-  Same winner, Amf/LdltCompress, factor_nnz_estimate 3.2588e8.
-  VmHWM 2.27 GB. The winner's AMF ordering stage alone took 334 s. The ~955 s
-  that is not MC64 is ordering work across 8 prefixes, so **the orderings
-  dominate**, not MC64.
+- Probe `examples/issue249_memory_breakdown.rs`: counting allocator, heap
+  timeline, census of retained structures, `predict` mode.
+- **Breakdown** (Primal2 AMF; `dev/research/issue-249-memory-gap.md`):
+  - amalgamation fill: stored `Σ nrow·ncol` is 1.50× the column counts;
+  - per-node index data 0.78 GB;
+  - the analysis 0.77 GB;
+  - workspace and caches ~0.4 GB;
+  - under the parallel driver, square blocks of finished subtree tasks
+    waiting for the top chain, plus per-worker workspaces and pools.
+- 5895c4b: new `WorkEstimate` terms:
+  - `factor_stored_bytes`, `factor_index_bytes`, `analysis_bytes`,
+    `workspace_bytes`, `numeric_peak_bytes`;
+  - `peak_bytes` is now their sum (sequential);
+  - `peak_bytes_parallel(threads)` is a schedule-free bound (task-plan
+    frontier plus running tasks).
+- b2ce4b1: the parallel driver holds **packed** blocks. The recycled
+  contribution buffer is used only on a close fit
+  (`len ≤ cap ≤ len + max(len/8, 512)`). The model follows.
+- 1e51c36: a parallel `Solver` whose budget admits `peak_bytes` but not the
+  parallel bound runs the sequential driver for that call (bit-exact).
+  `ran_sequential_for_budget()` reports it. This replaces 5895c4b's refusal.
+- 5a2dd0a: an unfit pooled buffer is freed *before* the new block is
+  allocated (it was a live match temporary: a 0.35 GB spike per top-chain
+  front on AMD). The model counts the kernel's panel scratch.
+- Final, heap peak above input (GB):
 
-## Benchmark Results
-```
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-```
-Identical to 2026-11-24-01.
+  | case | old pred | new pred | measured before → after | wall before → after |
+  |---|---|---|---|---|
+  | AMF seq | 3.53 | 4.92 | 4.87 → 4.86 | 104–106 → 98 s |
+  | AMD seq | 8.30 | ~8.58 | 9.36 → 8.56 | 982 → 978 s |
+  | AMF par 4t | 3.53 | 10.15 (bound) | 7.63 → 5.89 | 69 → 60 s |
+  | AMD par 4t | 8.30 | 34.87 (bound) | n/a → 11.74 | n/a → 429 s |
 
-## Decisions Made
-- None architectural (an internal memo; no selection change).
-
-## Abandoned Approaches
-- None.
+- Tests:
+  - `tests/issue249_memory_model.rs`: a counting allocator shows the
+    prediction bounds the measured peak (seq 1.06–1.09×, par 1.20–1.25×;
 ```
 
 ## Git Status
 ```
-67ed188 dev: journal for session 2026-11-24-02 (issue #248) and refreshed context
-01003e7 perf(symbolic): compute MC64 once per AutoRace, not once per arm (#248)
-4051231 Merge pull request #247 from jkitchin/claude/zen-hamilton-tra4mp
-41f809e docs: accept issue #246 step 2 with its measured PDE2 cost
-698eaa1 test(interrupt): guard the single-thread assumption with a poll census
+c7ddad6 session: 2026-11-24-02 checkpoint (issue #249 memory model)
+5a2dd0a fix(memory): free an unfit pooled block before allocating; model kernel scratch (#249)
+1e51c36 feat(solver): over the parallel bound, a budgeted Solver runs sequential (#249)
+b2ce4b1 perf(memory): parallel driver holds packed blocks; pool recycles close fits (#249)
+5895c4b fix(estimate): peak_bytes models what Solver::factor really holds (#249)
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 495 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.13s
+test result: ok. 496 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.18s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-03.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -108,58 +108,58 @@ Identical to 2026-11-24-01.
 ```
 
 ## Recent Decisions
-nnz(L) 2.716e8, predicted peak 4.27 GB (the issue's two-arm race picked
-AMD at 6.79 GB). Cost: 1294 s symbolic in this container vs the issue's
-476 s for the two-arm race; each arm recomputes MC64 for its LdltCompress
-pass (follow-up). A slow race can now be bounded with `Interrupt`.
-Unvalidated on pounce's L1_sixm* / L2CTA3D.
+`grow_pooled_front`. `peak_bytes_parallel(threads)` bounds the parallel
+driver over every schedule: the task-plan frontier (max-weight antichain
+of task-root blocks) plus `threads + 1` running tasks. A parallel `Solver`
+whose budget admits `peak_bytes` but not the parallel bound runs the
+sequential driver for that factorization; it does not refuse. Two
+allocation changes make the model hold:
+- the parallel driver holds packed blocks;
+- `extract_contrib` recycles a pooled buffer only when
+  `len ≤ cap ≤ len + max(len/8, 512)`, so every block's capacity is
+  bounded. An unfit buffer is freed before the new block is allocated.
 
-## 2026-11-24 — `Auto`: `n > 100_000 && avg_deg < 5` → AMF (was AMD, #50)
+**Why.** The old `factor_bytes + peak_contrib_bytes` missed four things:
+amalgamation fill (1.50× the column counts on Primal2 AMF), per-node index
+data (0.78 GB), the analysis (0.77 GB) and the workspace. It ran
+1.4–2.6× below the measured memory, so `max_factor_bytes` did not protect
+the process. Square blocks in the parallel driver were a scoping leftover
+of the 2026-11-12 packing decision, not a requirement. The pool's
+`reserve` reuse let a block keep a larger buffer's capacity, which no
+schedule-free bound could cover. The parallel bound is loose (1.7× on AMF,
+3.0× on AMD), so refusing on it would reject jobs that fit. Falling back
+to the bit-exact sequential driver costs only time.
 
-**Context.** Issue #246: on Primal2_1000 (n = 3.86M), `Auto` → AMD predicts
-an 8.30 GB peak and refactors in 999 s; AMF predicts 3.53 GB and refactors
-in 84 s with identical inertia. #50 chose AMD for this branch on powerflow22,
-when AMF still had the large-n quantization inversion (fixed in 0f6eb9c)
-and was not measured.
-**Decision.** Route the branch to `Amf` (commit 1de3977). With this, `Auto`
-resolves to AMF for every n > 0. The now-redundant rules are kept for a
-separate simplification decision.
-**Rejected.** Racing AMD against AMF in this branch: twice the symbolic cost
-on every large low-degree matrix, for a choice where AMF's fill was never
-worse on the five public LPs measured.
-**Evidence.** Maintainer-machine gate (PR #247 comment 7119267924):
-- powerflow22: refactor 0.69 s AMD vs 0.68–0.71 s AMF, peak RSS 3.94 vs
-  3.92 GB, inertia identical.
-- **PDE2_0000: AMF is ~15% slower on the first factor (1.47 s vs
-  1.28–1.38 s) and ~17% slower per refactor (1.11–1.12 s vs 0.95–0.96 s),
-  i.e. +0.16 s, with inertia identical.** This is a measured cost of this
-  decision, accepted against Primal2's 12× refactor speed-up.
-- laptime (#208) is unreachable (average degree > 7, n < 1M).
-
-The corpus subset (n > 100k, average degree < 5) and `amf_corpus_oracle.rs`
-were not run. See dev/research/issue-246-low-degree-routing.md "Gate results".
+**Evidence.** `dev/research/issue-249-memory-gap.md` and journal
+2026-11-24-03. Primal2, sequential: AMF predicted 4.92 vs measured
+4.86 GB (old 3.53); AMD 8.58 vs 8.56 (old 8.30). AMF parallel, 4
+threads: 7.63 → 5.89 GB, wall 69 → 60 s. `tests/issue249_memory_model.rs`: the prediction bounds the
+measured heap peak on grids and a KKT, within 1.03–1.08× sequential and
+1.20–1.25× parallel. Stored terms equal the factors' real buffer lengths.
+`peak_contrib_bytes` keeps its classic square meaning (tried-and-rejected
+2026-11-12).
 
 ## Recent Tried-and-Rejected
-the contract for callers that use `SparseLu` as a rank-reveal probe. With
-PR #234 at dd98cb8, pounce's
-`crates/pounce-cli/tests/issue_1076_qgfrdxpn_active_set_prune_cap.rs`
-(`convex_qp_qgfrdxpn`, `solver_selection=qp-active-set`) went from
-SolveSucceeded, 3 553 iterations, 6.0 s on feral 0.22 to
-MaximumIterationsExceeded at 27 811 iterations, 50.6 s (objective 1.00569e11
-at the cap vs 1.00791e11 optimal); it reproduced on re-run. The other 2 156
-pounce tests passed, and pounce's default fixture sweep diffed empty
-because its default routing never reaches the rank probe. The only signal
-I had measured was fill (+0.27 % geomean over 40 synthetic bases, 36/40
-worse), which says nothing about which rows a rank reveal declares
-dependent.
 
-**Replaced with.** Exact reproduction of the 0.22 heap contents: peel-phase
-pushes are logged and heapified when the singleton stacks first run dry,
-minus entries for eliminated rows/columns. Digests are bit-identical to 0.22
-on 3 real and 40 synthetic bases, pinned by `tests/lu_markowitz_golden.rs`.
-Lesson: on a factorization other code uses for rank decisions, a change to
-pivot order is a behaviour change even when fill and residuals are fine;
-gate it on a golden pivot test, not on fill.
+## 2026-11-24 — issue #249 memory model
+
+- **Refusing a parallel factorization on `peak_bytes_parallel`** (stage
+  `"peak_parallel"`, in commit 5895c4b). The parallel figure is a
+  schedule-free bound: 1.65× the measured heap peak on Primal2 AMF with 4
+  threads (12.61 vs 7.63 GB with square blocks) and 2.6× on AMD (31.7 vs
+  12.27 GB). A 16 GB budget would have refused AMD, which fits in
+  12.3 GB. Replaced by running the sequential driver for that call.
+- **Bounding recycled block capacity by 2× the block length.** With the
+  old `clear()+reserve(len)` reuse, a block's capacity is
+  `max(pool capacity, 2·len)` by induction. That is bounded by twice the
+  largest block ever seen, not by twice its own length. The 2× allowance
+  also doubled the frontier term (Primal2 AMD parallel bound 45.5 GB).
+  Replaced by changing the recycle rule (close fit only), which bounds
+  every block by `len + max(len/8, 512)`.
+- **A postorder contribution model that ignored the pool's capacities**
+  (lengths only). It under-predicted Primal2 AMD sequential by 0.5%
+  (9.317 vs 9.364 GB measured), because recycled buffers kept larger
+  capacities.
 
 ## Source Files
 ```
@@ -202,6 +202,7 @@ src/lu/sparse_update.rs
 src/numeric/condition.rs
 src/numeric/contrib.rs
 src/numeric/factorize.rs
+src/numeric/memory_model.rs
 src/numeric/mod.rs
 src/numeric/reanalysis.rs
 src/numeric/solve.rs
@@ -273,6 +274,7 @@ tests/issue237_infnorm_reuse.rs
 tests/issue246_amf_quantization.rs
 tests/issue246_interrupt.rs
 tests/issue246_interrupt_threads.rs
+tests/issue249_memory_model.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
