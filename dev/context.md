@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-24T12:44:28Z
+Generated: 2026-11-24T14:40:00Z
 
 ## Latest Session
 File: dev/sessions/2026-11-24-03.md
@@ -59,11 +59,11 @@ down, fix the estimate or the allocation, tighten the book's advice.
 
 ## Git Status
 ```
-c7ddad6 session: 2026-11-24-02 checkpoint (issue #249 memory model)
-5a2dd0a fix(memory): free an unfit pooled block before allocating; model kernel scratch (#249)
-1e51c36 feat(solver): over the parallel bound, a budgeted Solver runs sequential (#249)
-b2ce4b1 perf(memory): parallel driver holds packed blocks; pool recycles close fits (#249)
-5895c4b fix(estimate): peak_bytes models what Solver::factor really holds (#249)
+afe4dc5 docs: CHANGELOG [0.25.0] section; book and README current for 0.25.0
+81cc2cb release: bump feral to 0.25.0 and the six ordering crates
+99eaacd Merge pull request #251 from jkitchin/claude/optimistic-mayer-57ril5
+95ed8da fix(memory): keep the small-block contribution pool of main (PR #251 review)
+5b2b996 Merge origin/main (#250, issue #248) into the #249 branch
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 496 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.18s
+test result: ok. 497 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.16s
 
 ```
 
@@ -140,16 +140,6 @@ measured heap peak on grids and a KKT, within 1.03–1.08× sequential and
 2026-11-12).
 
 ## Recent Tried-and-Rejected
-
-## 2026-11-24 — issue #249 memory model
-
-- **Refusing a parallel factorization on `peak_bytes_parallel`** (stage
-  `"peak_parallel"`, in commit 5895c4b). The parallel figure is a
-  schedule-free bound: 1.65× the measured heap peak on Primal2 AMF with 4
-  threads (12.61 vs 7.63 GB with square blocks) and 2.6× on AMD (31.7 vs
-  12.27 GB). A 16 GB budget would have refused AMD, which fits in
-  12.3 GB. Replaced by running the sequential driver for that call.
-- **Bounding recycled block capacity by 2× the block length.** With the
   old `clear()+reserve(len)` reuse, a block's capacity is
   `max(pool capacity, 2·len)` by induction. That is bounded by twice the
   largest block ever seen, not by twice its own length. The 2× allowance
@@ -160,6 +150,16 @@ measured heap peak on grids and a KKT, within 1.03–1.08× sequential and
   (lengths only). It under-predicted Primal2 AMD sequential by 0.5%
   (9.317 vs 9.364 GB measured), because recycled buffers kept larger
   capacities.
+
+## 2026-11-24 — issue #249: close-fit-only contribution recycling (PR #251 review)
+
+- **Recycling a pooled block buffer only when `len ≤ cap ≤ len +
+  max(len/8, 512)`.** Maintainer's A/B (61 parity KKTs, default `Solver`, 4
+  cores): 1.164× geomean refactor time vs main, max 1.70× (SSI_2597), 29/61
+  over 15% slower; 1.019× with main's reuse restored. Not reproduced in the
+  authoring container (0.96–0.98×, identical allocation counts), but
+  replaced by a rule that is main's for blocks under 64 KiB:
+  `RECYCLE_SMALL = 8192` entries and in-place growth for small blocks.
 
 ## Source Files
 ```

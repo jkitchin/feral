@@ -1,6 +1,6 @@
 [package]
 name = "feral-kahip"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -16,8 +16,8 @@ categories = ["mathematics", "science"]
 name = "feral_kahip"
 
 [dependencies]
-feral-ordering-core = { path = "../feral-ordering-core", version = "0.2" }
-feral-amd = { path = "../feral-amd", version = "0.2" }
-feral-metis = { path = "../feral-metis", version = "0.3" }
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.3" }
+feral-amd = { path = "../feral-amd", version = "0.3" }
+feral-metis = { path = "../feral-metis", version = "0.4" }
 
 [dev-dependencies]

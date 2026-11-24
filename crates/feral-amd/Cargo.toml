@@ -1,6 +1,6 @@
 [package]
 name = "feral-amd"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -16,6 +16,6 @@ categories = ["mathematics", "science"]
 name = "feral_amd"
 
 [dependencies]
-feral-ordering-core = { path = "../feral-ordering-core", version = "0.2" }
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.3" }
 
 [dev-dependencies]

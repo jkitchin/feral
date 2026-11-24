@@ -10,7 +10,7 @@ resolver = "3"
 
 [package]
 name = "feral"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -83,12 +83,12 @@ rayon = "1.10"
 # via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
 # src/ordering/amd.rs is still the default (OrderingMethod::Amd)
 # pending retirement per dev/decisions.md.
-feral-ordering-core = { path = "crates/feral-ordering-core", version = "0.2" }
-feral-amd = { path = "crates/feral-amd", version = "0.2" }
-feral-amf = { path = "crates/feral-amf", version = "0.2" }
-feral-metis = { path = "crates/feral-metis", version = "0.3" }
-feral-scotch = { path = "crates/feral-scotch", version = "0.3" }
-feral-kahip = { path = "crates/feral-kahip", version = "0.3" }
+feral-ordering-core = { path = "crates/feral-ordering-core", version = "0.3" }
+feral-amd = { path = "crates/feral-amd", version = "0.3" }
+feral-amf = { path = "crates/feral-amf", version = "0.3" }
+feral-metis = { path = "crates/feral-metis", version = "0.4" }
+feral-scotch = { path = "crates/feral-scotch", version = "0.4" }
+feral-kahip = { path = "crates/feral-kahip", version = "0.4" }
 
 [dev-dependencies]
 # The crate's own tests see the internal `EarlyAssembly::Always`; a

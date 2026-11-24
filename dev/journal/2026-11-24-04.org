@@ -1,0 +1,31 @@
+#+TITLE: Session 2026-11-24-04 journal (release 0.25.0)
+
+* 14:40 :release:versioning:
+Preparing feral 0.25.0. PR #247 (this branch) had merged into main
+(4051231), along with #250/#251; the branch was reset to origin/main
+99eaacd. Changes since v0.24.0: #246 (interrupt, max_factor_bytes, Auto ->
+AMF at n>100k avg_deg<5, 4-arm AutoRace at n>=1M, AMF score fix), #248
+(shared MC64 in AutoRace), #249 (peak_bytes model, parallel memory).
+
+The release-checklist script could not be executed in this container: a
+privacy hook refuses running it because its bump epilogue prints a
+crates.io curl that embeds a contact address. Its steps were replayed by
+hand (same awk edits, cargo update --workspace on both lockfiles).
+
+Ordering-crate staleness: all six publishable crates under crates/ changed
+since v0.24.0 with versions unchanged (e.g. feral-amd 0.2.2 at both refs;
+git diff v0.24.0..HEAD -- crates/feral-amd: 3 files, +136). release.yml
+would have silently skipped all six. OrderingError gained `Interrupted`
+(not #[non_exhaustive]) and the siblings now call
+feral_ordering_core::interrupt, absent in 0.2.4, so a `^0.2` requirement
+could resolve to a crate that does not compile against them. Bumped as
+breaking: ordering-core/amd/amf 0.3.0, metis/scotch/kahip 0.4.0, and every
+requirement moved (^0.3 / ^0.4).
+
+* 14:55 :docs:book:ordering:
+book/src/ordering.md still said `Auto` sends very-large sparse graphs to
+Amd, and that AutoRace races only {Amd, MetisND}. Both are stale after
+#246. Updated: Auto now ends at Amf on every non-empty matrix
+(choose_adaptive + pick_default_method in src/symbolic/mod.rs); AutoRace
+uses race_candidates(n). Also fixed two stale source comments (one still
+said "DRAFT pending the powerflow22 A/B"; step 2 was accepted in 41f809e).

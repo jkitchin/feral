@@ -195,7 +195,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "feral"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "approx",
  "criterion",
@@ -214,14 +214,14 @@ dependencies = [
 
 [[package]]
 name = "feral-amd"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "feral-ordering-core",
 ]
 
 [[package]]
 name = "feral-amf"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "feral-ordering-core",
 ]
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "feral-kahip"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "feral-amd",
  "feral-metis",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "feral-metis"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "feral-amd",
  "feral-ordering-core",
@@ -262,11 +262,11 @@ dependencies = [
 
 [[package]]
 name = "feral-ordering-core"
-version = "0.2.4"
+version = "0.3.0"
 
 [[package]]
 name = "feral-scotch"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "feral-amd",
  "feral-metis",
