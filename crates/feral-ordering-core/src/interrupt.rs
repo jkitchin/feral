@@ -6,9 +6,17 @@
 //! or [`check`] at safe points (between pivots, levels, trials and passes)
 //! with no change to their signatures.
 //!
-//! A thread-local is sound here because every ordering in this family runs
-//! entirely on the caller's thread. An ordering that goes parallel must
-//! forward the interrupt to its workers explicitly.
+//! **Single-thread assumption.** A thread-local is sound here because every
+//! ordering in this family (`feral-amd`, `-amf`, `-metis`, `-scotch`,
+//! `-kahip`), and feral's symbolic pipeline and MC64 matching, run
+//! entirely on the thread that called [`scope`]. If any of them ever moves
+//! work onto rayon or spawned threads, polls on those workers see *no*
+//! active interrupt, and the deadline silently stops working there. Code
+//! that goes parallel must capture the interrupt with [`current`] and
+//! re-install it on each worker with [`scope`]. Each ordering crate has a
+//! `tests/interrupt_threads.rs` that uses the [`census`] to fail if an
+//! ordering polls from a thread with no scope while its caller has one, so
+//! such a change cannot slip in unnoticed.
 //!
 //! **Sticky.** Once a poll inside a scope has seen the interrupt trigger,
 //! every later poll in that scope reports it, even if the flag is cleared.
@@ -20,7 +28,7 @@
 
 use crate::OrderingError;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -134,13 +142,76 @@ pub fn scope_if<R>(interrupt: Option<&Interrupt>, f: impl FnOnce() -> R) -> R {
 /// With no active interrupt, returns false.
 pub fn poll() -> bool {
     if TRIPPED.with(|t| t.get()) {
+        census::record(true);
         return true;
     }
-    let hit = ACTIVE.with(|a| a.borrow().as_ref().is_some_and(Interrupt::is_triggered));
+    let (present, hit) = ACTIVE.with(|a| {
+        let a = a.borrow();
+        (a.is_some(), a.as_ref().is_some_and(Interrupt::is_triggered))
+    });
+    census::record(present);
     if hit {
         TRIPPED.with(|t| t.set(true));
     }
     hit
+}
+
+/// The interrupt active on this thread, if any. Parallel code captures it
+/// here and re-installs it on each worker with [`scope`] (see the module
+/// docs on the single-thread assumption).
+pub fn current() -> Option<Interrupt> {
+    ACTIVE.with(|a| a.borrow().clone())
+}
+
+/// Opt-in poll census for tests that guard the single-thread assumption
+/// (PR #247 review).
+///
+/// While armed, every [`poll`]/[`check`] on any thread is counted as either
+/// *scoped* (its thread had a [`scope`] installed) or *unscoped*. A test arms
+/// it, runs an ordering inside a scope, and asserts `unscoped == 0` and
+/// `scoped > 0`. A non-zero `unscoped` means some poll ran on a thread the
+/// interrupt never reached. Disarmed (always, outside such tests), the cost
+/// is one relaxed atomic load per poll. Run each census test in its own
+/// test binary, so that no unrelated thread polls while it is armed.
+pub mod census {
+    use super::{AtomicBool, AtomicUsize, Ordering};
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static SCOPED: AtomicUsize = AtomicUsize::new(0);
+    static UNSCOPED: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline]
+    pub(super) fn record(scoped: bool) {
+        if ARMED.load(Ordering::Relaxed) {
+            let c = if scoped { &SCOPED } else { &UNSCOPED };
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Poll counts gathered by [`take`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Counts {
+        /// Polls from a thread with a scope installed.
+        pub scoped: usize,
+        /// Polls from a thread with no scope installed.
+        pub unscoped: usize,
+    }
+
+    /// Zero the counters and start counting.
+    pub fn arm() {
+        SCOPED.store(0, Ordering::Relaxed);
+        UNSCOPED.store(0, Ordering::Relaxed);
+        ARMED.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop counting and return what was counted since [`arm`].
+    pub fn take() -> Counts {
+        ARMED.store(false, Ordering::SeqCst);
+        Counts {
+            scoped: SCOPED.load(Ordering::Relaxed),
+            unscoped: UNSCOPED.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// `Err(OrderingError::Interrupted)` when [`poll`] is true.
@@ -264,5 +335,28 @@ mod tests {
             .expect("amd")
             .0;
         assert_eq!(base, inert);
+    }
+
+    /// The census catches exactly the failure the single-thread assumption
+    /// guards against: a worker thread polling while its parent has a scope.
+    /// (Other tests may poll concurrently while it is armed; counts only grow,
+    /// so `unscoped >= 1` stays a sound assertion. The `== 0` direction lives
+    /// in each ordering crate's own `tests/interrupt_threads.rs` binary.)
+    #[test]
+    fn census_detects_a_worker_thread_without_a_scope() {
+        census::arm();
+        scope(&Interrupt::after(Duration::from_secs(3600)), || {
+            assert!(current().is_some());
+            std::thread::spawn(|| {
+                assert!(current().is_none(), "scopes do not cross threads");
+                let _ = poll();
+            })
+            .join()
+            .expect("worker");
+            let _ = poll();
+        });
+        let c = census::take();
+        assert!(c.unscoped >= 1, "{c:?}");
+        assert!(c.scoped >= 1, "{c:?}");
     }
 }
