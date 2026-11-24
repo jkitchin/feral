@@ -3,7 +3,7 @@ resolver = "3"
 
 [package]
 name = "feral-python"
-version = "0.24.0"
+version = "0.25.0"
 # Edition 2021 on purpose (issue #147): pyo3 0.22's #[pymethods] and
 # #[pyfunction] expansions are not 2024-clean (~190 unsafe_op_in_unsafe_fn
 # warnings from macro-generated code). Revisit with a pyo3 upgrade.
