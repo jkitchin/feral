@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-24T01:42:35Z
+Generated: 2026-11-24T03:14:39Z
 
 ## Latest Session
-File: dev/sessions/2026-11-24-01.md
+File: dev/sessions/2026-11-24-02.md
 ```
-# Session 2026-11-24-01
+# Session 2026-11-24-02
 
-**Benchmark caveat (read first):** no KKT corpus in this container
-(`data/matrices/` absent). The bench covered only the 2 committed fixtures,
-so it is not comparable to corpus runs.
+**Benchmark caveat:** no KKT corpus in this container; the bench covers
+only the 2 committed fixtures (unchanged from 2026-11-24-01).
 
 ## Goal
-Address the pounce-side review on PR #247 (comment 7116780548): a time limit
-for the symbolic phase, wider AutoRace candidates at large n, and the memory
-caveat in the book. Continues session 2026-11-23-01 on the same branch.
+Issue #248: AutoRace recomputed the MC64 matching in every arm (fhnw-binschedule1:
+1294 s for the four-arm race). Share it, keep selection bit-identical, and
+re-measure fhnw-binschedule1 with a per-stage profile.
 
 ## Accomplished
-- 176c423: book table for real vs predicted memory (1.4–1.8× sequential,
-  ≈2.6× parallel) next to `max_factor_bytes`.
-- 0729754: research note and plan
-  (dev/research/issue-246-symbolic-deadline.md).
-- c69f7fe: **symbolic-phase interrupt.** `feral::Interrupt` (a deadline
-  and/or a cancel flag) is a scoped thread-local in feral-ordering-core,
-  polled at safe points:
-  - AMD/AMF every 64 pivots;
-  - METIS/SCOTCH per recursion node, level, trial and FM pass;
-  - KaHIP per recursion node;
-  - MC64 every 64 columns;
-  - between pipeline stages and race arms.
-
-  It returns `FeralError::Interrupted { stage }`, which `Solver::factor`
-  reports as `FatalError`. Wired through `SupernodeParams::interrupt`,
-  `Solver::with_interrupt` / `set_interrupt`, and
-  `*_order_interruptible` in each ordering crate.
-  - Both races used to swallow arm errors; they now propagate the interrupt.
-  - Tests first. cargo test --workspace --release: 1361 passed, 0 failed.
-  - fhnw `Auto` with a 60 s deadline stopped at 60.08 s, and `AutoRace`
-    with 30 s at 30.04 s. Primal2 MetisND with 10 s stopped at 10.02 s.
-- b9ad7cc: **AutoRace at n ≥ 1M** races {Amd, MetisND, ScotchND, Amf}.
-  - On fhnw it now picks Amf/LdltCompress (2.716e8 nnz, 4.27 GB peak). The
-    two-arm race picked AMD at 6.79 GB.
-  - The race took 1294 s vs 476 s (each arm recomputes MC64).
-
-- Second PR #247 review (comment 7119267924):
-  - **Step 2 gate passed on the maintainer's machine.** powerflow22 shows no
-    regression. PDE2_0000 shows AMF ~15–17% slower (+0.16 s), with identical
-    inertia. laptime is unreachable.
-  - Step 2 is accepted; decisions.md, CHANGELOG and the research note now
-    state the PDE2 cost.
-  - 698eaa1: documented the interrupt's single-thread assumption, added
-    `interrupt::current()` and an opt-in poll census, plus per-crate and
-    feral-level census tests (a mutation check caught a worker thread:
-    `unscoped: 169`). 1368 passed, 0 failed.
+- 01003e7: `Mc64Memo` in src/symbolic/mod.rs, one per race, threaded
+  through resolve_prefix → symbolic_prefix_preprocess_auto →
+  symbolic_prefix_concrete. Stores only an uninterrupted Ok matching (the
+  #246 interrupt check moved into `get_or_compute`).
+  `symbolic_factorize_race_over` takes the candidate list for tests.
+  examples/issue248_race_mc64.rs times a race on a .mtx file.
+  Plan: dev/plans/issue-248-shared-mc64.md.
+- Tests: `autorace_computes_mc64_once_per_race` (mutation with a per-arm
+  memo fails it, 2 vs 1) and
+  `autorace_shared_mc64_selection_matches_independent_arms`. Its oracle is
+  each candidate run alone, then min factor_nnz_estimate, first wins on
+  ties. It gives the same perm on 3 matrices, for both candidate sets.
+  cargo test --workspace --release: 1370 passed, 0 failed.
+- fhnw-binschedule1 (rebuilt from plato.asu.edu MPS, n=1 914 525, nnz 10 525 851):
+  four-arm AutoRace **1007.3 s** (was 1294.4 s). MC64 ran once (51.8 s).
+  Same winner, Amf/LdltCompress, factor_nnz_estimate 3.2588e8.
+  VmHWM 2.27 GB. The winner's AMF ordering stage alone took 334 s. The ~955 s
+  that is not MC64 is ordering work across 8 prefixes, so **the orderings
+  dominate**, not MC64.
 
 ## Benchmark Results
+```
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+```
+Identical to 2026-11-24-01.
+
+## Decisions Made
+- None architectural (an internal memo; no selection change).
+
+## Abandoned Approaches
+- None.
 ```
 
 ## Git Status
 ```
+67ed188 dev: journal for session 2026-11-24-02 (issue #248) and refreshed context
+01003e7 perf(symbolic): compute MC64 once per AutoRace, not once per arm (#248)
+4051231 Merge pull request #247 from jkitchin/claude/zen-hamilton-tra4mp
+41f809e docs: accept issue #246 step 2 with its measured PDE2 cost
 698eaa1 test(interrupt): guard the single-thread assumption with a poll census
-8d6ee65 session: 2026-11-24-01 checkpoint (PR #247 review: interrupt, race)
-b9ad7cc feat(ordering): AutoRace races four orderings at n >= 1M (#246)
-c69f7fe feat: interrupt the symbolic phase with a deadline or cancel flag (#246)
-0729754 docs: research note and plan for interrupting the symbolic phase
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 493 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.05s
+test result: ok. 495 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.13s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-02.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -103,7 +103,7 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-11-23-01 (same 2 fixtures).
+Identical to 2026-11-24-01.
 
 ```
 

@@ -1,0 +1,35 @@
+* 02:55 :issue-248:autorace:mc64:
+Issue #248: the n >= 1M AutoRace ran MC64 once per arm. Added `Mc64Memo`
+in src/symbolic/mod.rs: one memo per race, threaded through resolve_prefix
+→ symbolic_prefix_preprocess_auto → symbolic_prefix_concrete; stores only
+an uninterrupted Ok matching (the #246 interrupt check moved into
+get_or_compute). Factored `symbolic_factorize_race_over(candidates)` so a
+test can race RACE_CANDIDATES_LARGE on a small matrix.
+Tests: a saddle KKT [[I,Aᵀ],[A,0]] (n=301, predicate → LdltCompress).
+`autorace_computes_mc64_once_per_race`: MEMO_MC64_RUNS == 1 for both
+candidate sets. Mutation (fresh memo per arm) failed it with left 2,
+right 1 on [Amd, MetisND]; reverted. Selection oracle: each candidate run
+alone (own matching) + min factor_nnz_estimate first-wins → identical perm
+on saddle_kkt(100), saddle_kkt(257), tridiag(300), both sets.
+cargo test --workspace --release: 1370 passed, 0 failed (was 1368).
+Rebuilt the fhnw repro: plato.asu.edu fhnw-binschedule1.mps.bz2 → KKT
+[[I,Aᵀ],[A,-1e-8 I]] via highspy (scratch script): n=1 914 525,
+nnz 10 525 851, same as session 2026-11-23-01.
+
+* 03:20 :issue-248:autorace:mc64:bench:
+fhnw-binschedule1 four-arm AutoRace after 01003e7, this container,
+single-threaded (examples/issue248_race_mc64, FERAL_MC64_TRACE=1):
+1007.3 s total (was 1294.4 s in session 2026-11-24-01, -22%). MC64 ran
+exactly once: "call #1 ... matching 51751.6 ms". Same winner as before:
+Amf/LdltCompress, factor_nnz_estimate 3.2588e8 (= 1.2 × the 2.716e8
+nnz(L) reported last session), 816 539 supernodes, VmHWM 2.27 GB (was 2.71 GB).
+Winner's profile: ordering 334.07 s (AMF on the compressed graph);
+ldlt_compress 0.06 s (memo hit, since Amf is the last arm); every other
+stage < 1.1 s. Breakdown: 1007 s − 52 s MC64 ≈ 955 s is ordering work across
+8 prefixes (4 arms × {None, LdltCompress}). The orderings dominate, not
+MC64. The saving (287 s) is larger than 3 × 52 s = 155 s. Last session's
+run was on a different container, so part of the gap is machine variance.
+I did not separate the two.
+Implication: further speedup needs fewer prefixes, e.g. skipping the None
+arm per ordering, or pruning arms early on a partial fill estimate.
+Selection rules would change, so this is a behavioural decision, not a pure perf change.
