@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-24T01:42:35Z
+Generated: 2026-11-24T02:50:39Z
 
 ## Latest Session
 File: dev/sessions/2026-11-24-01.md
@@ -59,11 +59,11 @@ caveat in the book. Continues session 2026-11-23-01 on the same branch.
 
 ## Git Status
 ```
+4051231 Merge pull request #247 from jkitchin/claude/zen-hamilton-tra4mp
+41f809e docs: accept issue #246 step 2 with its measured PDE2 cost
 698eaa1 test(interrupt): guard the single-thread assumption with a poll census
 8d6ee65 session: 2026-11-24-01 checkpoint (PR #247 review: interrupt, race)
 b9ad7cc feat(ordering): AutoRace races four orderings at n >= 1M (#246)
-c69f7fe feat: interrupt the symbolic phase with a deadline or cancel flag (#246)
-0729754 docs: research note and plan for interrupting the symbolic phase
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 493 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.05s
+test result: ok. 493 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.11s
 
 ```
 
