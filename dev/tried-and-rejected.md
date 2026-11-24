@@ -6433,3 +6433,23 @@ on 3 real and 40 synthetic bases, pinned by `tests/lu_markowitz_golden.rs`.
 Lesson: on a factorization other code uses for rank decisions, a change to
 pivot order is a behaviour change even when fill and residuals are fine;
 gate it on a golden pivot test, not on fill.
+
+## 2026-11-24 — issue #249 memory model
+
+- **Refusing a parallel factorization on `peak_bytes_parallel`** (stage
+  `"peak_parallel"`, in commit 5895c4b). The parallel figure is a
+  schedule-free bound: 1.65× the measured heap peak on Primal2 AMF with 4
+  threads (12.61 vs 7.63 GB with square blocks) and 2.6× on AMD (31.7 vs
+  12.27 GB). A 16 GB budget would have refused AMD, which fits in
+  12.3 GB. Replaced by running the sequential driver for that call.
+- **Bounding recycled block capacity by 2× the block length.** With the
+  old `clear()+reserve(len)` reuse, a block's capacity is
+  `max(pool capacity, 2·len)` by induction. That is bounded by twice the
+  largest block ever seen, not by twice its own length. The 2× allowance
+  also doubled the frontier term (Primal2 AMD parallel bound 45.5 GB).
+  Replaced by changing the recycle rule (close fit only), which bounds
+  every block by `len + max(len/8, 512)`.
+- **A postorder contribution model that ignored the pool's capacities**
+  (lengths only). It under-predicted Primal2 AMD sequential by 0.5%
+  (9.317 vs 9.364 GB measured), because recycled buffers kept larger
+  capacities.

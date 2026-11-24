@@ -4,6 +4,58 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `WorkEstimate::peak_bytes` predicts the real high-water (#249)
+- `peak_bytes` ran 1.4–2.6× below the measured memory of `Solver::factor`
+  on large KKTs, so `max_factor_bytes` bounded the prediction, not the
+  process. It is now `analysis_bytes + workspace_bytes +
+  numeric_peak_bytes`, built from these new `WorkEstimate` fields:
+  - `factor_stored_bytes`: the dense supernode blocks the numeric phase
+    keeps, `Σ nrow·ncol`. This includes amalgamation's explicit zeros,
+    which `factor_bytes` (1.2 × column counts) misses: 1.25× on
+    Primal2_1000.
+  - `factor_index_bytes`: row indices, the in-front pivot permutations,
+    `D` and the node records.
+  - `analysis_bytes`: the cached analysis itself.
+  - `workspace_bytes`: the permuted matrix copy, the permute cache, the
+    fingerprint pattern, and `O(n)` scratch.
+  - `numeric_peak_bytes`: a walk of the driver's allocation order.
+
+  On the Primal2_1000 LP KKT (n = 3.86M, sequential) it predicts 4.92 GB
+  against 4.86 GB measured under AMF (before: 3.53 GB), and 8.58 GB against
+  8.56 GB under AMD (before: 8.30 GB).
+- `WorkEstimate::peak_bytes_parallel(threads)` bounds the parallel driver
+  over every schedule. The new fields `parallel_frontier_bytes`,
+  `parallel_running_bytes`, `parallel_worker_bytes` and
+  `parallel_shared_bytes` hold its terms. The bound is conservative:
+  1.7× measured on Primal2 AMF with 4 threads, 3.0× on AMD.
+- A parallel `Solver` whose `max_factor_bytes` admits `peak_bytes` but not
+  `peak_bytes_parallel` now runs that factorization on the sequential
+  driver instead (bit-exact). The new `Solver::ran_sequential_for_budget()`
+  reports when this happened.
+- **Source-compatibility:** new public fields on `WorkEstimate`, so code
+  that builds one with a struct literal must add them. `peak_bytes` has a
+  new meaning.
+
+### Changed — less memory in the parallel driver and the contribution pool (#249)
+- The parallel task-graph driver holds contribution blocks packed (lower
+  triangle), as the sequential drivers have since 2026-11-12. Factors are
+  unchanged.
+- `extract_contrib` reuses the pooled buffer of a consumed child only when
+  it fits the new block closely (`len ≤ capacity ≤ len + max(len/8, 512)`).
+  Otherwise it allocates the block exactly, after freeing the unfit
+  buffer (it used to stay live beside the new block). A larger recycled
+  buffer had pinned its excess until the block's parent assembled it; a
+  smaller one was reallocated anyway. Values are unchanged.
+- Together, measured heap peak on Primal2_1000 (above the input):
+
+  | | before | after |
+  |---|---|---|
+  | AMF, parallel 4 threads | 7.63 GB, 69 s | 5.89 GB, 60 s |
+  | AMD, sequential | 9.36 GB | 8.56 GB |
+  | AMF, sequential | 4.87 GB, 104–106 s | 4.86 GB, 98 s |
+- New probe: `examples/issue249_memory_breakdown.rs` (counting allocator,
+  heap timeline, census of retained structures).
+
 ### Added — interrupting the symbolic phase: `Interrupt` (#246, PR #247 review)
 - `feral::Interrupt` (a deadline and/or a cancel flag), installed with
   `Solver::with_interrupt` / `Solver::set_interrupt` or
