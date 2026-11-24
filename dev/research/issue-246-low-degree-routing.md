@@ -1,7 +1,7 @@
 # Issue #246 step 2 — `n > 100k && avg_deg < 5`: AMD → AMF (DRAFT)
 
 Date: 2026-11-23. Journal: `dev/journal/2026-11-23-01.org`.
-**Status: draft, pending the powerflow22 A/B.** powerflow22 is the
+**Status: accepted 2026-11-24 after the maintainer-machine gate (see "Gate results" below).** Originally a draft pending the powerflow22 A/B. powerflow22 is the
 calibration case for the current rule (#50). It is GAMS-licensed and not
 available in the container this was written in.
 
@@ -83,3 +83,44 @@ journal and is not addressed here.
 2. PDE2_0000 (corpus, n = 451k, avg 4.59): the same.
 3. Corpus bench (`cargo run --bin bench --release` with `data/matrices/`).
    Only matrices with n > 100k and avg_deg < 5 can change.
+
+## Gate results (maintainer machine, 2026-11-24, PR #247 comment 7119267924)
+
+Run with pounce's standalone `time_factor` reproducer at 8d6ee65, on Apple
+Silicon, single-threaded (`RAYON_NUM_THREADS=1 FERAL_PARALLEL=0`), default
+scaling and preprocess, ordering forced with `FERAL_ORDERING`. Peak RSS is
+from `/usr/bin/time -l`.
+
+**powerflow22** (n = 2 813 976, average degree 2.4): no regression.
+
+| ordering | first factor | refactor | 2nd dump factor | peak RSS |
+|---|---|---|---|---|
+| Amd (old Auto) | 2.87 s | 0.69 s | 0.46 s | 3.94 GB |
+| Amf | 2.92 s | 0.71 s | 0.45 s | 3.92 GB |
+| Auto (→ AMF) | 2.96 s | 0.68 s | 0.44 s | 3.92 GB |
+
+Inertia (940 248 negative) and ‖x‖∞ are identical across all three.
+
+**PDE2_0000** (n = 451 195, average degree ≈ 4.6): a small, consistent
+slowdown. Three repeats agreed within 0.03 s.
+
+| ordering | first factor | refactor | peak RSS |
+|---|---|---|---|
+| Amd | 1.28–1.38 s | 0.95–0.96 s | 820 MB |
+| Amf / Auto | 1.47 s | 1.11–1.12 s | 815 MB |
+
+AMF is about 15% slower on the first factor and 17% per refactor (+0.16 s
+absolute). Inertia (270 595 negative) and ‖x‖∞ are identical.
+
+**laptime (#208): not reachable by any step of #246.** n = 126 028 and its
+Jacobian has 460 027 nonzeros, so the full average degree is > 7 and the
+`avg_deg < 5` branch cannot fire. It is also below the 1M race threshold,
+and its AMF scores stay far below 2³¹, where step 1 is bit-identical.
+
+**Not run:** `tests/amf_corpus_oracle.rs` (no `.hamf4.json` sidecars
+locally) and the full corpus bench. Only n > 100k, average degree < 5
+matrices can change, and the maintainer offered to run that subset.
+
+**Decision:** keep step 2. The PDE2 cost (+0.16 s per factor) is small
+against Primal2's 999 s → 84 s refactor, and the calibration case
+(powerflow22) is unchanged.

@@ -8460,3 +8460,28 @@ AMD at 6.79 GB). Cost: 1294 s symbolic in this container vs the issue's
 476 s for the two-arm race; each arm recomputes MC64 for its LdltCompress
 pass (follow-up). A slow race can now be bounded with `Interrupt`.
 Unvalidated on pounce's L1_sixm* / L2CTA3D.
+
+## 2026-11-24 — `Auto`: `n > 100_000 && avg_deg < 5` → AMF (was AMD, #50)
+
+**Context.** Issue #246: on Primal2_1000 (n = 3.86M), `Auto` → AMD predicts
+an 8.30 GB peak and refactors in 999 s; AMF predicts 3.53 GB and refactors
+in 84 s with identical inertia. #50 chose AMD for this branch on powerflow22,
+when AMF still had the large-n quantization inversion (fixed in 0f6eb9c)
+and was not measured.
+**Decision.** Route the branch to `Amf` (commit 1de3977). With this, `Auto`
+resolves to AMF for every n > 0. The now-redundant rules are kept for a
+separate simplification decision.
+**Rejected.** Racing AMD against AMF in this branch: twice the symbolic cost
+on every large low-degree matrix, for a choice where AMF's fill was never
+worse on the five public LPs measured.
+**Evidence.** Maintainer-machine gate (PR #247 comment 7119267924):
+- powerflow22: refactor 0.69 s AMD vs 0.68–0.71 s AMF, peak RSS 3.94 vs
+  3.92 GB, inertia identical.
+- **PDE2_0000: AMF is ~15% slower on the first factor (1.47 s vs
+  1.28–1.38 s) and ~17% slower per refactor (1.11–1.12 s vs 0.95–0.96 s),
+  i.e. +0.16 s, with inertia identical.** This is a measured cost of this
+  decision, accepted against Primal2's 12× refactor speed-up.
+- laptime (#208) is unreachable (average degree > 7, n < 1M).
+
+The corpus subset (n > 100k, average degree < 5) and `amf_corpus_oracle.rs`
+were not run. See dev/research/issue-246-low-degree-routing.md "Gate results".

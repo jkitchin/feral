@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-24T01:13:35Z
+Generated: 2026-11-24T01:42:35Z
 
 ## Latest Session
 File: dev/sessions/2026-11-24-01.md
@@ -43,27 +43,27 @@ caveat in the book. Continues session 2026-11-23-01 on the same branch.
     two-arm race picked AMD at 6.79 GB.
   - The race took 1294 s vs 476 s (each arm recomputes MC64).
 
+- Second PR #247 review (comment 7119267924):
+  - **Step 2 gate passed on the maintainer's machine.** powerflow22 shows no
+    regression. PDE2_0000 shows AMF ~15–17% slower (+0.16 s), with identical
+    inertia. laptime is unreachable.
+  - Step 2 is accepted; decisions.md, CHANGELOG and the research note now
+    state the PDE2 cost.
+  - 698eaa1: documented the interrupt's single-thread assumption, added
+    `interrupt::current()` and an opt-in poll census, plus per-crate and
+    feral-level census tests (a mutation check caught a worker thread:
+    `unscoped: 169`). 1368 passed, 0 failed.
+
 ## Benchmark Results
-```
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-```
 ```
 
 ## Git Status
 ```
+698eaa1 test(interrupt): guard the single-thread assumption with a poll census
+8d6ee65 session: 2026-11-24-01 checkpoint (PR #247 review: interrupt, race)
 b9ad7cc feat(ordering): AutoRace races four orderings at n >= 1M (#246)
 c69f7fe feat: interrupt the symbolic phase with a deadline or cancel flag (#246)
 0729754 docs: research note and plan for interrupting the symbolic phase
-176c423 book: document real-vs-predicted memory gap next to max_factor_bytes
-5cb03f9 session: update 2026-11-23-01 checkpoint (issue #246 steps 2-3)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 493 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.02s
+test result: ok. 493 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.05s
 
 ```
 
@@ -108,36 +108,36 @@ Identical to 2026-11-23-01 (same 2 fixtures).
 ```
 
 ## Recent Decisions
-/ `FeralError::Interrupted { stage }`. A single variant covers both deadline
-and cancel; the host asks its `Interrupt` which one fired.
-**Rejected.** An explicit `&Interrupt` parameter through every ordering
-helper: dozens of signature changes across five crates for the same
-behaviour. That is only needed if an ordering becomes multi-threaded, and the
-module docs say so. A `DeadlineExceeded` name (the reviewer's suggestion):
-wrong for a cancel flag. Polling inside the numeric phase: it needs its own
-safe-point analysis of the parallel driver, so it is out of scope.
-**Evidence.** dev/research/issue-246-symbolic-deadline.md. 1361/0 tests.
-fhnw Auto with 60 s stopped at 60.08 s; AutoRace with 30 s at 30.04 s;
-Primal2 MetisND with 10 s at 10.02 s.
-
-## 2026-11-24 — AutoRace races {Amd, MetisND, ScotchND, Amf} at n ≥ 1M
-
-**Context.** PR #247 review: at n ≥ 1M the two-arm race misses the best
-ordering. With the monotone AMF fix, AMF beats AMD on fhnw. pounce
-measured SCOTCH as best on L1_sixm250obs (158 GB predicted vs METIS 187,
-AMD 544).
-**Decision.** `race_candidates(n)`: `RACE_CANDIDATES_LARGE = {Amd, MetisND,
-ScotchND, Amf}` for `n >= RACE_LARGE_N = 1_000_000`, otherwise the measured
-`{Amd, MetisND}` pair. The small set is a prefix of the large one, so ties
-resolve as before. The user chose this scope (large n only) on 2026-11-24.
-**Rejected.** Adding Amf at every n: #208 recorded AMF as a race arm
-changing pounce's laptime outcome on a mid-sized collocation KKT.
-**Evidence.** fhnw-binschedule1 widened AutoRace: resolved Amf/LdltCompress,
 nnz(L) 2.716e8, predicted peak 4.27 GB (the issue's two-arm race picked
 AMD at 6.79 GB). Cost: 1294 s symbolic in this container vs the issue's
 476 s for the two-arm race; each arm recomputes MC64 for its LdltCompress
 pass (follow-up). A slow race can now be bounded with `Interrupt`.
 Unvalidated on pounce's L1_sixm* / L2CTA3D.
+
+## 2026-11-24 — `Auto`: `n > 100_000 && avg_deg < 5` → AMF (was AMD, #50)
+
+**Context.** Issue #246: on Primal2_1000 (n = 3.86M), `Auto` → AMD predicts
+an 8.30 GB peak and refactors in 999 s; AMF predicts 3.53 GB and refactors
+in 84 s with identical inertia. #50 chose AMD for this branch on powerflow22,
+when AMF still had the large-n quantization inversion (fixed in 0f6eb9c)
+and was not measured.
+**Decision.** Route the branch to `Amf` (commit 1de3977). With this, `Auto`
+resolves to AMF for every n > 0. The now-redundant rules are kept for a
+separate simplification decision.
+**Rejected.** Racing AMD against AMF in this branch: twice the symbolic cost
+on every large low-degree matrix, for a choice where AMF's fill was never
+worse on the five public LPs measured.
+**Evidence.** Maintainer-machine gate (PR #247 comment 7119267924):
+- powerflow22: refactor 0.69 s AMD vs 0.68–0.71 s AMF, peak RSS 3.94 vs
+  3.92 GB, inertia identical.
+- **PDE2_0000: AMF is ~15% slower on the first factor (1.47 s vs
+  1.28–1.38 s) and ~17% slower per refactor (1.11–1.12 s vs 0.95–0.96 s),
+  i.e. +0.16 s, with inertia identical.** This is a measured cost of this
+  decision, accepted against Primal2's 12× refactor speed-up.
+- laptime (#208) is unreachable (average degree > 7, n < 1M).
+
+The corpus subset (n > 100k, average degree < 5) and `amf_corpus_oracle.rs`
+were not run. See dev/research/issue-246-low-degree-routing.md "Gate results".
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
@@ -272,6 +272,7 @@ tests/issue227_reanalysis.rs
 tests/issue237_infnorm_reuse.rs
 tests/issue246_amf_quantization.rs
 tests/issue246_interrupt.rs
+tests/issue246_interrupt_threads.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs

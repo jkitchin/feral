@@ -38,3 +38,22 @@ arm runs its own preprocess race and so its own MC64 matching (four MC64
 runs at ~minutes each on fhnw): an obvious follow-up is sharing one MC64
 cache across arms. Primal2 MetisND with a 10 s deadline stopped at
 10.02 s (stage "ordering"), the L2CTA3D-style case.
+
+* 11:45 :issue-246:pr-247:review:interrupt:routing:
+Maintainer comment 7119267924 on PR #247. Step 2 gate: powerflow22 shows no
+regression (refactor AMD 0.69 s vs AMF 0.68–0.71 s; inertia 940 248 negative,
+identical). PDE2_0000 shows a small, consistent slowdown (AMF refactor
+1.11–1.12 s vs AMD 0.95–0.96 s, first factor 1.47 vs 1.28–1.38 s; ~15–17%,
++0.16 s; inertia identical). laptime is unreachable (average degree > 7,
+n < 1M). Asks: (1) record the PDE2 number; (2) document the interrupt's
+single-thread assumption, plus a check that catches unscoped polls.
+Done: (1) CHANGELOG table, decisions.md entry (step 2 accepted, with the
+PDE2 cost stated), and a gate-results section in the research note. (2) A
+module-doc "Single-thread assumption" section; `interrupt::current()` for
+parallel code to forward the interrupt; an opt-in `interrupt::census`
+(armed: count scoped vs unscoped polls; disarmed: one relaxed load). A
+per-crate tests/interrupt_threads.rs and feral
+tests/issue246_interrupt_threads.rs each run alone in their own binary and
+assert unscoped == 0, scoped > 0. Mutation check: running amd_order_full
+on a std::thread::scope worker inside amd_order_interruptible made the amd
+census test fail with Counts { scoped: 0, unscoped: 169 }; reverted.

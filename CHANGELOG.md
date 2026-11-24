@@ -32,13 +32,19 @@ All notable changes to FERAL will be documented in this file.
   races `{Amd, MetisND}` as before, so pounce's fixtures and the #208
   laptime case are unaffected. `race_candidates(n)` is public.
 
-### Changed — `Auto` routes very-large low-degree matrices to AMF, not AMD (#246, pending validation)
+### Changed — `Auto` routes very-large low-degree matrices to AMF, not AMD (#246)
 - `n > 100_000` with full average degree < 5 now resolves to `Amf` (was
-  `Amd`, #50). On the Primal2_1000 LP KKT (n = 3.86M), nnz(L) drops from
-  3.69e8 to 2.08e8, the predicted peak from 8.30 GB to 3.53 GB, and
-  sequential refactor time from 999 s to 84 s, with identical inertia. On
-  the network LPs measured, fill is within 0.6% of AMD's.
-- Pending a powerflow22 / PDE2 regression check before release.
+  `Amd`, #50). Measured single-threaded:
+
+  | matrix | n | AMD (old `Auto`) | AMF (new `Auto`) | inertia |
+  |---|---|---|---|---|
+  | Primal2_1000 LP KKT | 3.86M | refactor 999 s, predicted peak 8.30 GB | refactor 84 s, peak 3.53 GB | identical |
+  | powerflow22 (the #50 calibration case) | 2.81M | refactor 0.69 s, peak RSS 3.94 GB | refactor 0.68–0.71 s, 3.92 GB | identical |
+  | PDE2_0000 | 451k | refactor 0.95–0.96 s, first factor 1.28–1.38 s | refactor 1.11–1.12 s, first factor 1.47 s | identical |
+
+- **Cost:** PDE2_0000 is about 15% slower on the first factor and 17% slower
+  per refactor (+0.16 s). On the network LPs measured, fill is within 0.6%
+  of AMD's.
 
 ### Added — memory budget for the analysis: `max_factor_bytes` (#246)
 - `Solver::with_max_factor_bytes(Some(bytes))` and
