@@ -4127,6 +4127,28 @@ fn build_task_plan(symbolic: &SymbolicFactorization, min_seeds: usize) -> Option
     })
 }
 
+/// The parallel driver's memory terms for this analysis (issue #249), from
+/// the same task plan the driver would build. `None` when the plan has too
+/// few seed tasks, so the driver would run the sequential path instead.
+pub(crate) fn parallel_memory_model(
+    symbolic: &SymbolicFactorization,
+) -> Option<crate::numeric::memory_model::ParallelModel> {
+    let plan = build_task_plan(symbolic, par_min_seeds())?;
+    let tasks: Vec<(usize, &[usize])> = (0..symbolic.supernodes.len())
+        .filter(|&i| {
+            plan.parent_task[i].is_some()
+                || plan.task_pending_init[i] > 0
+                || plan.seeds.binary_search(&i).is_ok()
+        })
+        .map(|i| (i, plan.owned[i].as_slice()))
+        .collect();
+    Some(crate::numeric::memory_model::parallel_model(
+        symbolic,
+        &tasks,
+        &plan.parent_task,
+    ))
+}
+
 /// Spawn one *task* — a subtree of supernodes per [`TaskPlan`] — into
 /// the rayon scope (issue #148: task-per-subtree, not per-supernode).
 ///

@@ -116,8 +116,12 @@ pub struct SupernodeParams {
     ///    finish, against the predicted factor bytes
     ///    ([`WorkEstimate::factor_bytes`]). This stops a bad ordering
     ///    before the finish's O(factor) allocations;
-    /// 2. after the finish, against the full predicted peak
-    ///    ([`WorkEstimate::peak_bytes`]: factor plus contribution blocks).
+    /// 2. after the finish, against the full predicted peak of the
+    ///    sequential driver ([`WorkEstimate::peak_bytes`]: the analysis,
+    ///    workspace, stored factor and contribution blocks; issue #249).
+    ///
+    /// `Solver` adds a third check when its parallel driver is on, against
+    /// `WorkEstimate::peak_bytes_parallel` for its thread count.
     ///
     /// The prediction assumes no delayed pivots. Numeric delays can grow
     /// fronts past it, so leave headroom against physical memory.

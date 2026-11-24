@@ -148,6 +148,9 @@ name = "issue237_permute_warm"
 name = "issue237_scope_probe"
 
 [[example]]
+name = "issue249_memory_breakdown"
+
+[[example]]
 name = "lu_fill_orderings"
 
 [[example]]

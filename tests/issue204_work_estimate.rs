@@ -113,13 +113,43 @@ fn dense_factor_nnz_and_shape_match_the_closed_form() {
 }
 
 #[test]
-fn peak_bytes_is_the_factor_plus_the_transient_peak() {
+fn peak_bytes_is_the_sum_of_its_documented_parts() {
     // The headline number a host budgets against must be the sum of its
-    // two documented parts, on a matrix where the transient part is
-    // actually non-zero.
+    // documented parts, on a matrix where the transient part is actually
+    // non-zero. Issue #249 redefined it from `factor_bytes +
+    // peak_contrib_bytes` (which ran 1.4-2.6x below the measured
+    // high-water) to analysis + workspace + the simulated numeric peak.
     let e = estimate(&tridiag(2000));
-    assert_eq!(e.peak_bytes, e.factor_bytes + e.peak_contrib_bytes);
+    assert_eq!(
+        e.peak_bytes,
+        e.analysis_bytes + e.workspace_bytes + e.numeric_peak_bytes
+    );
     assert!(e.n_supernodes > 1, "expected a real supernode tree");
+    assert!(e.peak_contrib_bytes > 0);
+    // The numeric peak holds at least the whole stored factor, and at
+    // most the factor plus the contribution peak plus the frontal pool
+    // (whose capacity is under twice the largest front).
+    let stored = e.factor_stored_bytes + e.factor_index_bytes;
+    assert!(e.numeric_peak_bytes >= stored);
+    assert!(
+        e.numeric_peak_bytes <= stored + e.peak_contrib_bytes * 2 + 2 * e.max_front_bytes,
+        "numeric peak {} above factor {} + contrib {} + pool",
+        e.numeric_peak_bytes,
+        stored,
+        e.peak_contrib_bytes
+    );
+}
+
+#[test]
+fn dense_stored_factor_is_the_full_square_block() {
+    // Hand oracle (issue #249): a dense matrix is one supernode with
+    // nrow = ncol = n, and the numeric phase stores its whole n x n block
+    // (strict upper triangle included), n*n*8 bytes, against the
+    // n(n+1)/2 of the column counts.
+    for n in [5usize, 40] {
+        let e = estimate(&dense_spd(n));
+        assert_eq!(e.factor_stored_bytes, n * n * 8, "order {n}");
+    }
 }
 
 #[test]
