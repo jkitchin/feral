@@ -95,6 +95,18 @@ pub enum FeralError {
         budget_bytes: usize,
         stage: &'static str,
     },
+
+    /// The caller's [`Interrupt`] triggered during the symbolic phase
+    /// (issue #246): its deadline passed or its cancel flag was set.
+    /// `stage` names the safe point that noticed: `"ordering"` (inside the
+    /// fill-reducing ordering), `"ldlt_compress"` (MC64 matching),
+    /// `"column_counts"`, `"race"` (between race arms), `"finish"` or
+    /// `"entry"`. No analysis is returned or cached. To tell a deadline from
+    /// a cancel, ask the `Interrupt` itself (`deadline_passed()`,
+    /// `flag_set()`).
+    ///
+    /// [`Interrupt`]: crate::Interrupt
+    Interrupted { stage: &'static str },
 }
 
 impl std::fmt::Display for FeralError {
@@ -141,7 +153,11 @@ impl std::fmt::Display for FeralError {
                     "LU basis update budget exceeded; refactor required (issue #81)"
                 )
             }
-            FeralError::MemoryBudgetExceeded {
+FeralError::Interrupted { stage } => write!(
+                f,
+                "symbolic analysis interrupted at stage {stage} (deadline or cancel flag, issue #246)"
+            ),
+                        FeralError::MemoryBudgetExceeded {
                 predicted_bytes,
                 budget_bytes,
                 stage,

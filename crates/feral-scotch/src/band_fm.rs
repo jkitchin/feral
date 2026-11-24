@@ -24,6 +24,10 @@ use std::collections::{BinaryHeap, VecDeque};
 use feral_metis::internals::graph::Graph;
 use feral_metis::internals::initial_partition::{cut_size, part_weight, PART_A, PART_B};
 
+/// Heap pops between interrupt polls inside an FM pass (issue #246).
+/// Stopping a pass early is the same as the heap running dry.
+const HEAP_POLL_STRIDE: usize = 1024;
+
 /// Refine an edge bisection by band FM with anchor supervertices.
 ///
 /// `labels[v] ∈ {PART_A, PART_B}` on entry and exit. `width` is the
@@ -283,6 +287,9 @@ fn refine_band(
     let mut pass_cut = cut_size(sub, labels);
 
     for _pass in 0..max_passes {
+        if feral_ordering_core::interrupt::poll() {
+            break;
+        }
         let before_pass = pass_cut;
         let mut gain: Vec<i32> = vec![0; n];
         compute_gains(sub, labels, &mut gain);
@@ -312,7 +319,12 @@ fn refine_band(
         let mut best_b_w = b_w;
         let mut no_improve: u32 = 0;
 
+        let mut pops = 0usize;
         while let Some((_, Reverse(v), stamp)) = heap.pop() {
+            pops += 1;
+            if pops % HEAP_POLL_STRIDE == 0 && feral_ordering_core::interrupt::poll() {
+                break;
+            }
             let vu = v as usize;
             if locked[vu] {
                 continue;

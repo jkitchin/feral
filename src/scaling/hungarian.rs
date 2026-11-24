@@ -540,6 +540,15 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
     let mut heap = IndexHeap::new(m, &mut stats);
 
     for jord in 0..n {
+        // Issue #246: when the symbolic phase's interrupt triggers, stop
+        // augmenting. The columns left unmatched look like a structurally
+        // deficient matrix, a state this routine already handles, and the
+        // symbolic caller discards the result after its own interrupt
+        // check. With no interrupt installed (the numeric scaling path)
+        // this is one thread-local read per 64 columns.
+        if jord % 64 == 0 && feral_ordering_core::interrupt::poll() {
+            break;
+        }
         if jperm[jord] != NONE {
             continue;
         }

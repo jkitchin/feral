@@ -80,6 +80,9 @@ pub fn compute_vertex_separator(
     let mut b_w = part_weight(graph, labels, PART_B);
 
     for _ in 0..pass_cap {
+        if feral_ordering_core::interrupt::poll() {
+            break;
+        }
         let before = sep_w;
         let (new_sep_w, new_a_w, new_b_w) = fm_pass(
             graph,

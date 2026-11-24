@@ -28,6 +28,10 @@ pub use dense::factor::{
 pub use dense::matrix::SymmetricMatrix;
 pub use dense::solve::{solve, solve_refined};
 pub use error::FeralError;
+/// Deadline and/or cancel flag for the symbolic phase (issue #246). See
+/// [`symbolic::supernode::SupernodeParams::interrupt`] and
+/// [`Solver::with_interrupt`].
+pub use feral_ordering_core::interrupt::Interrupt;
 pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use io::sidecar::{read_sidecar, KktSidecar, SidecarInertia};

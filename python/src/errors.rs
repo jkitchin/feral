@@ -71,6 +71,7 @@ pub(crate) fn map_feral_err(e: RustFeralError) -> PyErr {
         e @ RustFeralError::MemoryBudgetExceeded { .. } => {
             MemoryBudgetExceeded::new_err(e.to_string())
         }
+        e @ RustFeralError::Interrupted { .. } => FactorError::new_err(e.to_string()),
     }
 }
 

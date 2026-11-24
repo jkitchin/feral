@@ -103,6 +103,8 @@ fn recurse(
     rng: &mut SplitMix,
     stats: &mut ScotchStats,
 ) -> Result<(), OrderingError> {
+    // Issue #246: one interrupt check per recursion node.
+    feral_ordering_core::interrupt::check()?;
     let n = subgraph.nvtxs as usize;
     if n == 0 {
         return Ok(());
@@ -132,6 +134,9 @@ fn recurse(
     }
 
     let labels = multilevel_node_bisection(subgraph, opts, rng, stats);
+    // Issue #246: an interrupted bisection returns early with labels that
+    // may not match `subgraph`; never use them.
+    feral_ordering_core::interrupt::check()?;
 
     let mut a_verts: Vec<i32> = Vec::new();
     let mut b_verts: Vec<i32> = Vec::new();
@@ -218,6 +223,9 @@ fn multilevel_node_bisection(
     let mut best_labels: Vec<u8> = vec![PART_A; coarsest.nvtxs as usize];
     let mut best_cut: i32 = i32::MAX;
     for trial in 0..opts.n_sep_trials {
+        if feral_ordering_core::interrupt::poll() {
+            return best_labels;
+        }
         let mut trial_labels = if trial % 2 == 0 {
             initial_bisect_ggp(coarsest, rng, target)
         } else {
@@ -263,6 +271,11 @@ fn multilevel_node_bisection(
             opts.fm_pass_cap,
         );
         for level_idx in (0..levels.len()).rev() {
+            // Issue #246: return at once — `labels` is sized for this level,
+            // and the caller discards it after its `interrupt::check()`.
+            if feral_ordering_core::interrupt::poll() {
+                return labels;
+            }
             let cg = &levels[level_idx];
             let prev_graph: &Graph = if level_idx == 0 {
                 graph
@@ -291,6 +304,11 @@ fn multilevel_node_bisection(
     // boundary; on level 0 (the original `graph`) this is the SCOTCH
     // refinement step that feeds the direct vertex separator below.
     for level_idx in (0..levels.len()).rev() {
+        // Issue #246: return at once — `labels` is sized for this level,
+        // and the caller discards it after its `interrupt::check()`.
+        if feral_ordering_core::interrupt::poll() {
+            return labels;
+        }
         let cg = &levels[level_idx];
         let prev_graph: &Graph = if level_idx == 0 {
             graph

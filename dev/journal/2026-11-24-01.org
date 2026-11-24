@@ -1,0 +1,30 @@
+* 09:30 :issue-246:pr-247:interrupt:
+Continuation of session 2026-11-23-01 (same branch). The PR #247 review
+asked for a way to stop the symbolic phase. The user chose the full hook
+(including inside the orderings) plus AutoRace widening at n >= 1M, both in
+this PR. Design (dev/research/issue-246-symbolic-deadline.md): a scoped
+thread-local `Interrupt` (deadline + cancel flag) in feral-ordering-core,
+polled at safe points. This is sound because the symbolic phase and every
+ordering crate are single-threaded (no rayon in ordering crates or
+src/symbolic). Polls are sticky within a scope, so non-Result loops break
+early and the next `check()?` up the stack turns that into
+`Interrupted`; partial intermediates are never used. Gotcha found while
+reading: breaking the METIS/SCOTCH uncoarsening loop would leave `labels`
+sized for a coarser graph, and `construct_separator` would index past the
+end, so those loops `return labels` and `recurse` checks immediately after
+`multilevel_node_bisection`. Second gotcha: both races swallowed arm
+errors (AutoRace skips failed arms; the preprocess race falls back to None
+on any LdltCompress error), so an interrupt in an arm would have silently
+yielded a result. Both now propagate `Interrupted`. MC64 checks before
+using its (possibly partial) matching.
+Tests: the ordering-core loop test failed first (left None vs
+Some(Interrupted)) and passed after the loop polls. Per-crate tests/interrupt.rs
+for amd/amf/metis/scotch/kahip (expired + flag → Interrupted; none and far →
+bit-identical). feral: expired interrupt × {Amd, Amf, MetisND, ScotchND,
+KahipND, Auto, AutoRace} × {None, LdltCompress, Auto} preprocess →
+Interrupted with FINISH_RUNS == 0; a flag set from another thread at 1/10
+of the baseline stops MetisND on a 300×300 grid; Solver refuses, caches
+nothing, and recovers after set_interrupt(None). cargo test --workspace
+--release: 1361 passed, 0 failed. Clippy clean.
+fhnw (real case): Auto with a 60 s deadline stopped at 60.08 s (stage
+"ordering", 80 ms overshoot); AutoRace with 30 s stopped at 30.04 s.

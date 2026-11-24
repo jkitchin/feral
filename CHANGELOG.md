@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — interrupting the symbolic phase: `Interrupt` (#246, PR #247 review)
+- `feral::Interrupt` (a deadline and/or a cancel flag), installed with
+  `Solver::with_interrupt` / `Solver::set_interrupt` or
+  `SupernodeParams::interrupt`. The symbolic analysis polls it at safe
+  points and returns the new `FeralError::Interrupted { stage }` with no
+  partial result. The safe points are:
+  - every 64 pivots of AMD/AMF;
+  - each recursion node, coarsening level, trial and refinement pass of
+    METIS/SCOTCH (KaHIP: each recursion node);
+  - every 64 columns of the MC64 matching behind `LdltCompress`;
+  - between pipeline stages and race arms.
+
+  The overshoot past a deadline is bounded by one safe point, not by the
+  whole analysis. The numeric phase does not poll it. Python maps the error
+  to `FactorError`.
+- The ordering crates expose the same thing on their own:
+  `feral_{amd,amf,metis,scotch,kahip}::*_order_interruptible(pattern, opts,
+  &Interrupt)`, `feral_ordering_core::interrupt`, and
+  `OrderingError::Interrupted`.
+- **Source-compatibility:** a second new `SupernodeParams` field
+  (`interrupt`), plus new `FeralError` and `OrderingError` variants.
+
 ### Changed — `Auto` routes very-large low-degree matrices to AMF, not AMD (#246, pending validation)
 - `n > 100_000` with full average degree < 5 now resolves to `Amf` (was
   `Amd`, #50). On the Primal2_1000 LP KKT (n = 3.86M), nnz(L) drops from

@@ -180,6 +180,32 @@ the budget to
 roughly a third of the memory you can spare for the parallel driver, or
 half for the sequential one.
 
+## Bounding time
+
+`Solver::with_interrupt(Some(feral::Interrupt::after(duration)))` stops the
+symbolic analysis (ordering, matching, supernode detection) once the
+deadline passes. `Interrupt::none().with_flag(flag)` does the same when
+another thread sets an `Arc<AtomicBool>`. Either way, `factor` returns
+`FactorStatus::FatalError(FeralError::Interrupted { stage })`, nothing is
+cached, and the `Solver` stays usable.
+
+```rust,ignore
+let deadline = Instant::now() + remaining_time;
+solver.set_interrupt(Some(Interrupt::at(deadline)));
+match solver.factor(&kkt, None) {
+    FactorStatus::FatalError(FeralError::Interrupted { stage }) => {
+        /* report a timeout, not a factorization failure */
+    }
+    status => { /* as usual */ }
+}
+```
+
+The check runs at safe points inside the orderings (every 64 pivots for
+AMD/AMF; each level and refinement pass for METIS and SCOTCH; each recursion
+node for KaHIP), inside the MC64 matching, and between stages. So the time
+past the deadline is bounded by one of those steps rather than by the whole
+analysis. The numeric factorization itself does not check the interrupt.
+
 ## References
 
 Greedy orderings:

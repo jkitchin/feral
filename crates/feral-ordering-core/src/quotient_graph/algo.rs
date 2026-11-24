@@ -1287,13 +1287,27 @@ pub fn finalize_step_amf(
     }
 }
 
+/// Pivots between interrupt polls in the elimination loops (issue #246).
+/// A poll is a thread-local read plus, with a deadline set, one
+/// `Instant::now()` (~25 ns), so a stride of 64 keeps the overhead far below
+/// a pivot's cost while bounding the overshoot to 64 pivots.
+const INTERRUPT_POLL_STRIDE: usize = 64;
+
 /// AMF analogue of [`run_elimination`].
 pub fn run_elimination_amf(
     ws: &mut Workspace,
     aggressive: bool,
 ) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
+    // Issue #246: poll the active interrupt every `INTERRUPT_POLL_STRIDE`
+    // pivots, starting with the first. The workspace is abandoned on
+    // `Err`, so stopping between pivots is always safe.
+    let mut since_poll = 0usize;
     while ws.nel < ws.n {
+        if since_poll == 0 {
+            crate::interrupt::check()?;
+        }
+        since_poll = (since_poll + 1) % INTERRUPT_POLL_STRIDE;
         let me = match select_pivot_amf(ws) {
             Some(m) => m,
             None => break,
@@ -1327,7 +1341,15 @@ pub fn run_elimination_amf(
 /// is `NONE` / `flip(parent)`.
 pub fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
+    // Issue #246: poll the active interrupt every `INTERRUPT_POLL_STRIDE`
+    // pivots, starting with the first. The workspace is abandoned on
+    // `Err`, so stopping between pivots is always safe.
+    let mut since_poll = 0usize;
     while ws.nel < ws.n {
+        if since_poll == 0 {
+            crate::interrupt::check()?;
+        }
+        since_poll = (since_poll + 1) % INTERRUPT_POLL_STRIDE;
         let me = match select_pivot(ws) {
             Some(m) => m,
             None => break, // only dense-deferred survivors remain

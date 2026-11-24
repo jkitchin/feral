@@ -28,6 +28,11 @@ use crate::initial_partition::{cut_size, part_weight, PART_A, PART_B};
 
 pub const PART_SEP: u8 = 2;
 
+/// Heap pops between interrupt polls inside an FM pass (issue #246). Stopping
+/// a pass early is the same as the heap running dry: the pass still rolls
+/// back to its best prefix.
+const HEAP_POLL_STRIDE: usize = 1024;
+
 /// Refine an edge bisection with FM, tracking the best balanced cut.
 ///
 /// `labels[v] ∈ {PART_A, PART_B}`. Modifies `labels` in place.
@@ -48,6 +53,9 @@ pub fn refine_bisection(
     let mut pass_cut = cut_size(graph, labels);
 
     for _pass in 0..max_passes {
+        if feral_ordering_core::interrupt::poll() {
+            break;
+        }
         let before_pass = pass_cut;
         let mut gain: Vec<i32> = vec![0; n];
         compute_gains(graph, labels, &mut gain);
@@ -88,7 +96,12 @@ pub fn refine_bisection(
         let mut best_b_w = b_w;
         let mut no_improve: u32 = 0;
 
+        let mut pops = 0usize;
         while let Some((_, Reverse(v), stamp)) = heap.pop() {
+            pops += 1;
+            if pops % HEAP_POLL_STRIDE == 0 && feral_ordering_core::interrupt::poll() {
+                break;
+            }
             let vu = v as usize;
             if locked[vu] {
                 continue;
@@ -222,6 +235,9 @@ pub fn refine_separator(
     let max_side = ((1.0 + max_imbalance) * total as f64 / 2.0).ceil() as i64;
 
     for _pass in 0..max_passes {
+        if feral_ordering_core::interrupt::poll() {
+            break;
+        }
         let mut changed = false;
         let mut a_w = part_weight(graph, labels, PART_A);
         let mut b_w = part_weight(graph, labels, PART_B);
@@ -340,6 +356,9 @@ pub fn refine_separator_fm(
     let mut pulled: Vec<Vec<usize>> = Vec::new();
 
     for pass in 0..max_passes {
+        if feral_ordering_core::interrupt::poll() {
+            break;
+        }
         let to = if pass % 2 == 0 { PART_A } else { PART_B };
         let other = if to == PART_A { PART_B } else { PART_A };
         let to_i = if to == PART_A { 0 } else { 1 };
@@ -371,7 +390,12 @@ pub fn refine_separator_fm(
         let mut best_at = 0usize; // number of moves kept at the best state
         let mut moved = vec![false; n];
 
+        let mut pops = 0usize;
         while let Some((key, Reverse(v))) = heap.pop() {
+            pops += 1;
+            if pops % HEAP_POLL_STRIDE == 0 && feral_ordering_core::interrupt::poll() {
+                break;
+            }
             if labels[v] != PART_SEP || moved[v] {
                 continue;
             }

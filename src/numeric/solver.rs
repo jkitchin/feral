@@ -1384,6 +1384,26 @@ impl Solver {
         self
     }
 
+    /// Stop the symbolic analysis when `interrupt` triggers (issue #246,
+    /// PR #247 review). Sets [`SupernodeParams::interrupt`]. An interrupted
+    /// analysis surfaces from [`Solver::factor`] as
+    /// `FactorStatus::FatalError(FeralError::Interrupted { stage })` and is
+    /// not cached, so the next `factor` analyses again. A cached analysis
+    /// (same pattern) is reused without consulting the interrupt. The
+    /// numeric phase does not poll it. A deadline is absolute, so a host that
+    /// reuses one `Solver` should install a fresh one per call with
+    /// [`Solver::set_interrupt`]. Ordering-race probes inherit it.
+    pub fn with_interrupt(mut self, interrupt: Option<crate::Interrupt>) -> Self {
+        self.snode_params.interrupt = interrupt;
+        self
+    }
+
+    /// Replace the interrupt installed by [`Solver::with_interrupt`]
+    /// (`None` removes it).
+    pub fn set_interrupt(&mut self, interrupt: Option<crate::Interrupt>) {
+        self.snode_params.interrupt = interrupt;
+    }
+
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
@@ -6107,5 +6127,26 @@ mod tests {
         );
         let mut ok = Solver::new().with_max_factor_bytes(None);
         assert!(matches!(ok.factor(&m, None), FactorStatus::Success));
+    }
+
+    /// Issue #246 / PR #247 review: an interrupted analysis surfaces as
+    /// `FatalError(Interrupted)`, is not cached, and clearing the interrupt
+    /// lets the same `Solver` factor.
+    #[test]
+    fn interrupt_refuses_through_factor_status_and_recovers() {
+        use crate::Interrupt;
+        let m = tridiag(10, 4.0, -1.0);
+        let expired = Interrupt::at(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        let mut s = Solver::new().with_interrupt(Some(expired));
+        match s.factor(&m, None) {
+            FactorStatus::FatalError(FeralError::Interrupted { .. }) => {}
+            other => panic!("expected Interrupted, got {other:?}"),
+        }
+        assert!(
+            s.symbolic().is_none(),
+            "an interrupted analysis must not be cached"
+        );
+        s.set_interrupt(None);
+        assert!(matches!(s.factor(&m, None), FactorStatus::Success));
     }
 }

@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod interrupt;
 pub mod quotient_graph;
 
 use core::fmt;
@@ -173,6 +174,10 @@ pub enum OrderingError {
     /// Crate-specific failure with a short static message. Keep
     /// short — this is a status channel, not a rich diagnostic.
     Internal(&'static str),
+    /// The active [`interrupt::Interrupt`] triggered (its deadline passed or
+    /// its cancel flag was set) before the ordering finished. No partial
+    /// result is returned.
+    Interrupted,
 }
 
 impl fmt::Display for OrderingError {
@@ -185,6 +190,7 @@ impl fmt::Display for OrderingError {
             Self::IndexOverflow => f.write_str("ordering workspace exceeded i32::MAX"),
             Self::DisconnectedGraph => f.write_str("ordering input graph is disconnected"),
             Self::Internal(msg) => write!(f, "ordering internal error: {msg}"),
+            Self::Interrupted => f.write_str("ordering interrupted (deadline or cancel flag)"),
         }
     }
 }

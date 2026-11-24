@@ -859,8 +859,7 @@ fn run_external_ordering(
             unreachable!("AutoRace is resolved by symbolic_factorize_with_method")
         }
     };
-    let perm_i32 = perm_i32
-        .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
+    let perm_i32 = perm_i32.map_err(map_ordering_error)?;
     if perm_i32.len() != pattern.n {
         return Err(FeralError::InvalidInput(format!(
             "external ordering returned {} entries for n={}",
@@ -1006,6 +1005,28 @@ pub fn predicted_front_flops(sym: &SymbolicFactorization) -> u128 {
         .sum()
 }
 
+/// `Err(FeralError::Interrupted { stage })` when the active interrupt
+/// (installed by [`symbolic_factorize_with_method`] from
+/// [`SupernodeParams::interrupt`]) has triggered (issue #246).
+fn interrupt_check(stage: &'static str) -> Result<(), FeralError> {
+    if feral_ordering_core::interrupt::poll() {
+        Err(FeralError::Interrupted { stage })
+    } else {
+        Ok(())
+    }
+}
+
+/// Map an ordering-crate error: an interrupt stays an interrupt, anything
+/// else is reported as a failed ordering.
+fn map_ordering_error(e: feral_ordering_core::OrderingError) -> FeralError {
+    match e {
+        feral_ordering_core::OrderingError::Interrupted => {
+            FeralError::Interrupted { stage: "ordering" }
+        }
+        e => FeralError::InvalidInput(format!("external ordering failed: {}", e)),
+    }
+}
+
 /// Concrete candidates raced by [`OrderingMethod::AutoRace`].
 ///
 /// Public so callers (and tests) can see what the race covers without
@@ -1072,6 +1093,7 @@ fn symbolic_factorize_race(
     // the report reflects exactly one ordering run.
     let mut last_err: Option<FeralError> = None;
     for cand in RACE_CANDIDATES {
+        interrupt_check("race")?;
         let cand_prof = snode_params
             .symbolic_profiler
             .as_ref()
@@ -1093,6 +1115,8 @@ fn symbolic_factorize_race(
                     best = Some(prefix);
                 }
             }
+            // An interrupt ends the whole race; other failures skip the arm.
+            Err(e @ FeralError::Interrupted { .. }) => return Err(e),
             Err(e) => {
                 last_err = Some(e);
             }
@@ -1181,8 +1205,12 @@ fn symbolic_prefix_preprocess_auto(
     // 6.3×. Validated by the full corpus suite (no inertia regression) plus
     // `tests/issue91_preprocess_misfire.rs`.
     let none = run(OrderingPreprocess::None)?;
+    interrupt_check("race")?;
     let none_limit = (none.factor_nnz_estimate as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
     match run(OrderingPreprocess::LdltCompress) {
+        // Issue #246: an interrupt in the second arm must not be mistaken for
+        // a failed LdltCompress and silently fall back to `None`.
+        Err(e @ FeralError::Interrupted { .. }) => Err(e),
         Ok(comp) if (comp.factor_nnz_estimate as f64) <= none_limit => Ok(comp),
         // LdltCompress inflates fill past the catastrophe limit (or failed)
         // — use None.
@@ -1206,6 +1234,20 @@ const PREPROCESS_FILL_INFLATION_LIMIT: f64 = 2.0;
 /// `symbolic_factorize(m, p) == symbolic_factorize_with_method(m, p,
 /// OrderingMethod::Amd)`.
 pub fn symbolic_factorize_with_method(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    method: OrderingMethod,
+) -> Result<SymbolicFactorization, FeralError> {
+    // Issue #246: install the caller's interrupt (if any) for the whole
+    // analysis, so every ordering crate and MC64 below can poll it.
+    feral_ordering_core::interrupt::scope_if(snode_params.interrupt.as_ref(), || {
+        interrupt_check("entry")?;
+        symbolic_factorize_with_method_inner(matrix, snode_params, method)
+    })
+}
+
+/// [`symbolic_factorize_with_method`] with the interrupt scope already open.
+fn symbolic_factorize_with_method_inner(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
@@ -1393,7 +1435,12 @@ fn symbolic_prefix_concrete(
             // the expensive part — record it under its own `ldlt_compress`
             // stage (issue #80).
             let t_pre = prof.map(|_| std::time::Instant::now());
-            let cache = crate::scaling::compute_mc64_cache(matrix)?;
+            // Issue #246: MC64 stops early (with an incomplete matching) when
+            // interrupted, so check *before* looking at its result: a partial
+            // matching must not surface as a "structurally singular" error.
+            let cache = crate::scaling::compute_mc64_cache(matrix);
+            interrupt_check("ldlt_compress")?;
+            let cache = cache?;
             let map = build_supermap(&cache.perm);
             if let Some(t) = t_pre {
                 record_stage(prof, "ldlt_compress", t);
@@ -1498,7 +1545,9 @@ fn symbolic_prefix_concrete(
     // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
     // KKT matrices — see `dev/validation/phase-2.5.1-*`.
     let t_cc = prof.map(|_| std::time::Instant::now());
+    interrupt_check("ordering")?;
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
+    interrupt_check("column_counts")?;
     if let Some(t) = t_cc {
         record_stage(prof, "col_counts", t);
     }
@@ -1745,7 +1794,9 @@ fn finish_checked(
             });
         }
     }
+    interrupt_check("finish")?;
     let sym = finish_and_copy(prefix, budget_params.symbolic_profiler.as_ref());
+    interrupt_check("finish")?;
     if let Some(budget_bytes) = budget {
         let predicted_bytes = sym.work_estimate().peak_bytes;
         if predicted_bytes > budget_bytes {
@@ -1801,6 +1852,19 @@ fn finish_checked(
 /// Returns `is_schur_tail = Some(n_schur)` so the numeric phase (F3.2b)
 /// can enforce the per-front `NPIV ≤ NASS − NVSCHUR` stopping rule.
 pub fn symbolic_factorize_with_schur(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    schur_indices: &[usize],
+) -> Result<SymbolicFactorization, FeralError> {
+    // Issue #246: same interrupt scope as `symbolic_factorize_with_method`
+    // (nested scopes of the same interrupt are harmless).
+    feral_ordering_core::interrupt::scope_if(snode_params.interrupt.as_ref(), || {
+        interrupt_check("entry")?;
+        symbolic_factorize_with_schur_inner(matrix, snode_params, schur_indices)
+    })
+}
+
+fn symbolic_factorize_with_schur_inner(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     schur_indices: &[usize],
@@ -2484,6 +2548,56 @@ mod tests {
             }
             other => panic!("expected a peak-stage MemoryBudgetExceeded, got {other:?}"),
         }
+    }
+
+    /// Issue #246 / PR #247 review: an already-expired interrupt stops the
+    /// symbolic phase before any result, for every ordering method, both
+    /// races and the forced-LdltCompress (MC64) path, and never reaches the
+    /// finish.
+    #[test]
+    fn expired_interrupt_stops_every_method_before_finish() {
+        use crate::Interrupt;
+        let m = tridiag(400);
+        let expired = Interrupt::at(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        let methods = [
+            OrderingMethod::Amd,
+            OrderingMethod::Amf,
+            OrderingMethod::MetisND,
+            OrderingMethod::ScotchND,
+            OrderingMethod::KahipND,
+            OrderingMethod::Auto,
+            OrderingMethod::AutoRace,
+        ];
+        for pre in [
+            OrderingPreprocess::None,
+            OrderingPreprocess::LdltCompress,
+            OrderingPreprocess::Auto,
+        ] {
+            for method in methods.iter() {
+                let params = SupernodeParams {
+                    preprocess: pre,
+                    interrupt: Some(expired.clone()),
+                    ..Default::default()
+                };
+                FINISH_RUNS.with(|c| c.set(0));
+                match symbolic_factorize_with_method(&m, &params, method.clone()) {
+                    Err(FeralError::Interrupted { .. }) => {}
+                    other => panic!("{method:?}/{pre:?}: expected Interrupted, got {other:?}"),
+                }
+                assert_eq!(FINISH_RUNS.with(|c| c.get()), 0, "{method:?}/{pre:?}");
+            }
+        }
+        // No interrupt, and an inert one, change nothing.
+        let base =
+            symbolic_factorize_with_method(&m, &SupernodeParams::default(), OrderingMethod::Auto)
+                .expect("base");
+        let params = SupernodeParams {
+            interrupt: Some(Interrupt::after(std::time::Duration::from_secs(3600))),
+            ..Default::default()
+        };
+        let far = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).expect("far");
+        assert_eq!(far.perm, base.perm);
+        assert_eq!(far.work_estimate(), base.work_estimate());
     }
 
     #[test]
