@@ -63,10 +63,13 @@ better orderings than greedy methods on large, mesh-like graphs.
 
 ### Automatic selection
 
-- **`Auto`** chooses a method from a few cheap pattern metrics: very
-  large, very sparse graphs are sent to `Amd` (nested dissection's
-  separator search does not pay off there), and everything else resolves
-  to `Amf`.
+- **`Auto`** chooses a method from a few cheap pattern metrics. Since
+  0.25.0 every branch ends at `Amf`: very large, very sparse graphs
+  (`n > 100_000`, average degree < 5) went to `Amd` until then, and now
+  go to `Amf` too (issue #246; on the Primal2_1000 LP KKT, n = 3.86M, a
+  refactorization dropped from 999 s to 84 s, at a ~15% cost on
+  PDE2_0000). Nested dissection's separator search does not pay off
+  there, and AMF, like AMD, is a local ordering.
 
   > Note: `Auto` does **not** currently select any nested-dissection
   > method. The size rule would pick `MetisND` above `n = 10_000`, but a
@@ -76,8 +79,12 @@ better orderings than greedy methods on large, mesh-like graphs.
   > `AutoRace` / `Solver::with_ordering_race`. The gates are tuned
   > against the benchmark corpus and may change between releases.
 - **`AutoRace`** runs the symbolic analysis for each candidate ordering
-  in `feral::symbolic::RACE_CANDIDATES` — `Amd` and `MetisND` — and
-  keeps the one whose factor is predicted smallest. It costs roughly the
+  in `feral::symbolic::race_candidates(n)` and keeps the one whose factor
+  is predicted smallest. Below `RACE_LARGE_N` (1 000 000) the candidates
+  are `RACE_CANDIDATES` — `Amd` and `MetisND`; at or above it they are
+  `RACE_CANDIDATES_LARGE` — `Amd`, `MetisND`, `ScotchND` and `Amf`
+  (0.25.0). The MC64 matching behind `LdltCompress` is computed once per
+  race and shared by every arm. It costs roughly the
   sum of those symbolic passes, worth it when one factorization is
   reused for many solves, since symbolic analysis is amortized and the
   numeric phase dominates.

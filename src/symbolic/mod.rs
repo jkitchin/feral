@@ -279,8 +279,8 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
         return OrderingMethod::Amd;
     }
     let avg_deg = full_nnz as f64 / n as f64;
-    // Issue #246 (DRAFT pending the powerflow22 A/B): very-large-and-
-    // sparse routes to AMF, not AMD. With AMF's score quantization
+    // Issue #246 (accepted after the powerflow22 / PDE2_0000 A/B): very-
+    // large-and-sparse routes to AMF, not AMD. With AMF's score quantization
     // monotone (0f6eb9c), AMF's fill is <= AMD's on every measured member
     // of this regime and far lower on LP KKTs: Primal2_1000 nnz(L)
     // 1.80e8 vs 3.19e8 (flop proxy 4.1e11 vs 2.4e12), dlr1 1.18e8 vs
@@ -329,7 +329,7 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     // patterns, and its symbolic ordering is 2–5× more expensive than AMF's, so
     // racing the two is a net loss. Route every would-be-MetisND decision to AMF
     // outright. Only the would-be-MetisND decision is touched; the earlier
-    // `n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and arrow → AMF (#64)
+    // `n > 100_000 && avg_deg < 5 → Amf` (#50, #246) and arrow → AMF (#64)
     // catches fire first and are untouched.
     if base == OrderingMethod::MetisND {
         return OrderingMethod::Amf;

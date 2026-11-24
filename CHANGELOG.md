@@ -4,6 +4,31 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-24
+
+A minor release: new public fields on `SupernodeParams` and
+`WorkEstimate`, and new `FeralError` variants, so code that builds those
+structs with full literals or matches `FeralError` exhaustively needs
+updates (see the source-compatibility notes below).
+
+### Ordering-crate versions
+
+The six fill-reducing ordering crates version independently of `feral`.
+All six changed for the interrupt work (#246), so all six move:
+
+| crate | | why |
+|---|---|---|
+| `feral-ordering-core` | 0.2.4 → **0.3.0** | new `interrupt` module; new `OrderingError::Interrupted` variant (breaks an exhaustive `match`) |
+| `feral-amd` | 0.2.2 → **0.3.0** | new `amd_order_interruptible`; needs `feral-ordering-core` ^0.3 |
+| `feral-amf` | 0.2.2 → **0.3.0** | new `amf_order_interruptible`; needs `feral-ordering-core` ^0.3 |
+| `feral-metis` | 0.3.2 → **0.4.0** | new `*_order_interruptible`; needs `feral-ordering-core` / `feral-amd` ^0.3 |
+| `feral-scotch` | 0.3.2 → **0.4.0** | same as `feral-metis`, plus `feral-metis` ^0.4 |
+| `feral-kahip` | 0.3.2 → **0.4.0** | same as `feral-scotch` |
+
+These are minor (breaking, for 0.x) bumps, not patches: the siblings now
+call `feral_ordering_core::interrupt`, which does not exist in 0.2.4, so
+a `^0.2` requirement could resolve to a version that does not compile.
+
 ### Fixed — `WorkEstimate::peak_bytes` predicts the real high-water (#249)
 - `peak_bytes` ran 1.4–2.6× below the measured memory of `Solver::factor`
   on large KKTs, so `max_factor_bytes` bounded the prediction, not the
