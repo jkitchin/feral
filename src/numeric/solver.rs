@@ -632,6 +632,11 @@ pub struct Solver {
     /// below `N_PAR_MIN`, so default-on does not regress small-
     /// problem latency. See issue #7.
     use_parallel: bool,
+    /// Issue #249: `true` when the most recent `factor` ran the
+    /// sequential driver although `use_parallel` is on, because
+    /// `WorkEstimate::peak_bytes_parallel` exceeded `max_factor_bytes`
+    /// while the sequential prediction fitted.
+    budget_forced_sequential: bool,
     /// Lazily-built rayon `ThreadPool` reused across every
     /// `factor()` call that dispatches the parallel multifrontal
     /// driver. `None` until first parallel-fire; once built, the
@@ -825,6 +830,7 @@ impl Solver {
             mc64_retry_not_adopted: false,
             workspace: FactorWorkspace::new(),
             use_parallel: Self::default_use_parallel(),
+            budget_forced_sequential: false,
             parallel_pool: None,
             race_arms: Vec::new(),
             race_margin: 0.05,
@@ -967,8 +973,11 @@ impl Solver {
     /// pool construction fails and every dispatch falls back to the
     /// sequential driver.
     ///
-    /// Memory: the parallel task-graph driver holds every contribution
-    /// block square and ignores `NumericParams::early_assembly`, so
+    /// Memory: the parallel task-graph driver holds packed contribution
+    /// blocks like the sequential one (issue #249), plus the blocks of
+    /// finished subtree tasks waiting for their parent task and one
+    /// workspace per worker; see `WorkEstimate::peak_bytes_parallel`. It
+    /// ignores `NumericParams::early_assembly`, so
     /// `EarlyAssembly::WideParents` takes effect only where the sequential
     /// driver runs: with `false`, or when the tree has too little task
     /// parallelism and the parallel entry point hands it to the
@@ -1375,10 +1384,12 @@ impl Solver {
     /// phase checks the predicted factor bytes before its supernodal
     /// finish, and the full predicted sequential peak
     /// ([`WorkEstimate::peak_bytes`]) after it. When the parallel driver
-    /// is on, `factor` then also checks
-    /// [`WorkEstimate::peak_bytes_parallel`] for this solver's thread
-    /// count (stage `"peak_parallel"`; issue #249) before caching the
-    /// analysis. A refusal surfaces from [`Solver::factor`] as
+    /// is on and [`WorkEstimate::peak_bytes_parallel`] for this solver's
+    /// thread count exceeds the budget, `factor` runs that factorization
+    /// on the sequential driver instead (same factors; slower, but within
+    /// the prediction; issue #249, see
+    /// [`Solver::ran_sequential_for_budget`]). A refusal surfaces from
+    /// [`Solver::factor`] as
     /// `FactorStatus::FatalError(FeralError::MemoryBudgetExceeded { .. })`,
     /// so a host can give up cleanly instead of being killed for running
     /// out of memory. `None` (default) is unlimited. Ordering-race arms
@@ -1389,6 +1400,18 @@ impl Solver {
     pub fn with_max_factor_bytes(mut self, bytes: Option<usize>) -> Self {
         self.snode_params.max_factor_bytes = bytes;
         self
+    }
+
+    /// `true` when the most recent [`Solver::factor`] ran the sequential
+    /// driver although the parallel one is on, because the parallel
+    /// prediction ([`WorkEstimate::peak_bytes_parallel`]) exceeded the
+    /// [`Solver::with_max_factor_bytes`] budget while the sequential one
+    /// ([`WorkEstimate::peak_bytes`]) fitted (issue #249).
+    ///
+    /// [`WorkEstimate::peak_bytes`]: crate::symbolic::WorkEstimate::peak_bytes
+    /// [`WorkEstimate::peak_bytes_parallel`]: crate::symbolic::WorkEstimate::peak_bytes_parallel
+    pub fn ran_sequential_for_budget(&self) -> bool {
+        self.budget_forced_sequential
     }
 
     /// Stop the symbolic analysis when `interrupt` triggers (issue #246,
@@ -2078,27 +2101,6 @@ impl Solver {
             } else {
                 symbolic_factorize_with_method(matrix, &self.snode_params, self.ordering.clone())
             };
-            // Issue #249: the symbolic phase's own budget check is on the
-            // sequential peak; the parallel driver holds more (a frontier
-            // of finished subtree blocks, one workspace per worker), so
-            // check that figure here, before the analysis is cached.
-            let result = match (result, self.snode_params.max_factor_bytes) {
-                (Ok(sym), Some(budget_bytes)) if self.use_parallel => {
-                    let predicted_bytes = sym
-                        .work_estimate()
-                        .peak_bytes_parallel(Self::pool_num_threads());
-                    if predicted_bytes > budget_bytes {
-                        Err(FeralError::MemoryBudgetExceeded {
-                            predicted_bytes,
-                            budget_bytes,
-                            stage: "peak_parallel",
-                        })
-                    } else {
-                        Ok(sym)
-                    }
-                }
-                (r, _) => r,
-            };
             match result {
                 Ok(sym) => {
                     self.symbolic_call_count += 1;
@@ -2139,6 +2141,29 @@ impl Solver {
         let symbolic = match &self.last_symbolic {
             Some(s) => s,
             None => unreachable!("symbolic just populated"),
+        };
+
+        // Issue #249: the analysis already passed the budget on the
+        // sequential driver's predicted peak. The parallel driver holds
+        // more (a frontier of finished subtree blocks, one workspace per
+        // worker), and its prediction is a bound over every schedule. When
+        // that bound exceeds the budget, run this factorization on the
+        // sequential driver instead (same factors, bit-exact; issue #154's
+        // no-pool path), so the budget costs speed, not a refusal.
+        let pool = match (pool, self.snode_params.max_factor_bytes) {
+            (Some(p), Some(budget))
+                if symbolic
+                    .work_estimate()
+                    .peak_bytes_parallel(p.current_num_threads())
+                    > budget =>
+            {
+                self.budget_forced_sequential = true;
+                None
+            }
+            (p, _) => {
+                self.budget_forced_sequential = false;
+                p
+            }
         };
 
         // Step 3.6: warm cascade-break auto-arm. If the prior factor
@@ -6131,12 +6156,12 @@ mod tests {
         assert_eq!(*s.inertia().expect("B inertia"), Inertia::new(2, 1, 0));
     }
 
-    /// Issue #249: with the parallel driver on, `factor` also checks the
-    /// parallel prediction. A budget between the sequential and parallel
-    /// figures refuses the parallel solver at stage `"peak_parallel"`
-    /// (caching nothing) and lets the sequential one through.
+    /// Issue #249: a budget between the sequential and parallel
+    /// predictions makes a parallel `Solver` run the sequential driver for
+    /// that factorization instead of refusing; a generous budget keeps the
+    /// parallel driver; the factors are the same either way.
     #[test]
-    fn max_factor_bytes_checks_the_parallel_peak_issue_249() {
+    fn max_factor_bytes_between_the_predictions_runs_sequential_issue_249() {
         let k = 60;
         let n = k * k;
         let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -6158,8 +6183,9 @@ mod tests {
         let m = CscMatrix::from_triplets(n, &r, &c, &v).expect("grid");
         let mut probe = Solver::new()
             .with_ordering(OrderingMethod::MetisND)
-            .with_parallel(false);
+            .with_parallel(true);
         assert!(matches!(probe.factor(&m, None), FactorStatus::Success));
+        assert!(!probe.ran_sequential_for_budget(), "no budget, no fallback");
         let e = probe.work_estimate().expect("estimate");
         assert!(
             e.parallel_frontier_bytes.is_some(),
@@ -6172,34 +6198,39 @@ mod tests {
             "parallel {par} vs sequential {}",
             e.peak_bytes
         );
-        let budget = e.peak_bytes + (par - e.peak_bytes) / 2;
+        let between = e.peak_bytes + (par - e.peak_bytes) / 2;
+        let x_ref = probe.solve(&vec![1.0; n]).expect("solve");
 
         let mut s = Solver::new()
             .with_ordering(OrderingMethod::MetisND)
             .with_parallel(true)
-            .with_max_factor_bytes(Some(budget));
-        match s.factor(&m, None) {
-            FactorStatus::FatalError(FeralError::MemoryBudgetExceeded {
-                predicted_bytes,
-                budget_bytes,
-                stage,
-            }) => {
-                assert_eq!(stage, "peak_parallel");
-                assert_eq!(predicted_bytes, par);
-                assert_eq!(budget_bytes, budget);
-            }
-            other => panic!("expected a peak_parallel refusal, got {other:?}"),
-        }
+            .with_max_factor_bytes(Some(between));
+        assert!(matches!(s.factor(&m, None), FactorStatus::Success));
         assert!(
-            s.work_estimate().is_none(),
-            "a refused analysis is not cached"
+            s.ran_sequential_for_budget(),
+            "budget below the parallel bound"
+        );
+        let x = s.solve(&vec![1.0; n]).expect("solve");
+        assert_eq!(x, x_ref, "the drivers are bit-exact");
+
+        let mut roomy = Solver::new()
+            .with_ordering(OrderingMethod::MetisND)
+            .with_parallel(true)
+            .with_max_factor_bytes(Some(par));
+        assert!(matches!(roomy.factor(&m, None), FactorStatus::Success));
+        assert!(
+            !roomy.ran_sequential_for_budget(),
+            "budget admits the parallel bound"
         );
 
-        let mut seq = Solver::new()
+        let mut tight = Solver::new()
             .with_ordering(OrderingMethod::MetisND)
-            .with_parallel(false)
-            .with_max_factor_bytes(Some(budget));
-        assert!(matches!(seq.factor(&m, None), FactorStatus::Success));
+            .with_parallel(true)
+            .with_max_factor_bytes(Some(e.peak_bytes - 1));
+        assert!(matches!(
+            tight.factor(&m, None),
+            FactorStatus::FatalError(FeralError::MemoryBudgetExceeded { stage: "peak", .. })
+        ));
     }
 
     /// Issue #246 step 3: a `Solver` with a factor-memory budget refuses

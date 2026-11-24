@@ -120,8 +120,9 @@ pub struct SupernodeParams {
     ///    sequential driver ([`WorkEstimate::peak_bytes`]: the analysis,
     ///    workspace, stored factor and contribution blocks; issue #249).
     ///
-    /// `Solver` adds a third check when its parallel driver is on, against
-    /// `WorkEstimate::peak_bytes_parallel` for its thread count.
+    /// With its parallel driver on, `Solver` also compares
+    /// `WorkEstimate::peak_bytes_parallel` with the budget and runs the
+    /// sequential driver when only the sequential prediction fits.
     ///
     /// The prediction assumes no delayed pivots. Numeric delays can grow
     /// fronts past it, so leave headroom against physical memory.

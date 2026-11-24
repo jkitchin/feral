@@ -86,10 +86,10 @@ pub enum FeralError {
     /// the factor. `"peak"` means the full predicted sequential peak
     /// ([`WorkEstimate::peak_bytes`]: analysis, workspace, stored factor
     /// and contribution blocks), checked after the finish and before any
-    /// numeric work. `"peak_parallel"` means `Solver`'s extra check of
-    /// [`WorkEstimate::peak_bytes_parallel`] when its parallel driver is
-    /// on (issue #249). `predicted_bytes` is the figure that exceeded
-    /// `budget_bytes`.
+    /// numeric work. `predicted_bytes` is the figure that exceeded
+    /// `budget_bytes`. (A parallel `Solver` whose
+    /// [`WorkEstimate::peak_bytes_parallel`] alone exceeds the budget does
+    /// not refuse: it runs the sequential driver; issue #249.)
     ///
     /// [`SupernodeParams::max_factor_bytes`]: crate::symbolic::supernode::SupernodeParams::max_factor_bytes
     /// [`WorkEstimate::peak_bytes`]: crate::symbolic::WorkEstimate::peak_bytes
