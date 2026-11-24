@@ -1228,6 +1228,16 @@ fn symbolic_factorize_race(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, FeralError> {
+    symbolic_factorize_race_over(matrix, snode_params, race_candidates(matrix.n))
+}
+
+/// [`symbolic_factorize_race`] over an explicit candidate list, so tests
+/// can race [`RACE_CANDIDATES_LARGE`] without an n ≥ 1M matrix.
+fn symbolic_factorize_race_over(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    candidates: &[OrderingMethod],
+) -> Result<SymbolicFactorization, FeralError> {
     // Issue #127: race only each candidate's *prefix* (through the
     // `factor_nnz_estimate` the decision uses) and finish just the winner,
     // so the losers never pay the tail (`find_supernodes`, small-leaf,
@@ -1244,7 +1254,13 @@ fn symbolic_factorize_race(
     // `finish_and_copy`) is copied into the caller's shared profiler, so
     // the report reflects exactly one ordering run.
     let mut last_err: Option<FeralError> = None;
-    for cand in race_candidates(matrix.n) {
+    // Issue #248: the MC64 matching behind every arm's `LdltCompress`
+    // prefix depends only on the matrix, not on the ordering, so compute
+    // it once per race and hand the same matching to every arm. Each arm
+    // then compresses to the identical super-graph it built before, so
+    // the selection is bit-identical.
+    let mc64 = Mc64Memo::new();
+    for cand in candidates {
         interrupt_check("race")?;
         let cand_prof = snode_params
             .symbolic_profiler
@@ -1257,7 +1273,7 @@ fn symbolic_factorize_race(
         // `cand: &OrderingMethod` — `OrderingMethod` is no longer `Copy`
         // (the `External` variant carries a `Vec`); clone the concrete
         // candidate (all `RACE_CANDIDATES` are payload-free unit variants).
-        match resolve_prefix(matrix, &cand_params, cand.clone()) {
+        match resolve_prefix(matrix, &cand_params, cand.clone(), &mc64) {
             Ok(prefix) => {
                 let is_better = best
                     .as_ref()
@@ -1315,6 +1331,7 @@ fn symbolic_prefix_preprocess_auto(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
+    mc64: &Mc64Memo,
 ) -> Result<SymbolicPrefix, FeralError> {
     debug_assert_eq!(snode_params.preprocess, OrderingPreprocess::Auto);
 
@@ -1334,7 +1351,7 @@ fn symbolic_prefix_preprocess_auto(
         // runs (None vs LdltCompress); `OrderingMethod` is no longer `Copy`,
         // so clone. `External` never reaches here — it is guarded to
         // `OrderingPreprocess::None` before the preprocess-`Auto` race.
-        symbolic_prefix_concrete(matrix, &cand_params, method.clone())
+        symbolic_prefix_concrete(matrix, &cand_params, method.clone(), mc64)
     };
 
     // The predicate is the *only* thing that could recommend compression;
@@ -1415,7 +1432,7 @@ fn symbolic_factorize_with_method_inner(
     // peak-contrib, static rows, struct assembly). The preprocess-`Auto` and
     // `AutoRace` races decide on `factor_nnz_estimate` alone, so they race
     // prefixes and finish only the winner — the losers never pay the tail.
-    let prefix = resolve_prefix(matrix, snode_params, method)?;
+    let prefix = resolve_prefix(matrix, snode_params, method, &Mc64Memo::new())?;
     finish_checked(prefix, snode_params)
 }
 
@@ -1464,6 +1481,7 @@ fn resolve_prefix(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
+    mc64: &Mc64Memo,
 ) -> Result<SymbolicPrefix, FeralError> {
     // Issue #107: a caller-supplied external ordering. Validate the
     // permutation is a bijection of `0..n` up front (a wrong length /
@@ -1485,9 +1503,51 @@ fn resolve_prefix(
     // fill (issue #91: qap15 conic KKT, 7.16M → 45.4M, 0.77s → 15.4s).
     // Race None vs LdltCompress on symbolic fill and keep the smaller.
     if snode_params.preprocess == OrderingPreprocess::Auto && !is_external {
-        return symbolic_prefix_preprocess_auto(matrix, snode_params, method);
+        return symbolic_prefix_preprocess_auto(matrix, snode_params, method, mc64);
     }
-    symbolic_prefix_concrete(matrix, snode_params, method)
+    symbolic_prefix_concrete(matrix, snode_params, method, mc64)
+}
+
+// Per-thread count of MC64 matchings computed through [`Mc64Memo`] — a
+// `#[cfg(test)]` probe for issue #248 (one matching per race, not one per
+// arm). Thread-local for the same reason as `FINISH_RUNS`.
+#[cfg(test)]
+thread_local! {
+    static MEMO_MC64_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The MC64 matching for one matrix, computed on first use and shared by
+/// every `LdltCompress` prefix of one symbolic call (issue #248).
+///
+/// The matching depends only on the matrix values and pattern, never on
+/// the ordering or the profiler, so every arm of the `AutoRace` race (and
+/// of the preprocess-`Auto` race inside it) can reuse the first arm's.
+/// Only a complete, uninterrupted `Ok` matching is stored: an interrupted
+/// call ends the race anyway, and a failure is recomputed (and fails the
+/// same way) by the next arm, exactly as before.
+struct Mc64Memo(std::cell::RefCell<Option<crate::scaling::Mc64Cache>>);
+
+impl Mc64Memo {
+    fn new() -> Self {
+        Mc64Memo(std::cell::RefCell::new(None))
+    }
+
+    /// The memoized matching, computing it on first use. Checks the
+    /// interrupt *before* looking at the result (issue #246): MC64 stops
+    /// early with an incomplete matching when interrupted, and that must
+    /// neither surface as a "structurally singular" error nor be stored.
+    fn get_or_compute(&self, matrix: &CscMatrix) -> Result<crate::scaling::Mc64Cache, FeralError> {
+        if let Some(cache) = self.0.borrow().as_ref() {
+            return Ok(cache.clone());
+        }
+        #[cfg(test)]
+        MEMO_MC64_RUNS.with(|c| c.set(c.get() + 1));
+        let cache = crate::scaling::compute_mc64_cache(matrix);
+        interrupt_check("ldlt_compress")?;
+        let cache = cache?;
+        *self.0.borrow_mut() = Some(cache.clone());
+        Ok(cache)
+    }
 }
 
 /// The concrete symbolic pipeline *prefix* (issue #127): runs ordering →
@@ -1498,6 +1558,7 @@ fn symbolic_prefix_concrete(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
+    mc64: &Mc64Memo,
 ) -> Result<SymbolicPrefix, FeralError> {
     let is_external = matches!(method, OrderingMethod::External(_));
     let n = matrix.n;
@@ -1587,12 +1648,11 @@ fn symbolic_prefix_concrete(
             // the expensive part — record it under its own `ldlt_compress`
             // stage (issue #80).
             let t_pre = prof.map(|_| std::time::Instant::now());
-            // Issue #246: MC64 stops early (with an incomplete matching) when
-            // interrupted, so check *before* looking at its result: a partial
-            // matching must not surface as a "structurally singular" error.
-            let cache = crate::scaling::compute_mc64_cache(matrix);
-            interrupt_check("ldlt_compress")?;
-            let cache = cache?;
+            // Issue #248: shared across the arms of a race via `mc64`, so
+            // only the first `LdltCompress` arm pays for the matching (the
+            // later arms record a near-zero `ldlt_compress` stage). The
+            // interrupt handling of issue #246 lives in `get_or_compute`.
+            let cache = mc64.get_or_compute(matrix)?;
             let map = build_supermap(&cache.perm);
             if let Some(t) = t_pre {
                 record_stage(prof, "ldlt_compress", t);
@@ -2604,6 +2664,83 @@ mod tests {
             1,
             "AutoRace must finish exactly one prefix (the winner)",
         );
+    }
+
+    /// A small saddle-point KKT `[[I, Aᵀ], [A, 0]]` whose zero (2,2) block
+    /// forces MC64 to match off-diagonal pairs, so `LdltCompress` really
+    /// compresses (ncmp < n) and the preprocess-`Auto` predicate picks it
+    /// (every lower-triangle column has ≤ 2 entries). Constraint `j` couples
+    /// variables `2j`, `2j + 1` and (when present) `2j + 2`.
+    fn saddle_kkt(m: usize) -> CscMatrix {
+        let nv = 2 * m + 1;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..nv {
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0 + i as f64 * 1e-3);
+        }
+        for j in 0..m {
+            for (k, v) in [(2 * j, 1.0), (2 * j + 1, -2.0), (2 * j + 2, 0.5)] {
+                rows.push(nv + j);
+                cols.push(k);
+                vals.push(v);
+            }
+        }
+        CscMatrix::from_triplets(nv + m, &rows, &cols, &vals).expect("saddle_kkt")
+    }
+
+    /// Issue #248: one race computes the MC64 matching once, however many
+    /// arms take the `LdltCompress` path (before: once per arm).
+    #[test]
+    fn autorace_computes_mc64_once_per_race() {
+        let m = saddle_kkt(100);
+        assert_eq!(
+            pick_ordering_preprocess(&m),
+            OrderingPreprocess::LdltCompress,
+            "fixture must exercise the LdltCompress arm",
+        );
+        let params = SupernodeParams::default();
+        for cands in [RACE_CANDIDATES, RACE_CANDIDATES_LARGE] {
+            MEMO_MC64_RUNS.with(|c| c.set(0));
+            symbolic_factorize_race_over(&m, &params, cands).expect("race");
+            assert_eq!(
+                MEMO_MC64_RUNS.with(|c| c.get()),
+                1,
+                "{cands:?}: MC64 must run once per race",
+            );
+        }
+    }
+
+    /// Issue #248: sharing the matching leaves the selection bit-identical.
+    /// Oracle: each candidate factorized on its own (its own matching, the
+    /// pre-#248 behaviour), then the smallest `factor_nnz_estimate` with
+    /// first-wins on ties — the race's documented rule.
+    #[test]
+    fn autorace_shared_mc64_selection_matches_independent_arms() {
+        for m in [saddle_kkt(100), saddle_kkt(257), tridiag(300)] {
+            let params = SupernodeParams::default();
+            for cands in [RACE_CANDIDATES, RACE_CANDIDATES_LARGE] {
+                let raced = symbolic_factorize_race_over(&m, &params, cands).expect("race");
+                let mut best: Option<SymbolicFactorization> = None;
+                for c in cands {
+                    let s = symbolic_factorize_with_method(&m, &params, c.clone())
+                        .expect("independent arm");
+                    if best
+                        .as_ref()
+                        .map(|b| s.factor_nnz_estimate < b.factor_nnz_estimate)
+                        .unwrap_or(true)
+                    {
+                        best = Some(s);
+                    }
+                }
+                let best = best.expect("at least one arm");
+                assert_eq!(raced.perm, best.perm, "n={} {cands:?}", m.n);
+                assert_eq!(raced.factor_nnz_estimate, best.factor_nnz_estimate);
+                assert_eq!(raced.supernodes.len(), best.supernodes.len());
+            }
+        }
     }
 
     /// Issue #246 step 3: `max_factor_bytes` check 1 fires on the prefix,

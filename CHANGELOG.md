@@ -56,6 +56,13 @@ All notable changes to FERAL will be documented in this file.
 - New probe: `examples/issue249_memory_breakdown.rs` (counting allocator,
   heap timeline, census of retained structures).
 
+### Changed — `AutoRace` computes the MC64 matching once per race (#248)
+- Every `LdltCompress` arm of an `AutoRace` race now reuses one MC64
+  matching instead of recomputing it. The selection is bit-identical.
+- On fhnw-binschedule1 (n = 1.9M, four-arm race) the symbolic phase drops
+  from 1294 s to 1007 s, with MC64 run once (52 s) and the same winner
+  (AMF + LdltCompress). The remaining time is the orderings themselves.
+
 ### Added — interrupting the symbolic phase: `Interrupt` (#246, PR #247 review)
 - `feral::Interrupt` (a deadline and/or a cancel flag), installed with
   `Solver::with_interrupt` / `Solver::set_interrupt` or

@@ -8517,7 +8517,7 @@ schedule-free bound could cover. The parallel bound is loose (1.7× on AMF,
 to the bit-exact sequential driver costs only time.
 
 **Evidence.** `dev/research/issue-249-memory-gap.md` and journal
-2026-11-24-02. Primal2, sequential: AMF predicted 4.92 vs measured
+2026-11-24-03. Primal2, sequential: AMF predicted 4.92 vs measured
 4.86 GB (old 3.53); AMD 8.58 vs 8.56 (old 8.30). AMF parallel, 4
 threads: 7.63 → 5.89 GB, wall 69 → 60 s. `tests/issue249_memory_model.rs`: the prediction bounds the
 measured heap peak on grids and a KKT, within 1.03–1.08× sequential and

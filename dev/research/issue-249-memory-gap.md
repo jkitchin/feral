@@ -1,6 +1,6 @@
 # Issue #249: real memory high-water vs `WorkEstimate::peak_bytes`
 
-Session 2026-11-24-02. Follow-up from #246 / PR #247.
+Session 2026-11-24-03. Follow-up from #246 / PR #247.
 
 ## Question
 

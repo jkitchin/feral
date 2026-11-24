@@ -1,101 +1,35 @@
-* 03:10 :issue-249:memory:probe:evidence:
-Issue #249: real high-water vs WorkEstimate::peak_bytes. New probe
-examples/issue249_memory_breakdown.rs (counting global allocator, 250 ms
-window-peak sampler, post-factor census of retained structures by
-capacity()). Primal2_1000 KKT rebuilt here (plato.asu.edu MPS +
-dev/scripts/mps_to_kkt.py; n = 3 858 760, stored nnz 9 356 900; input CSC
-0.181 GB). AMF, 4 cores:
-| driver        | heap peak - input | retained after | VmHWM   | wall   |
-| sequential    | 4.870 GB          | 4.549 GB       | 4.93 GB | 106 s  |
-| parallel, 1 t | 5.425 GB          | 4.387 GB       | 6.07 GB | 113 s  |
-| parallel, 2 t | 6.953 GB          | 4.387 GB       | 6.69 GB |  78 s  |
-| parallel, 4 t | 7.675 GB          | 4.387 GB       | 7.38 GB |  69 s  |
-Predicted: factor_bytes 1.996, peak_contrib 1.534, peak_bytes 3.530 GB.
-(The journal's 6.37 GB sequential VmHWM from 2026-11-23 is not reproduced
-here: 4.93 GB. That run read the matrix differently; the ratio to
-peak_bytes is still 1.4x here.)
-Retained census (AMF):
-- L values: 2.487 GB = exactly Σ_snodes nrow·ncol·8 (3.109e8 entries).
-  factor_bytes is 1.2 × Σ col_counts = 2.495e8 entries: the col counts are
-  pre-amalgamation (2.079e8), and amalgamation added 1.50x. The 1.2 slack
-  does not cover it. 0.20 GB of L is the strict upper triangle of each
-  diagonal block (stored rectangle).
-- per-node metadata 0.78 GB: BK perm+perm_inv 0.298 (length nrow each),
-  row_indices 0.149, Vec<NodeFactors> 720 331 × 352 B = 0.254, D 0.078.
-- symbolic retained 0.772 GB (static_row_flat 0.268, permuted_pattern
-  0.150, supernode rows 0.146, ...).
-- Solver workspace/caches ~0.4 GB (permute cache, last_pattern, pools).
-Timeline (parallel, 4 t): live heap climbs to 7.86 GB at t = 28.5 s and
-then falls ~0.12 GB per 4-5 s to 5.8 GB at the end: the off-chain
-subtrees finish early and their (square) blocks wait for the long top
-chain. Sequential climbs monotonically to its peak near the end; its
-transient above the final retained set is only 0.32 GB (packed blocks),
-under the 1.53 GB square model.
-Conclusion: the gap is (1) amalgamation fill missing from factor_bytes,
-(2) unmodelled per-node index metadata and the analysis itself, (3) under
-the parallel driver, a frontier of completed task blocks far larger than
-the postorder model. Max antichain of contribution blocks over the whole
-supernode tree is 6.03 GB here (a schedule-free bound, but 2x loose).
+* 02:55 :issue-248:autorace:mc64:
+Issue #248: the n >= 1M AutoRace ran MC64 once per arm. Added `Mc64Memo`
+in src/symbolic/mod.rs: one memo per race, threaded through resolve_prefix
+→ symbolic_prefix_preprocess_auto → symbolic_prefix_concrete; stores only
+an uninterrupted Ok matching (the #246 interrupt check moved into
+get_or_compute). Factored `symbolic_factorize_race_over(candidates)` so a
+test can race RACE_CANDIDATES_LARGE on a small matrix.
+Tests: a saddle KKT [[I,Aᵀ],[A,0]] (n=301, predicate → LdltCompress).
+`autorace_computes_mc64_once_per_race`: MEMO_MC64_RUNS == 1 for both
+candidate sets. Mutation (fresh memo per arm) failed it with left 2,
+right 1 on [Amd, MetisND]; reverted. Selection oracle: each candidate run
+alone (own matching) + min factor_nnz_estimate first-wins → identical perm
+on saddle_kkt(100), saddle_kkt(257), tridiag(300), both sets.
+cargo test --workspace --release: 1370 passed, 0 failed (was 1368).
+Rebuilt the fhnw repro: plato.asu.edu fhnw-binschedule1.mps.bz2 → KKT
+[[I,Aᵀ],[A,-1e-8 I]] via highspy (scratch script): n=1 914 525,
+nnz 10 525 851, same as session 2026-11-23-01.
 
-* 04:05 :issue-249:memory:estimate:
-Commit 5895c4b: WorkEstimate gains factor_stored_bytes (Σ nrow·ncol·8),
-factor_index_bytes, analysis_bytes, workspace_bytes, numeric_peak_bytes (a
-postorder walk of stored factor + live blocks + frontal pool), and
-peak_bytes = analysis + workspace + numeric_peak. Parallel:
-peak_bytes_parallel(threads) = everything + task-plan frontier (max
-antichain of task-root blocks) + per running task. Probe (heap peak above
-input): Primal2 AMF seq 5.06 predicted vs 4.87 measured (old 3.53);
-small-matrix test seq 1.03-1.08x, par 1.21-1.28x, old 0.29-0.34x.
-
-* 04:30 :issue-249:parallel:packed:allocation:
-The parallel driver held square blocks only because the packing work
-(decisions 2026-11-12) scoped itself to the sequential drivers;
-factor_one_supernode is generic over the layout. Switched the parallel
-driver to Packed (3 type sites; Square now test-only). Primal2 AMF, 4
-threads: heap peak 7.63 -> 6.12 GB (-20%), VmHWM 7.38 -> 6.9 GB, wall
-68.6/69.6 s -> 63.1/61.8 s. Frontier bound halves 5.76 -> 2.89 GB. AMD, 4
-threads: 12.27 GB measured (was > 13.5 GB RLIMIT_AS on the maintainer's run
-with square blocks).
-
-* 04:50 :issue-249:contrib-pool:allocation:
-AMD sequential under-predicted by 0.5% (9.317 vs 9.364 GB). Cause: the
-single-slot contribution pool. assemble_children puts each consumed child's
-buffer in the pool; extract_contrib reused it with clear()+reserve(len), so
-a block kept a larger recycled buffer's capacity (pinned until its parent),
-and a smaller one was realloc'ed (moved: no saving) and doubled. Simulating
-that exactly gave 9.528 (bounds). But for the parallel model, which buffer a
-worker recycles depends on the schedule, so no bound below 2x the largest
-block existed. Fix: recycle only when len <= cap <= len + max(len/8, 512),
-else allocate exactly. Values unchanged (bit-exact); block capacity <=
-1.125 len + 4 KiB, which the model now uses.
-
-* 05:00 :issue-249:parallel:budget:decision:
-The parallel bound is loose where many tasks have big fronts: AMD 4 threads
-31.7 GB bound vs 12.27 measured (2.6x); per-worker frontal pools (each up to
-2x its largest front, 1.7 GB fronts on AMD) dominate. Refusing on it would
-reject jobs that fit. Instead: when max_factor_bytes admits peak_bytes but
-not peak_bytes_parallel(threads), Solver runs that factorization on the
-sequential driver (bit-exact, same factors; Solver::ran_sequential_for_budget
-reports it). A first version refused with stage "peak_parallel"; replaced
-before commit.
-
-* 05:40 :issue-249:correction:
-Correction to the 05:00 entry: the "peak_parallel" refusal was committed in
-5895c4b, not replaced before commit; 1e51c36 replaces it with the
-sequential fallback. AMD parallel with the final code (packed + close-fit
-recycling): heap peak 12.01 GB above input, VmHWM 12.63 GB, wall 421.8 s;
-bound 34.87 GB (2.90x). Commits: 5895c4b (estimate), b2ce4b1 (packed
-parallel blocks + recycle rule + model), 1e51c36 (Solver fallback).
-
-* 07:10 :issue-249:contrib-pool:bugfix:evidence:
-AMD sequential with the close-fit rule measured 8.906 GB vs 8.557
-predicted (0.96x, under). Timeline: a ~0.35 GB spike for ~0.25 s at every
-top-chain front. Cause: in `match pool.take() { Some(buf) if fits => buf,
-_ => Vec::with_capacity(len) }` the unfit buffer is the scrutinee's
-temporary and drops at the end of the match, after the new allocation.
-Dropping it first (5a2dd0a): measured 8.555 GB; prediction 8.557 + the
-kernel's pooled panel scratch (3·nrow·64 entries, 0.023 GB) ~ 8.58
-(1.003x). Final batch, same binary: AMF seq 4.862 meas / 4.924 pred, 98.3 s;
-AMF par 4t 5.894 / 10.145, 59.3 and 60.3 s; AMD par 11.743 / 34.873,
-429 s. cargo test --workspace --release 1371/0; bench unchanged (2
-fixtures).
+* 03:20 :issue-248:autorace:mc64:bench:
+fhnw-binschedule1 four-arm AutoRace after 01003e7, this container,
+single-threaded (examples/issue248_race_mc64, FERAL_MC64_TRACE=1):
+1007.3 s total (was 1294.4 s in session 2026-11-24-01, -22%). MC64 ran
+exactly once: "call #1 ... matching 51751.6 ms". Same winner as before:
+Amf/LdltCompress, factor_nnz_estimate 3.2588e8 (= 1.2 × the 2.716e8
+nnz(L) reported last session), 816 539 supernodes, VmHWM 2.27 GB (was 2.71 GB).
+Winner's profile: ordering 334.07 s (AMF on the compressed graph);
+ldlt_compress 0.06 s (memo hit, since Amf is the last arm); every other
+stage < 1.1 s. Breakdown: 1007 s − 52 s MC64 ≈ 955 s is ordering work across
+8 prefixes (4 arms × {None, LdltCompress}). The orderings dominate, not
+MC64. The saving (287 s) is larger than 3 × 52 s = 155 s. Last session's
+run was on a different container, so part of the gap is machine variance.
+I did not separate the two.
+Implication: further speedup needs fewer prefixes, e.g. skipping the None
+arm per ordering, or pruning arms early on a partial fill estimate.
+Selection rules would change, so this is a behavioural decision, not a pure perf change.

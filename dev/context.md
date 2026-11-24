@@ -1,11 +1,11 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-24T04:47:16Z
+Generated: 2026-11-24T12:44:28Z
 
 ## Latest Session
-File: dev/sessions/2026-11-24-02.md
+File: dev/sessions/2026-11-24-03.md
 ```
-# Session 2026-11-24-02
+# Session 2026-11-24-03
 
 **Benchmark caveat (read first):** no KKT corpus in this container
 (`data/matrices/` absent). The bench covered only the 2 committed fixtures
@@ -59,11 +59,11 @@ down, fix the estimate or the allocation, tighten the book's advice.
 
 ## Git Status
 ```
+c7ddad6 session: 2026-11-24-02 checkpoint (issue #249 memory model)
 5a2dd0a fix(memory): free an unfit pooled block before allocating; model kernel scratch (#249)
 1e51c36 feat(solver): over the parallel bound, a budgeted Solver runs sequential (#249)
 b2ce4b1 perf(memory): parallel driver holds packed blocks; pool recycles close fits (#249)
 5895c4b fix(estimate): peak_bytes models what Solver::factor really holds (#249)
-4051231 Merge pull request #247 from jkitchin/claude/zen-hamilton-tra4mp
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 494 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.60s
+test result: ok. 496 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.18s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-03.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -131,7 +131,7 @@ schedule-free bound could cover. The parallel bound is loose (1.7× on AMF,
 to the bit-exact sequential driver costs only time.
 
 **Evidence.** `dev/research/issue-249-memory-gap.md` and journal
-2026-11-24-02. Primal2, sequential: AMF predicted 4.92 vs measured
+2026-11-24-03. Primal2, sequential: AMF predicted 4.92 vs measured
 4.86 GB (old 3.53); AMD 8.58 vs 8.56 (old 8.30). AMF parallel, 4
 threads: 7.63 → 5.89 GB, wall 69 → 60 s. `tests/issue249_memory_model.rs`: the prediction bounds the
 measured heap peak on grids and a KKT, within 1.03–1.08× sequential and
