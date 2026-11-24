@@ -127,12 +127,15 @@ fn peak_bytes_is_the_sum_of_its_documented_parts() {
     assert!(e.n_supernodes > 1, "expected a real supernode tree");
     assert!(e.peak_contrib_bytes > 0);
     // The numeric peak holds at least the whole stored factor, and at
-    // most the factor plus the contribution peak plus the frontal pool
-    // (whose capacity is under twice the largest front).
+    // most the factor plus the contribution peak (packed values and rows
+    // are under twice the square model) plus the frontal pool (under
+    // twice the largest front) plus the dense kernel's panel scratch
+    // (three 64-column panels and a vector, per row of the largest front).
     let stored = e.factor_stored_bytes + e.factor_index_bytes;
+    let scratch = (3 * 64 + 1) * e.max_front_rows * 8 + 64 * 8;
     assert!(e.numeric_peak_bytes >= stored);
     assert!(
-        e.numeric_peak_bytes <= stored + e.peak_contrib_bytes * 2 + 2 * e.max_front_bytes,
+        e.numeric_peak_bytes <= stored + e.peak_contrib_bytes * 2 + 2 * e.max_front_bytes + scratch,
         "numeric peak {} above factor {} + contrib {} + pool",
         e.numeric_peak_bytes,
         stored,

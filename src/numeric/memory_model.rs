@@ -120,6 +120,18 @@ fn grow_pool(cap: usize, nrow: usize) -> usize {
     }
 }
 
+/// Panel width of the blocked dense kernel (`BkParams::block_size`
+/// default).
+const PANEL: usize = 64;
+
+/// The dense kernel's pooled scratch once it has factored a front of
+/// order `r`: the packed trailing update's A and two B panels, up to
+/// `r × PANEL` entries each, the working subdiagonal of `D` and the panel
+/// `D` values.
+fn kernel_scratch_bytes(r: usize) -> usize {
+    (3 * r * PANEL + r + PANEL) * VB
+}
+
 /// Packed value entries of a node's contribution block.
 fn packed_len(sn: &Supernode) -> usize {
     let c = sn.contrib_nrow();
@@ -160,10 +172,13 @@ pub(crate) fn sequential_numeric_peak(sym: &SymbolicFactorization) -> usize {
     let mut live = 0usize;
     let mut front_cap = 0usize;
     let mut pool: Option<usize> = None;
+    let mut max_rows = 0usize;
     let mut peak = 0usize;
     for (k, sn) in sns.iter().enumerate() {
         front_cap = grow_pool(front_cap, sn.nrow);
-        let held = |pool: Option<usize>| pool.map_or(0, |c| c * VB);
+        max_rows = max_rows.max(sn.nrow);
+        let scratch = kernel_scratch_bytes(max_rows);
+        let held = |pool: Option<usize>| pool.map_or(0, |c| c * VB) + scratch;
         // Assembly: the front and every child's block are live.
         peak = peak.max(stored + live + front_cap * VB + held(pool));
         for &c in &sn.children {

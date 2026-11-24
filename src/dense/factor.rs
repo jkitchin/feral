@@ -1793,10 +1793,14 @@ fn extract_contrib(
     // with little slack. A much larger buffer would pin its excess for the
     // block's whole life (until the parent assembles it); a smaller one
     // would be reallocated (moved) anyway, and `reserve` would double it.
-    // Otherwise free it and allocate exactly.
+    // Otherwise free it and allocate exactly — free it *first*: left to
+    // the end of the `match`, it would be live beside the new block.
     let mut contrib = match pool.take() {
         Some(buf) if (len..=recycle_cap_limit(len)).contains(&buf.capacity()) => buf,
-        _ => Vec::with_capacity(len),
+        unfit => {
+            drop(unfit);
+            Vec::with_capacity(len)
+        }
     };
     contrib.clear();
     {

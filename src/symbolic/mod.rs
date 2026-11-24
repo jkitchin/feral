@@ -1073,7 +1073,7 @@ impl WorkEstimate {
     ///
     /// The frontier term is a bound over every schedule, so this is
     /// conservative: on the Primal2_1000 KKT with 4 threads it is 1.7×
-    /// the measured heap high-water under AMF and 2.9× under AMD, whose
+    /// the measured heap high-water under AMF and 3.0× under AMD, whose
     /// many large fronts each charge a worker a frontal pool. A parallel
     /// `Solver` over budget on this figure runs the sequential driver
     /// rather than refusing. It assumes at most `threads + 1` tasks
