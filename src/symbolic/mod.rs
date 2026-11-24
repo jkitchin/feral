@@ -1065,6 +1065,41 @@ fn map_ordering_error(e: feral_ordering_core::OrderingError) -> FeralError {
 /// measured set and are the most expensive candidates to analyse.
 pub const RACE_CANDIDATES: &[OrderingMethod] = &[OrderingMethod::Amd, OrderingMethod::MetisND];
 
+/// Matrix order at and above which [`OrderingMethod::AutoRace`] also races
+/// [`RACE_CANDIDATES_LARGE`] (issue #246, PR #247 review). Matches pounce's
+/// `CONVEX_AUTO_RACE_MIN_DIM`. Below it, every pounce fixture and #208's
+/// laptime keep the measured [`RACE_CANDIDATES`] pair.
+pub const RACE_LARGE_N: usize = 1_000_000;
+
+/// The [`OrderingMethod::AutoRace`] candidates for `n >= RACE_LARGE_N`:
+/// [`RACE_CANDIDATES`] plus `ScotchND` and `Amf`.
+///
+/// At this size the analysis is cheap next to one factorization, and the
+/// winner varies by matrix. With the monotone AMF quantization (0f6eb9c),
+/// AMF wins on fhnw-binschedule1 (nnz(L) 1.84e8 vs AMD 2.51e8). pounce
+/// measured SCOTCH as best on L1_sixm250obs (158 GB predicted vs METIS 187,
+/// AMD 544). The #208 laptime regression that removed `Amf` from the race
+/// was on a mid-sized collocation KKT, below this threshold. A slow arm
+/// (METIS on L2CTA3D) can be cut off with [`SupernodeParams::interrupt`].
+pub const RACE_CANDIDATES_LARGE: &[OrderingMethod] = &[
+    OrderingMethod::Amd,
+    OrderingMethod::MetisND,
+    OrderingMethod::ScotchND,
+    OrderingMethod::Amf,
+];
+
+/// The candidates [`OrderingMethod::AutoRace`] races for a matrix of order
+/// `n`: [`RACE_CANDIDATES_LARGE`] when `n >= RACE_LARGE_N`, else
+/// [`RACE_CANDIDATES`]. Ties go to the earlier entry, so adding arms at the
+/// end never displaces an existing winner on a tie.
+pub fn race_candidates(n: usize) -> &'static [OrderingMethod] {
+    if n >= RACE_LARGE_N {
+        RACE_CANDIDATES_LARGE
+    } else {
+        RACE_CANDIDATES
+    }
+}
+
 /// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the
 /// `SymbolicFactorization` with the smallest `factor_nnz_estimate`.
 ///
@@ -1092,7 +1127,7 @@ fn symbolic_factorize_race(
     // `finish_and_copy`) is copied into the caller's shared profiler, so
     // the report reflects exactly one ordering run.
     let mut last_err: Option<FeralError> = None;
-    for cand in RACE_CANDIDATES {
+    for cand in race_candidates(matrix.n) {
         interrupt_check("race")?;
         let cand_prof = snode_params
             .symbolic_profiler
@@ -2598,6 +2633,28 @@ mod tests {
         let far = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).expect("far");
         assert_eq!(far.perm, base.perm);
         assert_eq!(far.work_estimate(), base.work_estimate());
+    }
+
+    /// Issue #246 / PR #247 review: AutoRace widens only at n >= 1M.
+    #[test]
+    fn race_candidates_widen_only_at_large_n() {
+        assert_eq!(race_candidates(0), RACE_CANDIDATES);
+        assert_eq!(race_candidates(RACE_LARGE_N - 1), RACE_CANDIDATES);
+        assert_eq!(
+            race_candidates(RACE_LARGE_N),
+            &[
+                OrderingMethod::Amd,
+                OrderingMethod::MetisND,
+                OrderingMethod::ScotchND,
+                OrderingMethod::Amf
+            ]
+        );
+        // The small set is a prefix of the large one, so ties at large n
+        // still resolve the way they did before widening.
+        assert_eq!(
+            &RACE_CANDIDATES_LARGE[..RACE_CANDIDATES.len()],
+            RACE_CANDIDATES
+        );
     }
 
     #[test]

@@ -28,3 +28,13 @@ nothing, and recovers after set_interrupt(None). cargo test --workspace
 --release: 1361 passed, 0 failed. Clippy clean.
 fhnw (real case): Auto with a 60 s deadline stopped at 60.08 s (stage
 "ordering", 80 ms overshoot); AutoRace with 30 s stopped at 30.04 s.
+
+* 10:40 :issue-246:race:autorace:
+Widened AutoRace (n >= 1M: +ScotchND, +Amf) on fhnw: resolved
+Amf/LdltCompress, nnz(L) 2.716e8, peak 4.27 GB, VmHWM 2.71 GB, 1294.4 s.
+Same analysis as Auto. The issue's two-arm race picked AMD (2.51e8 nnz,
+6.79 GB) in 476 s. The choice is better but the race is 2.7× slower. Each
+arm runs its own preprocess race and so its own MC64 matching (four MC64
+runs at ~minutes each on fhnw): an obvious follow-up is sharing one MC64
+cache across arms. Primal2 MetisND with a 10 s deadline stopped at
+10.02 s (stage "ordering"), the L2CTA3D-style case.

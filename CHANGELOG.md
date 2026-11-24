@@ -26,6 +26,12 @@ All notable changes to FERAL will be documented in this file.
 - **Source-compatibility:** a second new `SupernodeParams` field
   (`interrupt`), plus new `FeralError` and `OrderingError` variants.
 
+### Changed — `AutoRace` races four orderings at n ≥ 1M (#246, PR #247 review)
+- For `n >= RACE_LARGE_N` (1 000 000), `AutoRace` races
+  `RACE_CANDIDATES_LARGE = {Amd, MetisND, ScotchND, Amf}`. Below that it
+  races `{Amd, MetisND}` as before, so pounce's fixtures and the #208
+  laptime case are unaffected. `race_candidates(n)` is public.
+
 ### Changed — `Auto` routes very-large low-degree matrices to AMF, not AMD (#246, pending validation)
 - `n > 100_000` with full average degree < 5 now resolves to `Amf` (was
   `Amd`, #50). On the Primal2_1000 LP KKT (n = 3.86M), nnz(L) drops from

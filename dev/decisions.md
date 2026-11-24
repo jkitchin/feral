@@ -8418,3 +8418,45 @@ nnz(L) 1.388e10 → 1.835e8 (AMD 4.369e8, MetisND 4.031e8), Σc² 1.49e15 →
 goes from 39 s to 128 s (accepted). The AMF corpus oracle bounds feral's
 nnz_L from above, so it still holds where MUMPS itself inverts.
 Journal 2026-11-23-01.
+
+## 2026-11-24 — Symbolic-phase interrupt: a scoped thread-local `Interrupt` polled at safe points
+
+**Context.** PR #247 review: `symbolic_factorize_with_method` was one
+uninterruptible call. L2CTA3D's METIS never finished inside pounce's
+timeout, and fhnw's symbolic took 595 s against the 300 s cpo3 limit.
+**Decision.** `feral_ordering_core::interrupt::{Interrupt, scope, poll,
+check}`: a deadline and/or a cancel flag, installed in a thread-local for
+the duration of the call. It is polled at safe points (AMD/AMF every 64
+pivots; METIS/SCOTCH per recursion node, level, trial and FM pass; KaHIP
+per recursion node; MC64 every 64 columns; feral between stages and race
+arms). It is sticky within a scope. It surfaces as `OrderingError::Interrupted`
+/ `FeralError::Interrupted { stage }`. A single variant covers both deadline
+and cancel; the host asks its `Interrupt` which one fired.
+**Rejected.** An explicit `&Interrupt` parameter through every ordering
+helper: dozens of signature changes across five crates for the same
+behaviour. That is only needed if an ordering becomes multi-threaded, and the
+module docs say so. A `DeadlineExceeded` name (the reviewer's suggestion):
+wrong for a cancel flag. Polling inside the numeric phase: it needs its own
+safe-point analysis of the parallel driver, so it is out of scope.
+**Evidence.** dev/research/issue-246-symbolic-deadline.md. 1361/0 tests.
+fhnw Auto with 60 s stopped at 60.08 s; AutoRace with 30 s at 30.04 s;
+Primal2 MetisND with 10 s at 10.02 s.
+
+## 2026-11-24 — AutoRace races {Amd, MetisND, ScotchND, Amf} at n ≥ 1M
+
+**Context.** PR #247 review: at n ≥ 1M the two-arm race misses the best
+ordering. With the monotone AMF fix, AMF beats AMD on fhnw. pounce
+measured SCOTCH as best on L1_sixm250obs (158 GB predicted vs METIS 187,
+AMD 544).
+**Decision.** `race_candidates(n)`: `RACE_CANDIDATES_LARGE = {Amd, MetisND,
+ScotchND, Amf}` for `n >= RACE_LARGE_N = 1_000_000`, otherwise the measured
+`{Amd, MetisND}` pair. The small set is a prefix of the large one, so ties
+resolve as before. The user chose this scope (large n only) on 2026-11-24.
+**Rejected.** Adding Amf at every n: #208 recorded AMF as a race arm
+changing pounce's laptime outcome on a mid-sized collocation KKT.
+**Evidence.** fhnw-binschedule1 widened AutoRace: resolved Amf/LdltCompress,
+nnz(L) 2.716e8, predicted peak 4.27 GB (the issue's two-arm race picked
+AMD at 6.79 GB). Cost: 1294 s symbolic in this container vs the issue's
+476 s for the two-arm race; each arm recomputes MC64 for its LdltCompress
+pass (follow-up). A slow race can now be bounded with `Interrupt`.
+Unvalidated on pounce's L1_sixm* / L2CTA3D.
