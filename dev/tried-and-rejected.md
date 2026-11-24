@@ -6453,3 +6453,13 @@ gate it on a golden pivot test, not on fill.
   (lengths only). It under-predicted Primal2 AMD sequential by 0.5%
   (9.317 vs 9.364 GB measured), because recycled buffers kept larger
   capacities.
+
+## 2026-11-24 — issue #249: close-fit-only contribution recycling (PR #251 review)
+
+- **Recycling a pooled block buffer only when `len ≤ cap ≤ len +
+  max(len/8, 512)`.** Maintainer's A/B (61 parity KKTs, default `Solver`, 4
+  cores): 1.164× geomean refactor time vs main, max 1.70× (SSI_2597), 29/61
+  over 15% slower; 1.019× with main's reuse restored. Not reproduced in the
+  authoring container (0.96–0.98×, identical allocation counts), but
+  replaced by a rule that is main's for blocks under 64 KiB:
+  `RECYCLE_SMALL = 8192` entries and in-place growth for small blocks.

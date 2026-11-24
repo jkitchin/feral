@@ -81,7 +81,8 @@ AMD, sequential: 9.364 GB measured vs old prediction 8.303 GB.
    the sequential drivers; `factor_one_supernode` is generic over the
    layout, and the factors are unchanged (parity tests). Primal2 AMF, 4
    threads: heap peak 7.63 → 6.12 GB (−20%), wall 69 → 62 s.
-2. **The contribution pool recycles only a close fit.** Each consumed
+2. **The contribution pool recycles only a close fit** (revised after
+   the PR #251 review; see the end of this note). Each consumed
    child's buffer goes to a single-slot pool, and `extract_contrib`
    reused it with `clear()` + `reserve(len)`. A larger buffer kept its
    capacity, pinning the excess until the block's parent assembled it;
@@ -175,3 +176,30 @@ so a parallel `Solver` whose budget admits `peak_bytes` but not
 - BK `perm` / `perm_inv` are `nrow` long but only the first `nelim`
   entries move (0.30 GB on Primal2).
 - `NodeFactors` is 352 B per supernode (0.25 GB on Primal2).
+
+## Revision after the PR #251 review
+
+The maintainer measured the close-fit rule (slack 512 entries) at 1.164×
+geomean refactor time on the 61 parity KKTs, up to 1.70× (default
+`Solver`, 4 cores), and 1.019× with the old reuse restored. The rule is now:
+reuse when `len ≤ cap ≤ len + max(len/8, RECYCLE_SMALL)`, grow a smaller
+buffer in place when `len ≤ RECYCLE_SMALL`, else free and allocate exactly,
+with `RECYCLE_SMALL = 8192` entries (64 KiB). Below 64 KiB this is main's
+behaviour, except that a pooled buffer more than 64 KiB larger than the
+block is freed. `recycled_block_cap` holds the rule for both the kernel
+and the model, and a unit test pins the kernel's capacities to it.
+
+Measured here (not the reviewer's machine):
+- allocations per warm refactor, summed over the 61: 18 109 for main, the
+  PR and the fix alike, on the sequential and the default driver. The
+  close-fit rule never turned a reuse into a malloc on this set.
+- sequential driver, 8 alternating rounds: PR/main 0.982 geomean, fix/main
+  1.001; no allocation difference, and per-matrix ratios move 12–19%
+  between runs (ACOPP30_0001 fix/main 1.19 in one run, 1.00 in the next).
+- default `Solver`: on the smallest KKTs a refactor costs ~30 µs, of which
+  the factorization is ~1.5 µs (sequential timing); the rest is thread-pool
+  dispatch, whose jitter moved single-matrix ratios 0.80–1.09.
+- slack choice: `1 << 17` raised Primal2 AMF's parallel bound 10.27 →
+  16.97 GB; `1 << 14` 10.84; `1 << 13` 10.51 (chosen). On the small test
+  matrices the parallel bound loosens from 1.2× to 1.7–2.8× (64 KiB charged
+  per live block). Primal2 memory unchanged (AMF seq 4.862, par 5.894 GB).

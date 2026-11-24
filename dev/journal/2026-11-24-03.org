@@ -99,3 +99,20 @@ kernel's pooled panel scratch (3·nrow·64 entries, 0.023 GB) ~ 8.58
 AMF par 4t 5.894 / 10.145, 59.3 and 60.3 s; AMD par 11.743 / 34.873,
 429 s. cargo test --workspace --release 1371/0; bench unchanged (2
 fixtures).
+
+* 14:00 :issue-249:pr-251:review:contrib-pool:perf:
+PR #251 review (jkitchin): close-fit recycle rule = 1.164x geomean refactor
+on the 61 parity KKTs (max 1.70 SSI_2597), 1.019 with main's reuse. Not
+reproduced here: A/B harness (default Solver, 30 refactors, best-of-3
+medians, alternating builds) gave PR/main 0.959-0.977 over 8 rounds;
+allocation counts per warm refactor identical (18 109 summed) for main/PR/fix
+on both drivers. Tiny KKTs are ~1.5 us of factor inside ~30 us of pool
+dispatch on the default Solver; jitter dominates. Sequential driver: PR/main
+0.982, fix/main 1.001; single matrices swing 12-19% between runs.
+Fix anyway (it is main's behaviour for small blocks): reuse when len <= cap
+<= len + max(len/8, RECYCLE_SMALL), grow a smaller buffer in place when len
+<= RECYCLE_SMALL, else free + exact; RECYCLE_SMALL 1<<13 (Primal2 AMF par
+bound 10.27 -> 10.51; 1<<17 gave 16.97). recycled_block_cap shared by kernel
+and model, pinned by a unit test. cargo test 1374/0. Primal2 AMF memory
+unchanged (seq 4.862 pred 4.924; par 5.894); wall drifted (machine slower:
+PR build 79-81 s, fix 76-77 s in the same window).

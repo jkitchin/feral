@@ -40,9 +40,10 @@ All notable changes to FERAL will be documented in this file.
 - The parallel task-graph driver holds contribution blocks packed (lower
   triangle), as the sequential drivers have since 2026-11-12. Factors are
   unchanged.
-- `extract_contrib` reuses the pooled buffer of a consumed child only when
-  it fits the new block closely (`len ≤ capacity ≤ len + max(len/8, 512)`).
-  Otherwise it allocates the block exactly, after freeing the unfit
+- `extract_contrib` reuses the pooled buffer of a consumed child when it
+  fits the new block (`len ≤ capacity ≤ len + max(len/8, 8192)`), or when it
+  is smaller and the block has at most 8192 entries (grown in place, as
+  before). Otherwise it allocates the block exactly, after freeing the unfit
   buffer (it used to stay live beside the new block). A larger recycled
   buffer had pinned its excess until the block's parent assembled it; a
   smaller one was reallocated anyway. Values are unchanged.

@@ -25,7 +25,7 @@
 
 use std::mem::size_of;
 
-use crate::dense::factor::recycle_cap_limit;
+use crate::dense::factor::{recycle_cap_limit, recycled_block_cap};
 use crate::numeric::contrib::{ContribBlock, Packed};
 use crate::numeric::factorize::NodeFactors;
 use crate::symbolic::supernode::Supernode;
@@ -138,17 +138,6 @@ fn packed_len(sn: &Supernode) -> usize {
     c * (c + 1) / 2
 }
 
-/// Capacity (entries) of a block extracted through the single-slot
-/// contribution pool (`dense::factor::extract_contrib`): the pooled buffer
-/// when its capacity lies in `len..=recycle_cap_limit(len)`, else an exact
-/// allocation.
-fn pooled_block_cap(pool: Option<usize>, len: usize) -> usize {
-    match pool {
-        Some(cap) if (len..=recycle_cap_limit(len)).contains(&cap) => cap,
-        _ => len,
-    }
-}
-
 /// Largest bytes one live block of `sn` can hold whatever buffer it was
 /// recycled from: values up to `recycle_cap_limit` entries, plus rows.
 fn block_bytes_bound(sn: &Supernode) -> usize {
@@ -192,7 +181,7 @@ pub(crate) fn sequential_numeric_peak(sym: &SymbolicFactorization) -> usize {
         stored += node_value_bytes(sn) + node_index_bytes(sn);
         let len = packed_len(sn);
         if len > 0 {
-            cap_of[k] = pooled_block_cap(pool.take(), len);
+            cap_of[k] = recycled_block_cap(pool.take(), len);
             live += cap_of[k] * VB + sn.contrib_nrow() * IB;
         }
         peak = peak.max(stored + live + front_cap * VB + held(pool));
