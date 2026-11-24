@@ -110,6 +110,10 @@ fn recurse(
     rng: &mut SplitMix,
     stats: &mut KahipStats,
 ) -> Result<(), OrderingError> {
+    // Issue #246: one interrupt check per recursion node. KaHIP polls only
+    // here and after each bisection (not inside the multilevel/flow code),
+    // so its overshoot past a deadline is bounded by one bisection.
+    feral_ordering_core::interrupt::check()?;
     let n = subgraph.nvtxs as usize;
     if n == 0 {
         return Ok(());
@@ -160,6 +164,8 @@ fn recurse(
             }
         }
     };
+
+    feral_ordering_core::interrupt::check()?;
 
     let mut a_verts: Vec<i32> = Vec::new();
     let mut b_verts: Vec<i32> = Vec::new();

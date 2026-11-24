@@ -4,6 +4,78 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — interrupting the symbolic phase: `Interrupt` (#246, PR #247 review)
+- `feral::Interrupt` (a deadline and/or a cancel flag), installed with
+  `Solver::with_interrupt` / `Solver::set_interrupt` or
+  `SupernodeParams::interrupt`. The symbolic analysis polls it at safe
+  points and returns the new `FeralError::Interrupted { stage }` with no
+  partial result. The safe points are:
+  - every 64 pivots of AMD/AMF;
+  - each recursion node, coarsening level, trial and refinement pass of
+    METIS/SCOTCH (KaHIP: each recursion node);
+  - every 64 columns of the MC64 matching behind `LdltCompress`;
+  - between pipeline stages and race arms.
+
+  The overshoot past a deadline is bounded by one safe point, not by the
+  whole analysis. The numeric phase does not poll it. Python maps the error
+  to `FactorError`.
+- The ordering crates expose the same thing on their own:
+  `feral_{amd,amf,metis,scotch,kahip}::*_order_interruptible(pattern, opts,
+  &Interrupt)`, `feral_ordering_core::interrupt`, and
+  `OrderingError::Interrupted`.
+- **Source-compatibility:** a second new `SupernodeParams` field
+  (`interrupt`), plus new `FeralError` and `OrderingError` variants.
+
+### Changed — `AutoRace` races four orderings at n ≥ 1M (#246, PR #247 review)
+- For `n >= RACE_LARGE_N` (1 000 000), `AutoRace` races
+  `RACE_CANDIDATES_LARGE = {Amd, MetisND, ScotchND, Amf}`. Below that it
+  races `{Amd, MetisND}` as before, so pounce's fixtures and the #208
+  laptime case are unaffected. `race_candidates(n)` is public.
+
+### Changed — `Auto` routes very-large low-degree matrices to AMF, not AMD (#246)
+- `n > 100_000` with full average degree < 5 now resolves to `Amf` (was
+  `Amd`, #50). Measured single-threaded:
+
+  | matrix | n | AMD (old `Auto`) | AMF (new `Auto`) | inertia |
+  |---|---|---|---|---|
+  | Primal2_1000 LP KKT | 3.86M | refactor 999 s, predicted peak 8.30 GB | refactor 84 s, peak 3.53 GB | identical |
+  | powerflow22 (the #50 calibration case) | 2.81M | refactor 0.69 s, peak RSS 3.94 GB | refactor 0.68–0.71 s, 3.92 GB | identical |
+  | PDE2_0000 | 451k | refactor 0.95–0.96 s, first factor 1.28–1.38 s | refactor 1.11–1.12 s, first factor 1.47 s | identical |
+
+- **Cost:** PDE2_0000 is about 15% slower on the first factor and 17% slower
+  per refactor (+0.16 s). On the network LPs measured, fill is within 0.6%
+  of AMD's.
+
+### Added — memory budget for the analysis: `max_factor_bytes` (#246)
+- `Solver::with_max_factor_bytes(Some(bytes))` and
+  `SupernodeParams::max_factor_bytes` make the symbolic phase return the
+  new `FeralError::MemoryBudgetExceeded { predicted_bytes, budget_bytes,
+  stage }` instead of an analysis whose factorization would not fit.
+  `stage` is `"factor"` when the predicted factor bytes, checked right
+  after ordering and *before* the supernodal finish allocates, are over
+  the budget. It is `"peak"` when the full predicted peak
+  (`WorkEstimate::peak_bytes`) is over. Through `Solver::factor` the error
+  arrives as `FactorStatus::FatalError`. Python raises the new
+  `feral.MemoryBudgetExceeded`, a `FactorError`.
+- Default `None`: no behaviour change.
+- **Source-compatibility note.** `SupernodeParams` gains a public field,
+  so code that builds it with a full struct literal (no
+  `..Default::default()`) must add `max_factor_bytes: None`. Code that
+  matches `FeralError` exhaustively needs an arm for the new variant.
+
+### Fixed — AMF ordering no longer inverts its fill priority at large n (#246)
+- `OrderingMethod::Amf` (and `Auto` where it resolves to AMF) used MUMPS
+  HAMF4's score quantization, which stores a fill score `>= i32::MAX` as
+  `score / n`. On large matrices with high-degree rows, that filed
+  near-dense variables as cheap. On the fhnw-binschedule1 LP KKT
+  (n = 1.9M), AMF's predicted nnz(L) was 1.39e10 (32× AMD), and the
+  symbolic phase ran out of memory. Scores are now kept exact in `i64`:
+  fhnw AMF nnz(L) is 1.84e8, below both AMD (4.37e8) and MetisND (4.03e8).
+  Orderings are unchanged wherever every score stays below 2³¹, which
+  covers all small and medium matrices.
+- This deliberately deviates from MUMPS; see `dev/decisions.md`
+  (2026-11-23).
+
 ## [0.24.0] - 2026-11-19
 
 A minor release, not a 0.23.x patch, because it raises the minimum

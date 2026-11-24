@@ -81,7 +81,8 @@ pub enum OrderingMethod {
     /// Issue #50 plus its F11 follow-up (2026-05-23) collapsed the
     /// per-shape branches to one very-large-and-sparse catch on top
     /// of [`pick_default_method`]:
-    ///   - very-large-and-sparse (n > 100_000, full nnz/n < 5) → `Amd`
+    ///   - very-large-and-sparse (n > 100_000, full nnz/n < 5) → `Amf`
+    ///     (issue #246; `Amd` from #50 until then)
     ///   - everything else delegates to [`pick_default_method`]
     ///     (`n <= 10_000 → Amf`, `n > 10_000 → MetisND`).
     ///
@@ -215,12 +216,13 @@ pub(crate) fn validate_external_perm(perm: &[usize], n: usize) -> Result<(), Fer
 ///
 /// The rule set adds shape-bakeoff branches on top of
 /// [`pick_default_method`]:
-///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amd`
+///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amf`
+///     (issue #246; `Amd` from #50 until then)
 ///   - arrow/bordered (issue #64): whenever the size rule would pick
 ///     `MetisND` (`n > 10_000`) but [`is_arrow_bordered`] detects a
 ///     dense border concentrating the nonzeros, override to `Amf`.
 ///   - thin-large (issues #67 + #73): whenever the size rule would still
-///     pick `MetisND` (after the avg_deg<5 → AMD and arrow → AMF catches),
+///     pick `MetisND` (after the avg_deg<5 → AMF and arrow → AMF catches),
 ///     override to `Amf` at every `n`. Corpus A/Bs on real factor+solve
 ///     wall-time found AMF wins or ties MetisND across the whole population
 ///     — 36/36 in the `(10_000, 100_000]` band (#67) and every measured
@@ -277,8 +279,17 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
         return OrderingMethod::Amd;
     }
     let avg_deg = full_nnz as f64 / n as f64;
+    // Issue #246 (DRAFT pending the powerflow22 A/B): very-large-and-
+    // sparse routes to AMF, not AMD. With AMF's score quantization
+    // monotone (0f6eb9c), AMF's fill is <= AMD's on every measured member
+    // of this regime and far lower on LP KKTs: Primal2_1000 nnz(L)
+    // 1.80e8 vs 3.19e8 (flop proxy 4.1e11 vs 2.4e12), dlr1 1.18e8 vs
+    // 1.90e8, and lo10 / long15 / netlarge2 within 0.6%. The ordering costs
+    // 1.3-1.6x AMD's (seconds). The issue #50 rationale (avoid nested
+    // dissection's symbolic cost) is kept: AMF is a local ordering too.
+    // See `dev/research/issue-246-low-degree-routing.md`.
     if n > 100_000 && avg_deg < 5.0 {
-        return OrderingMethod::Amd;
+        return OrderingMethod::Amf;
     }
     // Convert full-symmetric nnz back to a stored-lower-triangle
     // equivalent so `pick_default_method`'s thresholds (calibrated on
@@ -292,7 +303,7 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     // very-high-degree columns concentrating the nonzeros) and the LDLᵀ
     // factor blows up ~7-9× vs AMF/AMD. Override MetisND → AMF on the
     // arrow signature. Only the would-be-MetisND decision is touched;
-    // the `n <= 10_000 → AMF` and `n > 100_000 && avg_deg < 5 → AMD`
+    // the `n <= 10_000 → AMF` and `n > 100_000 && avg_deg < 5 → AMF` (#246)
     // (returned above) paths are untouched. See
     // `dev/research/issue-64-arrow-bordered-ordering.md`.
     if base == OrderingMethod::MetisND && is_arrow_bordered(pattern) {
@@ -647,7 +658,7 @@ fn compute_static_row_indices(
 /// walk). Narrow on purpose — see comment on `Auto` for why a broad
 /// dispatcher regressed the IPM bench. `choose_adaptive` calls this for
 /// the bulk of patterns, then layers the pattern-aware catches on top
-/// (very-large-and-sparse → AMD; arrow/bordered → AMF, issue #64).
+/// (very-large-and-sparse → AMF (#246); arrow/bordered → AMF, issue #64).
 ///
 /// Current rule (mirrors MUMPS's `ana_set_ordering.F` AMF-vs-METIS
 /// heuristic):
@@ -848,8 +859,7 @@ fn run_external_ordering(
             unreachable!("AutoRace is resolved by symbolic_factorize_with_method")
         }
     };
-    let perm_i32 = perm_i32
-        .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
+    let perm_i32 = perm_i32.map_err(map_ordering_error)?;
     if perm_i32.len() != pattern.n {
         return Err(FeralError::InvalidInput(format!(
             "external ordering returned {} entries for n={}",
@@ -995,6 +1005,28 @@ pub fn predicted_front_flops(sym: &SymbolicFactorization) -> u128 {
         .sum()
 }
 
+/// `Err(FeralError::Interrupted { stage })` when the active interrupt
+/// (installed by [`symbolic_factorize_with_method`] from
+/// [`SupernodeParams::interrupt`]) has triggered (issue #246).
+fn interrupt_check(stage: &'static str) -> Result<(), FeralError> {
+    if feral_ordering_core::interrupt::poll() {
+        Err(FeralError::Interrupted { stage })
+    } else {
+        Ok(())
+    }
+}
+
+/// Map an ordering-crate error: an interrupt stays an interrupt, anything
+/// else is reported as a failed ordering.
+fn map_ordering_error(e: feral_ordering_core::OrderingError) -> FeralError {
+    match e {
+        feral_ordering_core::OrderingError::Interrupted => {
+            FeralError::Interrupted { stage: "ordering" }
+        }
+        e => FeralError::InvalidInput(format!("external ordering failed: {}", e)),
+    }
+}
+
 /// Concrete candidates raced by [`OrderingMethod::AutoRace`].
 ///
 /// Public so callers (and tests) can see what the race covers without
@@ -1033,6 +1065,41 @@ pub fn predicted_front_flops(sym: &SymbolicFactorization) -> u128 {
 /// measured set and are the most expensive candidates to analyse.
 pub const RACE_CANDIDATES: &[OrderingMethod] = &[OrderingMethod::Amd, OrderingMethod::MetisND];
 
+/// Matrix order at and above which [`OrderingMethod::AutoRace`] also races
+/// [`RACE_CANDIDATES_LARGE`] (issue #246, PR #247 review). Matches pounce's
+/// `CONVEX_AUTO_RACE_MIN_DIM`. Below it, every pounce fixture and #208's
+/// laptime keep the measured [`RACE_CANDIDATES`] pair.
+pub const RACE_LARGE_N: usize = 1_000_000;
+
+/// The [`OrderingMethod::AutoRace`] candidates for `n >= RACE_LARGE_N`:
+/// [`RACE_CANDIDATES`] plus `ScotchND` and `Amf`.
+///
+/// At this size the analysis is cheap next to one factorization, and the
+/// winner varies by matrix. With the monotone AMF quantization (0f6eb9c),
+/// AMF wins on fhnw-binschedule1 (nnz(L) 1.84e8 vs AMD 2.51e8). pounce
+/// measured SCOTCH as best on L1_sixm250obs (158 GB predicted vs METIS 187,
+/// AMD 544). The #208 laptime regression that removed `Amf` from the race
+/// was on a mid-sized collocation KKT, below this threshold. A slow arm
+/// (METIS on L2CTA3D) can be cut off with [`SupernodeParams::interrupt`].
+pub const RACE_CANDIDATES_LARGE: &[OrderingMethod] = &[
+    OrderingMethod::Amd,
+    OrderingMethod::MetisND,
+    OrderingMethod::ScotchND,
+    OrderingMethod::Amf,
+];
+
+/// The candidates [`OrderingMethod::AutoRace`] races for a matrix of order
+/// `n`: [`RACE_CANDIDATES_LARGE`] when `n >= RACE_LARGE_N`, else
+/// [`RACE_CANDIDATES`]. Ties go to the earlier entry, so adding arms at the
+/// end never displaces an existing winner on a tie.
+pub fn race_candidates(n: usize) -> &'static [OrderingMethod] {
+    if n >= RACE_LARGE_N {
+        RACE_CANDIDATES_LARGE
+    } else {
+        RACE_CANDIDATES
+    }
+}
+
 /// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the
 /// `SymbolicFactorization` with the smallest `factor_nnz_estimate`.
 ///
@@ -1060,7 +1127,8 @@ fn symbolic_factorize_race(
     // `finish_and_copy`) is copied into the caller's shared profiler, so
     // the report reflects exactly one ordering run.
     let mut last_err: Option<FeralError> = None;
-    for cand in RACE_CANDIDATES {
+    for cand in race_candidates(matrix.n) {
+        interrupt_check("race")?;
         let cand_prof = snode_params
             .symbolic_profiler
             .as_ref()
@@ -1082,6 +1150,8 @@ fn symbolic_factorize_race(
                     best = Some(prefix);
                 }
             }
+            // An interrupt ends the whole race; other failures skip the arm.
+            Err(e @ FeralError::Interrupted { .. }) => return Err(e),
             Err(e) => {
                 last_err = Some(e);
             }
@@ -1092,10 +1162,7 @@ fn symbolic_factorize_race(
             FeralError::InvalidInput("AutoRace: no candidates available".to_string())
         })
     })?;
-    Ok(finish_and_copy(
-        best,
-        snode_params.symbolic_profiler.as_ref(),
-    ))
+    finish_checked(best, snode_params)
 }
 
 /// Resolve [`OrderingPreprocess::Auto`] by verifying fill rather than
@@ -1173,8 +1240,12 @@ fn symbolic_prefix_preprocess_auto(
     // 6.3×. Validated by the full corpus suite (no inertia regression) plus
     // `tests/issue91_preprocess_misfire.rs`.
     let none = run(OrderingPreprocess::None)?;
+    interrupt_check("race")?;
     let none_limit = (none.factor_nnz_estimate as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
     match run(OrderingPreprocess::LdltCompress) {
+        // Issue #246: an interrupt in the second arm must not be mistaken for
+        // a failed LdltCompress and silently fall back to `None`.
+        Err(e @ FeralError::Interrupted { .. }) => Err(e),
         Ok(comp) if (comp.factor_nnz_estimate as f64) <= none_limit => Ok(comp),
         // LdltCompress inflates fill past the catastrophe limit (or failed)
         // — use None.
@@ -1202,6 +1273,20 @@ pub fn symbolic_factorize_with_method(
     snode_params: &SupernodeParams,
     method: OrderingMethod,
 ) -> Result<SymbolicFactorization, FeralError> {
+    // Issue #246: install the caller's interrupt (if any) for the whole
+    // analysis, so every ordering crate and MC64 below can poll it.
+    feral_ordering_core::interrupt::scope_if(snode_params.interrupt.as_ref(), || {
+        interrupt_check("entry")?;
+        symbolic_factorize_with_method_inner(matrix, snode_params, method)
+    })
+}
+
+/// [`symbolic_factorize_with_method`] with the interrupt scope already open.
+fn symbolic_factorize_with_method_inner(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    method: OrderingMethod,
+) -> Result<SymbolicFactorization, FeralError> {
     // AutoRace is resolved here by racing each concrete candidate's
     // *prefix* (issue #127) and finishing only the winner. The recursive
     // call passes a concrete `OrderingMethod`, so there is no infinite loop.
@@ -1214,10 +1299,7 @@ pub fn symbolic_factorize_with_method(
     // `AutoRace` races decide on `factor_nnz_estimate` alone, so they race
     // prefixes and finish only the winner — the losers never pay the tail.
     let prefix = resolve_prefix(matrix, snode_params, method)?;
-    Ok(finish_and_copy(
-        prefix,
-        snode_params.symbolic_profiler.as_ref(),
-    ))
+    finish_checked(prefix, snode_params)
 }
 
 /// The intermediate produced by the symbolic pipeline *prefix* (issue
@@ -1388,7 +1470,12 @@ fn symbolic_prefix_concrete(
             // the expensive part — record it under its own `ldlt_compress`
             // stage (issue #80).
             let t_pre = prof.map(|_| std::time::Instant::now());
-            let cache = crate::scaling::compute_mc64_cache(matrix)?;
+            // Issue #246: MC64 stops early (with an incomplete matching) when
+            // interrupted, so check *before* looking at its result: a partial
+            // matching must not surface as a "structurally singular" error.
+            let cache = crate::scaling::compute_mc64_cache(matrix);
+            interrupt_check("ldlt_compress")?;
+            let cache = cache?;
             let map = build_supermap(&cache.perm);
             if let Some(t) = t_pre {
                 record_stage(prof, "ldlt_compress", t);
@@ -1493,7 +1580,9 @@ fn symbolic_prefix_concrete(
     // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
     // KKT matrices — see `dev/validation/phase-2.5.1-*`.
     let t_cc = prof.map(|_| std::time::Instant::now());
+    interrupt_check("ordering")?;
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
+    interrupt_check("column_counts")?;
     if let Some(t) = t_cc {
         record_stage(prof, "col_counts", t);
     }
@@ -1713,6 +1802,49 @@ fn finish_and_copy(
     sym
 }
 
+/// [`finish_and_copy`] guarded by [`SupernodeParams::max_factor_bytes`]
+/// (issue #246). Check 1 runs on the prefix, *before* the finish: the
+/// predicted factor bytes are `factor_nnz_estimate · size_of::<f64>()`,
+/// exactly [`WorkEstimate::factor_bytes`] of the eventual analysis. This
+/// stops a bad ordering before `symbolic_finish` allocates O(factor)
+/// structure. Check 2 runs after the finish, against
+/// [`WorkEstimate::peak_bytes`].
+///
+/// The budget is read from `budget_params` (the caller's params), not the
+/// prefix's `effective_params`, so a raced arm cannot shadow it.
+fn finish_checked(
+    prefix: SymbolicPrefix,
+    budget_params: &SupernodeParams,
+) -> Result<SymbolicFactorization, FeralError> {
+    let budget = budget_params.max_factor_bytes;
+    if let Some(budget_bytes) = budget {
+        let predicted_bytes = prefix
+            .factor_nnz_estimate
+            .saturating_mul(std::mem::size_of::<f64>());
+        if predicted_bytes > budget_bytes {
+            return Err(FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage: "factor",
+            });
+        }
+    }
+    interrupt_check("finish")?;
+    let sym = finish_and_copy(prefix, budget_params.symbolic_profiler.as_ref());
+    interrupt_check("finish")?;
+    if let Some(budget_bytes) = budget {
+        let predicted_bytes = sym.work_estimate().peak_bytes;
+        if predicted_bytes > budget_bytes {
+            return Err(FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage: "peak",
+            });
+        }
+    }
+    Ok(sym)
+}
+
 /// Symbolic factorization with a user-supplied Schur tail (F3.2a).
 ///
 /// Like [`symbolic_factorize_with_method`] except the last `n_schur`
@@ -1755,6 +1887,19 @@ fn finish_and_copy(
 /// Returns `is_schur_tail = Some(n_schur)` so the numeric phase (F3.2b)
 /// can enforce the per-front `NPIV ≤ NASS − NVSCHUR` stopping rule.
 pub fn symbolic_factorize_with_schur(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    schur_indices: &[usize],
+) -> Result<SymbolicFactorization, FeralError> {
+    // Issue #246: same interrupt scope as `symbolic_factorize_with_method`
+    // (nested scopes of the same interrupt are harmless).
+    feral_ordering_core::interrupt::scope_if(snode_params.interrupt.as_ref(), || {
+        interrupt_check("entry")?;
+        symbolic_factorize_with_schur_inner(matrix, snode_params, schur_indices)
+    })
+}
+
+fn symbolic_factorize_with_schur_inner(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     schur_indices: &[usize],
@@ -2344,6 +2489,174 @@ mod tests {
         );
     }
 
+    /// Issue #246 step 3: `max_factor_bytes` check 1 fires on the prefix,
+    /// before the finish. Oracle (hand arithmetic): a path graph has no
+    /// fill under any ordering, so Σ colcount = 2n − 1 = 19 for n = 10,
+    /// `factor_nnz_estimate = floor(19 · 1.2) = 22`, factor bytes = 176.
+    #[test]
+    fn max_factor_bytes_check1_fires_before_finish() {
+        let m = tridiag(10);
+        for method in [
+            OrderingMethod::Amd,
+            OrderingMethod::Amf,
+            OrderingMethod::AutoRace,
+        ] {
+            let params = SupernodeParams {
+                max_factor_bytes: Some(175),
+                ..Default::default()
+            };
+            FINISH_RUNS.with(|c| c.set(0));
+            match symbolic_factorize_with_method(&m, &params, method.clone()) {
+                Err(FeralError::MemoryBudgetExceeded {
+                    predicted_bytes,
+                    budget_bytes,
+                    stage,
+                }) => {
+                    assert_eq!(predicted_bytes, 176, "{method:?}");
+                    assert_eq!(budget_bytes, 175, "{method:?}");
+                    assert_eq!(stage, "factor", "{method:?}");
+                }
+                other => panic!("{method:?}: expected MemoryBudgetExceeded, got {other:?}"),
+            }
+            assert_eq!(
+                FINISH_RUNS.with(|c| c.get()),
+                0,
+                "{method:?}: check 1 must reject before symbolic_finish runs"
+            );
+        }
+    }
+
+    /// Issue #246 step 3: a budget at exactly the factor bytes passes
+    /// check 1; `None` and `usize::MAX` leave the analysis unchanged.
+    #[test]
+    fn max_factor_bytes_generous_budget_is_a_no_op() {
+        let m = tridiag(10);
+        let base =
+            symbolic_factorize_with_method(&m, &SupernodeParams::default(), OrderingMethod::Amd)
+                .expect("unbudgeted");
+        let w = base.work_estimate();
+        assert_eq!(w.factor_bytes, 176, "hand oracle: 22 slacked entries x 8 B");
+        for budget in [Some(usize::MAX), Some(w.peak_bytes)] {
+            let params = SupernodeParams {
+                max_factor_bytes: budget,
+                ..Default::default()
+            };
+            let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd)
+                .expect("within budget");
+            assert_eq!(sym.perm, base.perm);
+            assert_eq!(sym.work_estimate(), w);
+        }
+    }
+
+    /// Issue #246 step 3: check 2 compares the full predicted peak
+    /// (factor + contribution blocks). With `nemin = 1` every column of a
+    /// path is its own supernode and passes a 1x1 contribution block up,
+    /// so `peak_bytes > factor_bytes`; a budget equal to `factor_bytes`
+    /// passes check 1 and must fail check 2.
+    #[test]
+    fn max_factor_bytes_check2_uses_peak_bytes() {
+        let m = tridiag(10);
+        let p0 = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
+        let w = symbolic_factorize_with_method(&m, &p0, OrderingMethod::Amd)
+            .expect("unbudgeted")
+            .work_estimate();
+        assert!(
+            w.peak_bytes > w.factor_bytes,
+            "fixture must have a contribution block: {w:?}"
+        );
+        let params = SupernodeParams {
+            max_factor_bytes: Some(w.factor_bytes),
+            ..p0
+        };
+        match symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd) {
+            Err(FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage,
+            }) => {
+                assert_eq!(predicted_bytes, w.peak_bytes);
+                assert_eq!(budget_bytes, w.factor_bytes);
+                assert_eq!(stage, "peak");
+            }
+            other => panic!("expected a peak-stage MemoryBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    /// Issue #246 / PR #247 review: an already-expired interrupt stops the
+    /// symbolic phase before any result, for every ordering method, both
+    /// races and the forced-LdltCompress (MC64) path, and never reaches the
+    /// finish.
+    #[test]
+    fn expired_interrupt_stops_every_method_before_finish() {
+        use crate::Interrupt;
+        let m = tridiag(400);
+        let expired = Interrupt::at(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        let methods = [
+            OrderingMethod::Amd,
+            OrderingMethod::Amf,
+            OrderingMethod::MetisND,
+            OrderingMethod::ScotchND,
+            OrderingMethod::KahipND,
+            OrderingMethod::Auto,
+            OrderingMethod::AutoRace,
+        ];
+        for pre in [
+            OrderingPreprocess::None,
+            OrderingPreprocess::LdltCompress,
+            OrderingPreprocess::Auto,
+        ] {
+            for method in methods.iter() {
+                let params = SupernodeParams {
+                    preprocess: pre,
+                    interrupt: Some(expired.clone()),
+                    ..Default::default()
+                };
+                FINISH_RUNS.with(|c| c.set(0));
+                match symbolic_factorize_with_method(&m, &params, method.clone()) {
+                    Err(FeralError::Interrupted { .. }) => {}
+                    other => panic!("{method:?}/{pre:?}: expected Interrupted, got {other:?}"),
+                }
+                assert_eq!(FINISH_RUNS.with(|c| c.get()), 0, "{method:?}/{pre:?}");
+            }
+        }
+        // No interrupt, and an inert one, change nothing.
+        let base =
+            symbolic_factorize_with_method(&m, &SupernodeParams::default(), OrderingMethod::Auto)
+                .expect("base");
+        let params = SupernodeParams {
+            interrupt: Some(Interrupt::after(std::time::Duration::from_secs(3600))),
+            ..Default::default()
+        };
+        let far = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).expect("far");
+        assert_eq!(far.perm, base.perm);
+        assert_eq!(far.work_estimate(), base.work_estimate());
+    }
+
+    /// Issue #246 / PR #247 review: AutoRace widens only at n >= 1M.
+    #[test]
+    fn race_candidates_widen_only_at_large_n() {
+        assert_eq!(race_candidates(0), RACE_CANDIDATES);
+        assert_eq!(race_candidates(RACE_LARGE_N - 1), RACE_CANDIDATES);
+        assert_eq!(
+            race_candidates(RACE_LARGE_N),
+            &[
+                OrderingMethod::Amd,
+                OrderingMethod::MetisND,
+                OrderingMethod::ScotchND,
+                OrderingMethod::Amf
+            ]
+        );
+        // The small set is a prefix of the large one, so ties at large n
+        // still resolve the way they did before widening.
+        assert_eq!(
+            &RACE_CANDIDATES_LARGE[..RACE_CANDIDATES.len()],
+            RACE_CANDIDATES
+        );
+    }
+
     #[test]
     fn test_symbolic_factorize_basic() {
         // Simple tridiagonal
@@ -2730,9 +3043,9 @@ mod tests {
             col_ptr.push(row_idx.len());
             (col_ptr, row_idx)
         }
-        // Very-large-and-sparse (n > 100_000, avg_deg < 5.0) → AMD.
-        // Issue #50 swap (2026-05-23): pre-fix this was the ScotchND
-        // branch; see choose_adaptive's doc comment.
+        // Very-large-and-sparse (n > 100_000, avg_deg < 5.0) → AMF.
+        // Issue #50 swap (2026-05-23) made this ScotchND → AMD; issue
+        // #246 made it AMD → AMF. See choose_adaptive's doc comment.
         let (cp, ri) = pat_bufs(200_000, 3);
         let p = CscPattern {
             n: 200_000,
@@ -2741,7 +3054,7 @@ mod tests {
         };
         assert_eq!(
             choose_adaptive(&p, OrderingMethod::Auto),
-            OrderingMethod::Amd
+            OrderingMethod::Amf
         );
         // Small-and-sparse (n<10_000, avg_deg<15) → delegates to
         // pick_default_method, which routes n≤10_000 to AMF. The F11
@@ -2780,7 +3093,7 @@ mod tests {
         // Large-dense (n > 100_000, avg_deg >= 5, non-arrow) now also routes
         // to AMF (issue #73): the real factor+solve A/B found AMF wins on
         // every measured matrix in this regime, so the would-be-MetisND
-        // decision is overridden to AMF at every n. The #50 avg_deg < 5 → AMD
+        // decision is overridden to AMF at every n. The avg_deg < 5 catch (AMF since #246)
         // catch fires first and is unaffected. (n=150_000, avg_deg=10, uniform
         // → not arrow.)
         let (cp, ri) = pat_bufs(150_000, 10);

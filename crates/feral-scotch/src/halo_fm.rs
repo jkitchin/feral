@@ -18,6 +18,10 @@ use std::collections::BinaryHeap;
 use feral_metis::internals::graph::Graph;
 use feral_metis::internals::initial_partition::{cut_size, part_weight, PART_A, PART_B};
 
+/// Heap pops between interrupt polls inside an FM pass (issue #246).
+/// Stopping a pass early is the same as the heap running dry.
+const HEAP_POLL_STRIDE: usize = 1024;
+
 /// Refine an edge bisection with halo-extended FM.
 ///
 /// `labels[v] ∈ {PART_A, PART_B}` on entry and exit. Returns the
@@ -41,6 +45,9 @@ pub fn halo_fm_refine(
     let mut pass_cut = cut_size(graph, labels);
 
     for _pass in 0..max_passes {
+        if feral_ordering_core::interrupt::poll() {
+            break;
+        }
         let before_pass = pass_cut;
 
         // Per-pass scratch.
@@ -73,7 +80,12 @@ pub fn halo_fm_refine(
         let mut best_b_w = b_w;
         let mut no_improve: u32 = 0;
 
+        let mut pops = 0usize;
         while let Some((_, Reverse(v), stamp)) = heap.pop() {
+            pops += 1;
+            if pops % HEAP_POLL_STRIDE == 0 && feral_ordering_core::interrupt::poll() {
+                break;
+            }
             let vu = v as usize;
             if locked[vu] {
                 continue;

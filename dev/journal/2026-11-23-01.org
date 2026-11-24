@@ -1,0 +1,188 @@
+* 17:30 :issue-246:ordering:amf:diagnosis:
+Reviewed issue #246 against 0.24.0 source. Two inferences in the issue do not
+hold. (1) AutoRace races RACE_CANDIDATES = {Amd, MetisND}
+(src/symbolic/mod.rs:1035); AMF is never run, so "AutoRace gets through ⇒ AMF's
+prefix is not where memory goes" is unsupported. (2) A SymbolicPrefix holds
+O(n + nnz(A)) state, so the preprocess-Auto race holding two prefixes cannot
+reach 11 GB at n=1.9M. The AMF ordering workspace is the same i32 quotient
+graph as AMD (iwlen = 1.2*nzaat + n, workspace.rs:181) plus an n-length i64 WF
+array. Remaining candidate: the finish, whose memory scales with Σ nrow over
+supernodes (placeholder row_indices at supernode.rs:505 plus static rows
+`flat` at mod.rs:567, both Vec<usize>). Hypothesis: AMF's ordering has far
+more fill than AMD's on fhnw. Test: run the prefix only (ordering → etree →
+column counts) for AMD/AMF/MetisND and compare nnz(L).
+
+Repro matrices: MPS from plato.asu.edu converted to the IPM augmented system
+[[I, Aᵀ],[A, -1e-8 I]] (scratch converter mps_to_kkt.py, highspy reader).
+fhnw-binschedule1: n=1 914 525, stored nnz 10 525 851 (issue: 1 911 607 /
+10 517 895, i.e. same pattern up to pounce's HSDE extras). Primal2_1000:
+n=3 858 760, stored nnz 9 356 900 (issue: 5 097 520 / 11 834 420; pounce adds
+~1.24M slack/bound rows). Both still route the same way under Auto
+(fhnw avg_deg ≈ 10 → AMF; Primal2 ≈ 3.85 → AMD).
+
+* 17:45 :issue-246:ordering:amf:primal2:
+Prefix-only probe (ordering → postorder → etree → column_counts_gnp,
+preprocess None, scratch crate) on Primal2_1000 KKT (n=3 858 760):
+| ordering | nnz(L)  | max colcount | Σc² (flop proxy) | order time |
+| AMD      | 3.187e8 | 15 815       | 2.41e12          | 1.7 s      |
+| AMF      | 1.802e8 |  5 066       | 4.09e11          | 2.0 s      |
+| MetisND  | 1.998e8 |  2 887       | 2.94e11          | 32.3 s     |
+Same shape as the issue's figures (AMD 3.72e8 / 2.5e12 flops vs METIS
+2.14e8 / 3.2e11, with ldlt_compress). New: AMF is within 1.4× of METIS on
+flops and 6× better than AMD, at AMD's ordering cost. So on this matrix the
+avg_deg<5 → AMD branch (#50, calibrated on powerflow22) is the wrong call and
+AMF would be a cheap fix — if AMF behaves on fhnw.
+Process HWM 1.6–1.7 GB: the prefix itself is cheap here.
+Note: the first probe run used `column_counts` (the O(nnz(L)) elimination
+simulator) instead of `column_counts_gnp` and took minutes; restarted.
+
+* 18:20 :issue-246:ordering:amf:root-cause:mumps:
+fhnw-binschedule1 KKT (n=1 914 525), prefix-only probe, preprocess None:
+| ordering | nnz(L)   | max colcount | Σc²      | order time |
+| AMD      | 4.369e8  |  24 445      | 5.56e12  | 86.3 s     |
+| AMF      | 1.388e10 | 155 589      | 1.49e15  | 39.0 s     |
+| MetisND  | 4.031e8  |  21 754      | 3.65e12  | 80.7 s     |
+Prefix HWM 1.3–1.9 GB. AMF's ordering is 32× AMD's fill, so the issue's 11 GB
+abort is symbolic_finish building structure for a 1.4e10-entry factor: a bad
+ordering, not a leak. Degree profile: median 5, p99 54, 8 692 cols > 100,
+216 > 1000, 4 cols at 56 842 and 2 at 454 823 (only those 6 exceed the
+dense threshold 13 836).
+
+Primal2 full production path (symbolic_factorize_with_method, default
+params): Auto → Amd/LdltCompress nnz(L)=3.692e8 peak 8.30 GB (issue: 3.72e8,
+8.33 GB — reproduced). Amf/LdltCompress nnz(L)=2.079e8 peak 3.53 GB.
+
+Root cause: AMF RMF quantization (algo.rs re-insertion): rmf ≥ i32::MAX-1 is
+stored as round(rmf/n). At n=1.9M a score of 3e9 becomes ~1 600, i.e. a
+near-dense variable is filed as *cheap* — a priority inversion. mumps-expert
+confirmed this is verbatim MUMPS 5.8.2 HAMF4 (ana_orderings.F:4985-4994, also
+MUMPS_CST_AMF :8074-8079; WF is 32-bit INTEGER, no guard, no 64-bit variant).
+So feral is a faithful port of a MUMPS quirk that only bites at large n with
+high-degree rows (RMF can exceed 2^31 once degrees reach ~27k).
+
+Experiment (local, reverted): monotone quantization — store round(rmf) as
+i64 (wf is already Vec<i64>), no /n fall-through.
+  fhnw    AMF: nnz(L) 1.388e10 → 1.835e8, max colcount 10 623, Σc² 5.11e11,
+               order time 127.6 s. Now 2.4× less fill and 11× fewer flops
+               than AMD, 2.2× / 7× better than MetisND.
+  Primal2 AMF: unchanged (1.802e8) — the overflow branch never fires there.
+Conclusion: one root cause behind the fhnw half of #246. With monotone
+quantization, Auto → AMF becomes the best choice on fhnw, and AMF is also
+the cheap fix for Primal2 (vs AMD) — the latter needs the powerflow22
+regression check (not available in this container; GAMS-licensed, lives in
+pounce). The fix deviates from MUMPS, so the AMF corpus oracle
+(tests/amf_corpus_oracle.rs, MUMPS HAMF4 sidecars, 10% nnz_L margin) may move
+on large high-degree matrices; needs a decisions.md entry.
+
+* 18:45 :issue-246:amf:tests-first:
+Research note dev/research/issue-246-amf-quantization.md and plan
+dev/plans/issue-246-amf-quantization.md written before code. Tests first:
+extracted the MUMPS-verbatim quantization into a helper (n pinned to fhnw's
+1 914 525) and added hand-arithmetic unit tests in feral-ordering-core.
+Against the old behaviour: 2 of 3 failed as predicted —
+`amf_quantize_score(3.0e9)` returned 1567 (= round(3e9/1 914 525)) vs the
+expected 3 000 000 000, and the monotonicity test tripped at 2.2e9 → 3e9.
+(The floor/cap test passed on old code only because its cap was the old
+dummy.) After the fix (clamp(round(rmf), 1, 1e18) as i64) all 3 pass.
+Added a fixture-gated, #[ignore]d integration test
+tests/issue246_amf_quantization.rs (oracle: AMD nnz(L) on the same pattern)
+and dev/scripts/mps_to_kkt.py to regenerate the fixture.
+Decision recorded in dev/decisions.md (deviation from MUMPS).
+Pre-commit hooks were not installed in this clone; installed them
+(`pre-commit install`).
+
+* 19:40 :issue-246:amf:end-to-end:bench:
+After 0f6eb9c, the full production path on fhnw (symbolic_factorize_with_method
+Auto, default SupernodeParams, RLIMIT_AS 13 GB): resolved Amf/LdltCompress,
+nnz(L) 2.716e8, 816 539 supernodes, predicted peak 4.27 GB, VmHWM 2.13 GB,
+595 s. Before the fix this aborted at 11 GB (issue). The preprocess race
+keeps LdltCompress (2.716e8) over None (1.835e8 prefix) because the
+inflation limit is 2× — by design (#91), but here it costs 1.5× fill.
+595 s symbolic is slow (issue: AMD 318 s on pounce's hardware); unprofiled.
+Bench (`cargo run --bin bench --release`) here covers only the 2 committed
+fixtures (corpus data/matrices/ absent in this container): KKT 2 matrices,
+sparse inertia 2/2, residual 2/2. Not comparable to the 156 929-matrix
+figures in 2026-11-19-06.
+Posted the diagnosis and the end-to-end result on issue #246.
+
+* 20:30 :issue-246:memory-budget:api:
+Step 3: `SupernodeParams::max_factor_bytes` + `FeralError::MemoryBudgetExceeded
+{predicted_bytes, budget_bytes, stage}` + `Solver::with_max_factor_bytes`.
+Research dev/research/issue-246-memory-budget.md, plan
+dev/plans/issue-246-memory-budget.md, written first. One helper
+`finish_checked` replaces both `finish_and_copy` call sites (concrete path and
+AutoRace winner): check 1 on the prefix's `factor_nnz_estimate·8` (== the
+eventual WorkEstimate::factor_bytes) before `symbolic_finish`, check 2 on
+`work_estimate().peak_bytes` after it. Tests written first; they failed to
+compile (no field/variant/builder — 13 errors). Hand oracle: tridiag(10) has
+no fill, Σcc = 19, floor(19·1.2) = 22, 176 bytes. With budget 175, AMD, AMF
+and AutoRace all return predicted 176 / stage "factor" with FINISH_RUNS == 0.
+Check 2: nemin = 1 gives peak > factor, and budget = factor_bytes gives stage
+"peak". Solver budget 1 → FactorStatus::FatalError(MemoryBudgetExceeded),
+nothing cached. All 4 pass.
+Surprise: the first workspace run failed to compile feral-diagnostics
+(diag_dense_tail.rs builds SupernodeParams with full struct literals, E0063
+×5). Fixed there, and flagged in the CHANGELOG as a source-compatibility note:
+downstream full literals (possibly pounce) need `max_factor_bytes: None`.
+Rerun: cargo test --workspace --release 1340 passed / 0 failed. Python
+bindings map the variant to feral.MemoryBudgetExceeded (a FactorError);
+`cargo check` on python/ is clean apart from the existing gil-refs warnings.
+Not exposed as a Python Solver knob (out of scope).
+
+* 21:15 :issue-246:routing:low-degree:evidence:
+Draft of step 2: `n > 100k && avg_deg < 5` → Amf (was Amd, #50). powerflow22
+(the #50 calibration case) is not available here, so the evidence is public
+LP KKTs in the regime, converted with dev/scripts/mps_to_kkt.py (Mittelmann
+plato.asu.edu; SuiteSparse returned 403 through the proxy; the older
+pds/misc LPs are netlib-compressed "emps" files HiGHS cannot read).
+Prefix probe, fixed AMF, preprocess None:
+| matrix    | n     | avg | AMD nnz(L) / Σc²  | AMF nnz(L) / Σc²  | MetisND nnz(L) | AMD/AMF order |
+| Primal2   | 3.86M | 3.85| 3.187e8 / 2.41e12 | 1.802e8 / 4.09e11 | 1.998e8        | 1.7 / 2.0 s   |
+| dlr1      | 10.9M | 4.38| 1.903e8 / 7.09e11 | 1.176e8 / 2.38e11 | (not run)      | 9.3 / 13.1 s  |
+| lo10      | 453k  | 4.59| 3.071e8 / 5.01e12 | 3.051e8 / 4.95e12 | 5.100e8        | 0.8 / 1.3 s   |
+| long15    | 786k  | 4.83| 3.697e8 / 6.61e12 | 3.692e8 / 6.59e12 | 4.594e8        | 1.9 / 2.7 s   |
+| netlarge2 | 1.2M  | 4.87| 4.952e8 / 1.02e13 | 4.945e8 / 1.02e13 | 6.361e8        | 2.9 / 4.4 s   |
+(wide15 is byte-identical to long15, so it is dropped.) AMF ≤ AMD on fill
+everywhere: 1.8×/1.6× lower on the two LP KKTs, within 0.6% on the network
+LPs. MetisND is worse than both on every network LP.
+
+Numeric (Solver, default *parallel* driver, 4 cores, RLIMIT_AS 13.5 GB):
+Primal2 AMF first factor 63.5 s, refactor 46.3 s, inertia
+(+2 559 380, −1 299 380, 0) = (nvar, ncon) exact. Its VmHWM was 9.36 GB
+against a predicted peak_bytes of 3.53 GB. The AMD run in the same process,
+and lo10 AMF, then aborted on allocation failure (extract_contrib /
+grow_pooled_front). FINDING (pre-existing, not from this session's changes):
+the parallel driver's real memory is ~2.6× WorkEstimate::peak_bytes on
+Primal2, so neither peak_bytes nor the new max_factor_bytes budget bounds
+it. Rerunning sequentially (with_parallel(false)) for the AMD/AMF timing.
+Also: FERAL_PARALLEL is read only by the C API (capi.rs:161), not by
+Solver::new().
+
+* 23:05 :issue-246:routing:numeric:
+Primal2 numeric A/B, sequential driver (with_parallel(false)), one process
+per ordering, RLIMIT_AS 14 GB:
+  AMD: first 1010.2 s, refactor 999.2 s, inertia (+2 559 380, −1 299 380, 0),
+       VmHWM 11.49 GB vs predicted peak 8.30 GB
+  AMF:   first 95.9 s, refactor 83.8 s, identical inertia,
+       VmHWM 6.37 GB vs predicted 3.53 GB
+AMF refactor is 11.9× faster (flop-proxy ratio 5.9×). lo10 numeric was
+stopped (projected > 1 h per factor here; fill within 0.6%), so it is not
+measured. Probe gotcha: FERAL_PARALLEL is ignored by Solver::new(); the probe
+sets with_parallel explicitly. Draft routing change (n > 100k && avg_deg < 5
+→ Amf) committed separately with its CHANGELOG lines, so it can be dropped if
+the powerflow22 / PDE2 A/B (maintainer machine) disagrees. No decisions.md
+entry until it is accepted. cargo test --workspace --release with the draft:
+1340/0.
+
+* 23:40 :issue-246:pr-247:review:
+PR jkitchin/feral#247 opened as a draft; CI green (check, msrv,
+stress-smoke, wheels, codecov patch 94.96%). The pounce-side review
+(comment 7116780548) approves steps 1–3 and asks for: (1) the
+real-vs-predicted memory gap in the book next to the API; (2) a time limit
+for the symbolic phase, since `symbolic_factorize_with_method` cannot be
+interrupted (L2CTA3D METIS never finished; fhnw 595 s vs the cpo3 300 s
+limit), via a deadline/cancel hook on SupernodeParams returning a typed
+error; (3) wider AutoRace candidates at large n (SCOTCH, AMF); (4) a #208
+laptime re-check before step 2 ships (needs pounce). Did (1): a book table
+with 1.4–1.8× (sequential) and ≈2.6× (parallel), framed as prediction ≠
+process cap, with sizing advice.

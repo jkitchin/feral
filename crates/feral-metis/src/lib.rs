@@ -64,6 +64,7 @@ pub mod internals {
     pub use crate::separator;
 }
 
+pub use feral_ordering_core::interrupt::Interrupt;
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
 /// Tunable parameters for METIS nested-dissection ordering.
@@ -207,6 +208,20 @@ pub struct MetisStats {
 /// diagnostic stats. Returns a permutation `perm` (new-to-old).
 pub fn metis_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> {
     metis_order_full(pattern, &MetisOptions::default()).map(|(perm, _, _)| perm)
+}
+
+/// [`metis_order_full`] that stops with [`OrderingError::Interrupted`] once
+/// `interrupt` triggers (its deadline passes or its cancel flag is set)
+/// (feral issue #246). The check runs at safe points inside the ordering,
+/// so the overshoot past a deadline is bounded by one of them rather than
+/// by the whole ordering. With [`Interrupt::none`] the result is identical
+/// to [`metis_order_full`].
+pub fn metis_order_interruptible(
+    pattern: &CscPattern<'_>,
+    opts: &MetisOptions,
+    interrupt: &Interrupt,
+) -> Result<(Vec<i32>, OrderingStats, MetisStats), OrderingError> {
+    feral_ordering_core::interrupt::scope(interrupt, || metis_order_full(pattern, opts))
 }
 
 /// Contract-conforming ordering producer.

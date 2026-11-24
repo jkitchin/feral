@@ -139,6 +139,11 @@ pub fn coarsen(
         if cur.nvtxs <= opts.coarsen_floor as i32 {
             break;
         }
+        // Issue #246: stopping early leaves a valid, shorter hierarchy; the
+        // caller's next `interrupt::check()` turns the trigger into an error.
+        if feral_ordering_core::interrupt::poll() {
+            break;
+        }
         let level = coarsen_level(cur, rng, opts.two_hop_ratio_threshold, counters);
         let new_nvtxs = level.graph.nvtxs;
         if new_nvtxs == 0 || new_nvtxs as f64 > 0.95 * prev_nvtxs as f64 {

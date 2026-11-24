@@ -1,96 +1,98 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-19T22:25:59Z
+Generated: 2026-11-24T01:42:35Z
 
 ## Latest Session
-File: dev/sessions/2026-11-19-04.md
+File: dev/sessions/2026-11-24-01.md
 ```
-# Session 2026-11-19-04
+# Session 2026-11-24-01
+
+**Benchmark caveat (read first):** no KKT corpus in this container
+(`data/matrices/` absent). The bench covered only the 2 committed fixtures,
+so it is not comparable to corpus runs.
 
 ## Goal
-Issue #147: Rust 2024 edition, resolver 3, declared MSRV (user chose
-1.85). Also landed: PR #241 (#134 F) merged at session start.
+Address the pounce-side review on PR #247 (comment 7116780548): a time limit
+for the symbolic phase, wider AutoRace candidates at large n, and the memory
+caveat in the book. Continues session 2026-11-23-01 on the same branch.
 
 ## Accomplished
-- 3510a0c: research note + plan
-  (`dev/research/rust-2024-edition-2026-11-19.md`).
-- 7c13b4e: 8 workspace crates on edition 2024 + rust-version 1.85,
-  resolver 3; python/ rust-version 1.85 + resolver 3 but edition 2021
-  (pyo3 0.22 macros). capi.rs: #[unsafe(no_mangle)] + 11 narrow unsafe
-  blocks; allocators: 13 narrow wraps; set_var FIXMEs replaced with
-  SAFETY reasoning; 6 post-1.85 API uses in tests/tools replaced;
-  rustfmt style_edition 2021.
-- 0152aca: CI `msrv` job (cargo check on 1.85, --locked).
-- Verification: C ABI symbols identical (9), harness digests identical,
-  cargo test --release 1058 passed + all crate suites green, 1.85 check
-  clean, clippy/fmt clean, lockfiles unchanged.
+- 176c423: book table for real vs predicted memory (1.4–1.8× sequential,
+  ≈2.6× parallel) next to `max_factor_bytes`.
+- 0729754: research note and plan
+  (dev/research/issue-246-symbolic-deadline.md).
+- c69f7fe: **symbolic-phase interrupt.** `feral::Interrupt` (a deadline
+  and/or a cancel flag) is a scoped thread-local in feral-ordering-core,
+  polled at safe points:
+  - AMD/AMF every 64 pivots;
+  - METIS/SCOTCH per recursion node, level, trial and FM pass;
+  - KaHIP per recursion node;
+  - MC64 every 64 columns;
+  - between pipeline stages and race arms.
+
+  It returns `FeralError::Interrupted { stage }`, which `Solver::factor`
+  reports as `FatalError`. Wired through `SupernodeParams::interrupt`,
+  `Solver::with_interrupt` / `set_interrupt`, and
+  `*_order_interruptible` in each ordering crate.
+  - Both races used to swallow arm errors; they now propagate the interrupt.
+  - Tests first. cargo test --workspace --release: 1361 passed, 0 failed.
+  - fhnw `Auto` with a 60 s deadline stopped at 60.08 s, and `AutoRace`
+    with 30 s at 30.04 s. Primal2 MetisND with 10 s stopped at 10.02 s.
+- b9ad7cc: **AutoRace at n ≥ 1M** races {Amd, MetisND, ScotchND, Amf}.
+  - On fhnw it now picks Amf/LdltCompress (2.716e8 nnz, 4.27 GB peak). The
+    two-arm race picked AMD at 6.79 GB.
+  - The race took 1294 s vs 476 s (each arm recomputes MC64).
+
+- Second PR #247 review (comment 7119267924):
+  - **Step 2 gate passed on the maintainer's machine.** powerflow22 shows no
+    regression. PDE2_0000 shows AMF ~15–17% slower (+0.16 s), with identical
+    inertia. laptime is unreachable.
+  - Step 2 is accepted; decisions.md, CHANGELOG and the research note now
+    state the PDE2 cost.
+  - 698eaa1: documented the interrupt's single-thread assumption, added
+    `interrupt::current()` and an opt-in poll census, plus per-crate and
+    feral-level census tests (a mutation check caught a worker thread:
+    `unscoped: 169`). 1368 passed, 0 failed.
 
 ## Benchmark Results
-```
-KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-```
-Identical to 2026-11-19-03.
-
-## Decisions Made
-- Edition 2024 / resolver 3 / MSRV 1.85; python/ stays 2021; rustfmt
-  2021 style; next release 0.24.0 (dev/decisions.md 2026-11-19).
-
-## Abandoned Approaches
-- cargo fix's whole-body `unsafe {}` wraps (replaced by narrow blocks).
-- Edition 2024 for python/ (pyo3 0.22 macro warnings) — deferred to a
-  pyo3 upgrade, not abandoned.
-
-## Next Session Should
-1. Release 0.24.0 (not 0.23.x): the MSRV rises to 1.85.
-2. Optional: a separate 2024-style rustfmt commit (drop rustfmt.toml).
-3. pyo3 upgrade, then python/ to edition 2024.
-4. #211 (wasm vs native factor values) — reproducible in the container.
 ```
 
 ## Git Status
 ```
-0d630ff fix(test): split cascade-break count by trigger; #215 test checks budget CB only
-aedbb79 docs: research note and plan for qcqp1500-1nc chain cascade-break
-1f04040 Merge pull request #242 from jkitchin/claude/blissful-ramanujan-w2nhfw
-3983846 docs(#147): decisions, CHANGELOG, journal and session checkpoint
-0152aca ci(#147): msrv job checks the workspace on Rust 1.85
+698eaa1 test(interrupt): guard the single-thread assumption with a poll census
+8d6ee65 session: 2026-11-24-01 checkpoint (PR #247 review: interrupt, race)
+b9ad7cc feat(ordering): AutoRace races four orderings at n >= 1M (#246)
+c69f7fe feat: interrupt the symbolic phase with a deadline or cancel flag (#246)
+0729754 docs: research note and plan for interrupting the symbolic phase
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::infnorm::tests::compute_infnorm_on_worker_matches_serial_issue_237 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test dense::factor::contrib_layout_tests::packed_contribution_is_the_square_lower_triangle ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
-test scaling::infnorm::tests::chunked_sweep_matches_serial_bitwise_issue_237 ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 488 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.76s
+test result: ok. 493 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.05s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-19-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-01.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -101,41 +103,41 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Identical to 2026-11-19-03.
+Identical to 2026-11-23-01 (same 2 fixtures).
 
 ```
 
 ## Recent Decisions
+nnz(L) 2.716e8, predicted peak 4.27 GB (the issue's two-arm race picked
+AMD at 6.79 GB). Cost: 1294 s symbolic in this container vs the issue's
+476 s for the two-arm race; each arm recomputes MC64 for its LdltCompress
+pass (follow-up). A slow race can now be bounded with `Interrupt`.
+Unvalidated on pounce's L1_sixm* / L2CTA3D.
 
-**Evidence.** Exported `feral_*` symbols of `libferal.a` identical before
-and after (9). Harness solve digests identical (2b7436a25c646d27,
-e321bec7612e0d4f). `cargo test --release` 1058 passed, plus every
-ordering crate and feral-diagnostics green; clippy `--workspace
---all-targets -D warnings` clean (with MSRV declared, clippy's
-`incompatible_msrv` now guards new code). Six post-1.85 API uses
-(`is_multiple_of`, `as_chunks`), all in tests and diagnostics tools,
-replaced; the published libraries already compiled on 1.85. Five
-`tail_expr_drop_order` notes reviewed: profiler mutex guards, a `Result`
-temporary and a diagnostics thread pool now drop earlier, which is
-harmless. Lockfiles unchanged. Journal 2026-11-19-04.
+## 2026-11-24 — `Auto`: `n > 100_000 && avg_deg < 5` → AMF (was AMD, #50)
 
-## 2026-11-19 — Count chain-triggered cascade-break separately; #215 test checks only budget-triggered CB
+**Context.** Issue #246: on Primal2_1000 (n = 3.86M), `Auto` → AMD predicts
+an 8.30 GB peak and refactors in 999 s; AMF predicts 3.53 GB and refactors
+in 84 s with identical inertia. #50 chose AMD for this branch on powerflow22,
+when AMF still had the large-n quantization inversion (fixed in 0f6eb9c)
+and was not measured.
+**Decision.** Route the branch to `Amf` (commit 1de3977). With this, `Auto`
+resolves to AMF for every n > 0. The now-redundant rules are kept for a
+separate simplification decision.
+**Rejected.** Racing AMD against AMF in this branch: twice the symbolic cost
+on every large low-degree matrix, for a choice where AMF's fill was never
+worse on the five public LPs measured.
+**Evidence.** Maintainer-machine gate (PR #247 comment 7119267924):
+- powerflow22: refactor 0.69 s AMD vs 0.68–0.71 s AMF, peak RSS 3.94 vs
+  3.92 GB, inertia identical.
+- **PDE2_0000: AMF is ~15% slower on the first factor (1.47 s vs
+  1.28–1.38 s) and ~17% slower per refactor (1.11–1.12 s vs 0.95–0.96 s),
+  i.e. +0.16 s, with inertia identical.** This is a measured cost of this
+  decision, accepted against Primal2's 12× refactor speed-up.
+- laptime (#208) is unreachable (average degree > 7, n < 1M).
 
-**Context.** `qcqp1500_1nc_factors_without_cascade_break` (#215) asserted
-`n_cascade_break_nodes == 0`. Since e702ac9 (#221) the delay-chain
-backstop trips at 4 fronts on that matrix (chain/subtree ratios 10.4–20.0
-against `DELAY_CHAIN_GROWTH` = 10). The #215 budget is never exceeded there.
-Inertia is exact; `n_tiny` and `inertia_uncertain()` are both 0.
-**Decision.** Add `n_cascade_break_chain_nodes` (`NodeFactors::cascade_break_chain`,
-`SparseFactors`, `FactorStats`, Python). The #215 test asserts zero
-*non-chain* cascade-break, and keeps its exact-inertia and no-floored-pivot
-checks. This relaxes the assertion, and the user approved it in session
-2026-11-19-06.
-**Rejected.** Dropping the count assertion: it would no longer say which
-trigger fired. Retuning `DELAY_CHAIN_GROWTH`: there is no wrong answer to
-justify moving #221's tuning.
-**Evidence.** dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md. Mutation-checked.
-`cargo test --release`: 1060/0.
+The corpus subset (n > 100k, average degree < 5) and `amf_corpus_oracle.rs`
+were not run. See dev/research/issue-246-low-degree-routing.md "Gate results".
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
@@ -232,8 +234,8 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_core_choice_ignores_env.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/common227/mod.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
@@ -252,20 +254,6 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_215_delay_growth_cap.rs
-tests/issue_221_delay_chain_backstop.rs
-tests/issue_221_forced_front_parity.rs
-tests/issue_221_fully_summed_2x2_partner.rs
-tests/issue_221_quality_rung.rs
-tests/issue_221_tpp_tail.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -282,30 +270,47 @@ tests/issue227_flops.rs
 tests/issue227_never_golden.rs
 tests/issue227_reanalysis.rs
 tests/issue237_infnorm_reuse.rs
+tests/issue246_amf_quantization.rs
+tests/issue246_interrupt.rs
+tests/issue246_interrupt_threads.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_215_delay_growth_cap.rs
+tests/issue_221_delay_chain_backstop.rs
+tests/issue_221_forced_front_parity.rs
+tests/issue_221_fully_summed_2x2_partner.rs
+tests/issue_221_quality_rung.rs
+tests/issue_221_tpp_tail.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_default_ordering.rs
+tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
-tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
-tests/lu_markowitz_golden.rs
 tests/lu_markowitz.rs
+tests/lu_markowitz_golden.rs
 tests/lu_real_bases.rs
 tests/lu_refactor_inplace.rs
 tests/lu_scaling.rs
-tests/lu_sparse_rhs.rs
 tests/lu_sparse.rs
+tests/lu_sparse_rhs.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
@@ -318,13 +323,13 @@ tests/n4_mc64_retry_latch.rs
 tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
-tests/pounce_interface.rs
 tests/pounce710_refine_cap_nrhs2.rs
+tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
 tests/refined_solve_core_stability.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs

@@ -68,6 +68,7 @@ PatternMismatch = _feral.PatternMismatch
 FeralIOError = _feral.FeralIOError
 SingularBasisError = _feral.SingularBasisError
 NeedsRefactorError = _feral.NeedsRefactorError
+MemoryBudgetExceeded = _feral.MemoryBudgetExceeded
 
 __version__ = _feral.__version__
 
@@ -204,6 +205,7 @@ __all__ = [
     "FeralIOError",
     "SingularBasisError",
     "NeedsRefactorError",
+    "MemoryBudgetExceeded",
     "from_scipy",
     "to_scipy",
     "__version__",

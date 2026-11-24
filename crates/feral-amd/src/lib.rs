@@ -20,6 +20,7 @@
 
 mod stats;
 
+pub use feral_ordering_core::interrupt::Interrupt;
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 pub use stats::AmdStats;
 
@@ -90,6 +91,20 @@ pub fn amd_order_opts(
     opts: &AmdOptions,
 ) -> Result<(Vec<i32>, AmdStats), OrderingError> {
     amd_order_full(pattern, opts).map(|(perm, _, amd_stats)| (perm, amd_stats))
+}
+
+/// [`amd_order_full`] that stops with [`OrderingError::Interrupted`] once
+/// `interrupt` triggers (its deadline passes or its cancel flag is set)
+/// (feral issue #246). The check runs at safe points inside the ordering,
+/// so the overshoot past a deadline is bounded by one of them rather than
+/// by the whole ordering. With [`Interrupt::none`] the result is identical
+/// to [`amd_order_full`].
+pub fn amd_order_interruptible(
+    pattern: &CscPattern<'_>,
+    opts: &AmdOptions,
+    interrupt: &Interrupt,
+) -> Result<(Vec<i32>, OrderingStats, AmdStats), OrderingError> {
+    feral_ordering_core::interrupt::scope(interrupt, || amd_order_full(pattern, opts))
 }
 
 /// Contract-conforming ordering producer.

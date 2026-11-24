@@ -139,6 +139,73 @@ of 31 matrices. It costs a few extra factorizations once per pattern, which
 breaks even after roughly 15 — free inside a solve, a loss for a one-shot
 factorization.
 
+## Bounding memory
+
+On very large systems, the wrong ordering can need more memory than the
+machine has, and the process can be killed during analysis, before any
+factorization starts. `Solver::with_max_factor_bytes(Some(bytes))` turns that
+into an error you can handle:
+
+```rust,ignore
+let mut solver = Solver::new().with_max_factor_bytes(Some(8 << 30)); // 8 GiB
+match solver.factor(&kkt, None) {
+    FactorStatus::FatalError(FeralError::MemoryBudgetExceeded {
+        predicted_bytes, stage, ..
+    }) => { /* fall back: another ordering, a smaller model, ... */ }
+    status => { /* as usual */ }
+}
+```
+
+There are two checks. The first runs right after the ordering, on the
+predicted factor size, before the analysis allocates anything that scales
+with the factor. The second runs at the end of the analysis, on the full
+predicted peak (factor plus multifrontal working storage). The same budget is
+available as `SupernodeParams::max_factor_bytes` for callers of
+`symbolic_factorize_with_method`.
+
+**The budget bounds the prediction, not the process.** Measured high-water
+memory runs above `WorkEstimate::peak_bytes`, and by different amounts for
+the two numeric drivers:
+
+| driver | real high-water / predicted `peak_bytes` | measured on |
+|---|---|---|
+| sequential (`with_parallel(false)`) | 1.4–1.8× | Primal2_1000 LP KKT, n = 3.86M, AMD and AMF |
+| parallel (default) | ≈ 2.6× | the same matrix, AMF: 9.36 GB vs 3.53 GB |
+
+The prediction assumes no delayed pivots, and it covers only the factor and
+the contribution blocks. The gap has not been broken down yet. Plausible
+contributors are the input matrix, scaling and solve workspaces, and the
+extra fronts the parallel driver keeps live at once. Until it is closed, set
+the budget to
+roughly a third of the memory you can spare for the parallel driver, or
+half for the sequential one.
+
+## Bounding time
+
+`Solver::with_interrupt(Some(feral::Interrupt::after(duration)))` stops the
+symbolic analysis (ordering, matching, supernode detection) once the
+deadline passes. `Interrupt::none().with_flag(flag)` does the same when
+another thread sets an `Arc<AtomicBool>`. Either way, `factor` returns
+`FactorStatus::FatalError(FeralError::Interrupted { stage })`, nothing is
+cached, and the `Solver` stays usable.
+
+```rust,ignore
+let deadline = Instant::now() + remaining_time;
+solver.set_interrupt(Some(Interrupt::at(deadline)));
+match solver.factor(&kkt, None) {
+    FactorStatus::FatalError(FeralError::Interrupted { stage }) => {
+        /* report a timeout, not a factorization failure */
+    }
+    status => { /* as usual */ }
+}
+```
+
+The check runs at safe points inside the orderings (every 64 pivots for
+AMD/AMF; each level and refinement pass for METIS and SCOTCH; each recursion
+node for KaHIP), inside the MC64 matching, and between stages. So the time
+past the deadline is bounded by one of those steps rather than by the whole
+analysis. The numeric factorization itself does not check the interrupt.
+
 ## References
 
 Greedy orderings:

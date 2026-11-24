@@ -676,10 +676,35 @@ fn amf_wf_combine(wf4: i64, nvi: i64, wf3: i64) -> i64 {
     wf4 + 2 * nvi * wf3
 }
 
-/// Saturation cap used when quantizing the AMF RMF score into `i32`.
-/// `i32::MAX - 1` matches MUMPS `idummy = huge(idummy) - 1`
-/// (`ana_orderings.F:4230`).
-const AMF_DUMMY_I32: i32 = i32::MAX - 1;
+/// Saturation cap for the quantized AMF score (issue #246).
+///
+/// Far below `i64::MAX` (~9.2e18) so the supervariable max-merge and the
+/// bucket arithmetic in [`amf_bucket_of`] cannot overflow, and far above
+/// any score that can still discriminate pivots: every key above the
+/// coarse range already shares bucket `NBBUCK`, where
+/// [`select_pivot_amf`] compares exact keys.
+const AMF_SCORE_CAP: i64 = 1_000_000_000_000_000_000;
+
+/// Quantize the AMF approximate-fill score `RMF` (already divided by
+/// `nv + 1`) into the integer bucket key stored in `wf[i]`:
+/// `clamp(round(rmf), 1, AMF_SCORE_CAP)`.
+///
+/// **Deliberate deviation from MUMPS** (issue #246,
+/// `dev/research/issue-246-amf-quantization.md`). MUMPS 5.8.2 HAMF4
+/// (`ana_orderings.F:4985-4994`) stores the key in a 32-bit `INTEGER`
+/// and, for `RMF >= huge-1`, falls through to `round(RMF / N)`. That map
+/// is not monotone: at `n = 1.9M` a score of 3e9 is stored as ~1.6e3,
+/// below a score of 2e9, so near-dense variables are filed as cheap and
+/// eliminated early. On the fhnw-binschedule1 KKT that inflated nnz(L)
+/// 76× (1.39e10 vs 1.84e8). `wf` is `i64` here, so the exact rounded
+/// score fits and the key is monotone in `RMF`. Below `2^31` the result
+/// is bit-identical to MUMPS (including the `max(1, ·)` floor).
+#[inline]
+fn amf_quantize_score(rmf: f64) -> i64 {
+    // `f64 as i64` saturates (and maps NaN to 0), so the clamp below is
+    // total on every input.
+    (rmf.round() as i64).clamp(1, AMF_SCORE_CAP)
+}
 
 /// AMF analogue of [`select_pivot`]. Linear-scans coarse buckets
 /// (`idx > n`) for the entry with the smallest exact score; takes the
@@ -916,8 +941,9 @@ pub fn create_element_amf(
 ///    `degree[i]` cannot have a meaningful WF-subtraction so the
 ///    AMF score is reset.
 /// 5. Supervariable merge takes `wf[i] = max(wf[i], wf[j])`.
-/// 6. Re-insertion uses the saturated/regular RMF formula with
-///    `dummy = i32::MAX - 1`, quantizes via `bucket(wf[i], n)`, and
+/// 6. Re-insertion uses the saturated/regular RMF formula, quantizes
+///    monotonically via [`amf_quantize_score`] (issue #246: no MUMPS
+///    `RMF / N` fall-through), buckets via `bucket(wf[i], n)`, and
 ///    threads through `head` of length `2 * n + 2`.
 ///
 /// Reference: `ana_orderings.F:4660-5025`.
@@ -1193,8 +1219,6 @@ pub fn finalize_step_amf(
     }
 
     // Re-insertion: AMF saturated/regular RMF, quantize, bucket.
-    let dummy_f = AMF_DUMMY_I32 as f64;
-    let n_f = if n == 0 { 1.0 } else { n as f64 };
     let mut p_write = pme1;
     let nleft = ws.n - ws.nel;
     for pme in pme1..pme2_excl {
@@ -1221,14 +1245,7 @@ pub fn finalize_step_amf(
                 deg_f * (deg_f - 1.0 + 2.0 * degme_i as f64) - ws.wf[i] as f64
             };
             let rmf = rmf / (nvi_i as f64 + 1.0);
-            let qscore: i32 = if rmf < dummy_f {
-                rmf.round() as i32
-            } else if rmf / n_f < dummy_f {
-                (rmf / n_f).round() as i32
-            } else {
-                AMF_DUMMY_I32
-            };
-            ws.wf[i] = qscore.max(1) as i64;
+            ws.wf[i] = amf_quantize_score(rmf);
 
             let d = amf_bucket_of(ws.wf[i], n);
             let inext = ws.head[d];
@@ -1270,13 +1287,27 @@ pub fn finalize_step_amf(
     }
 }
 
+/// Pivots between interrupt polls in the elimination loops (issue #246).
+/// A poll is a thread-local read plus, with a deadline set, one
+/// `Instant::now()` (~25 ns), so a stride of 64 keeps the overhead far below
+/// a pivot's cost while bounding the overshoot to 64 pivots.
+const INTERRUPT_POLL_STRIDE: usize = 64;
+
 /// AMF analogue of [`run_elimination`].
 pub fn run_elimination_amf(
     ws: &mut Workspace,
     aggressive: bool,
 ) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
+    // Issue #246: poll the active interrupt every `INTERRUPT_POLL_STRIDE`
+    // pivots, starting with the first. The workspace is abandoned on
+    // `Err`, so stopping between pivots is always safe.
+    let mut since_poll = 0usize;
     while ws.nel < ws.n {
+        if since_poll == 0 {
+            crate::interrupt::check()?;
+        }
+        since_poll = (since_poll + 1) % INTERRUPT_POLL_STRIDE;
         let me = match select_pivot_amf(ws) {
             Some(m) => m,
             None => break,
@@ -1310,7 +1341,15 @@ pub fn run_elimination_amf(
 /// is `NONE` / `flip(parent)`.
 pub fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
+    // Issue #246: poll the active interrupt every `INTERRUPT_POLL_STRIDE`
+    // pivots, starting with the first. The workspace is abandoned on
+    // `Err`, so stopping between pivots is always safe.
+    let mut since_poll = 0usize;
     while ws.nel < ws.n {
+        if since_poll == 0 {
+            crate::interrupt::check()?;
+        }
+        since_poll = (since_poll + 1) % INTERRUPT_POLL_STRIDE;
         let me = match select_pivot(ws) {
             Some(m) => m,
             None => break, // only dense-deferred survivors remain
@@ -2045,5 +2084,41 @@ mod tests {
         run_elimination(&mut ws, true).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert!(perm.is_empty());
+    }
+
+    // Issue #246: the RMF -> bucket-key quantization must be monotone.
+    // Oracle: hand arithmetic. The MUMPS-verbatim `RMF / N` fall-through
+    // maps 3e9 to round(3e9 / 1_914_525) = 1_567 at fhnw's n, below 2e9.
+    #[test]
+    fn amf_quantize_score_is_exact_below_and_above_i32_max() {
+        assert_eq!(amf_quantize_score(2.0e9), 2_000_000_000);
+        assert_eq!(amf_quantize_score(3.0e9), 3_000_000_000);
+        assert_eq!(amf_quantize_score(2_147_483_647.0), 2_147_483_647);
+    }
+
+    #[test]
+    fn amf_quantize_score_and_bucket_are_monotone_across_i32_max() {
+        let n = 1_914_525usize;
+        let xs = [
+            1.0, 1.0e3, 1.0e6, 1.0e9, 2.0e9, 2.2e9, 3.0e9, 1.0e12, 1.0e15, 1.0e17,
+        ];
+        for w in xs.windows(2) {
+            let (a, b) = (amf_quantize_score(w[0]), amf_quantize_score(w[1]));
+            assert!(a < b, "key({}) = {a} !< key({}) = {b}", w[0], w[1]);
+            assert!(
+                amf_bucket_of(a, n) <= amf_bucket_of(b, n),
+                "bucket not monotone between rmf {} and {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn amf_quantize_score_floor_and_cap() {
+        assert_eq!(amf_quantize_score(0.4), 1);
+        assert_eq!(amf_quantize_score(-5.0), 1);
+        assert_eq!(amf_quantize_score(1.0e30), AMF_SCORE_CAP);
+        assert_eq!(amf_quantize_score(f64::INFINITY), AMF_SCORE_CAP);
     }
 }

@@ -50,6 +50,7 @@ mod vertex_separator;
 #[cfg(test)]
 mod test_util;
 
+pub use feral_ordering_core::interrupt::Interrupt;
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
 /// Tunable parameters for SCOTCH nested-dissection ordering.
@@ -153,6 +154,20 @@ pub struct ScotchStats {
 /// diagnostic stats. Returns a permutation `perm` (new-to-old).
 pub fn scotch_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> {
     scotch_order_full(pattern, &ScotchOptions::default()).map(|(perm, _, _)| perm)
+}
+
+/// [`scotch_order_full`] that stops with [`OrderingError::Interrupted`] once
+/// `interrupt` triggers (its deadline passes or its cancel flag is set)
+/// (feral issue #246). The check runs at safe points inside the ordering,
+/// so the overshoot past a deadline is bounded by one of them rather than
+/// by the whole ordering. With [`Interrupt::none`] the result is identical
+/// to [`scotch_order_full`].
+pub fn scotch_order_interruptible(
+    pattern: &CscPattern<'_>,
+    opts: &ScotchOptions,
+    interrupt: &Interrupt,
+) -> Result<(Vec<i32>, OrderingStats, ScotchStats), OrderingError> {
+    feral_ordering_core::interrupt::scope(interrupt, || scotch_order_full(pattern, opts))
 }
 
 /// Contract-conforming ordering producer.

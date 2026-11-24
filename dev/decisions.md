@@ -8392,3 +8392,96 @@ trigger fired. Retuning `DELAY_CHAIN_GROWTH`: there is no wrong answer to
 justify moving #221's tuning.
 **Evidence.** dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md. Mutation-checked.
 `cargo test --release`: 1060/0.
+
+## 2026-11-23 — AMF score quantization is monotone; drop MUMPS's `RMF / N` fall-through
+
+**Context.** Issue #246: `Auto` → AMF on the fhnw-binschedule1 LP KKT
+(n = 1.9M) exhausts 11–13 GB in the symbolic phase. The AMF ordering's
+nnz(L) is 1.39e10, 32× AMD's. MUMPS 5.8.2 HAMF4 (`ana_orderings.F:4985-4994`)
+stores the fill score in a 32-bit `INTEGER`, and for `RMF >= huge-1` it
+stores `round(RMF / N)`. That map is not monotone: at n = 1.9M a score of
+3e9 becomes ~1.6e3, so near-dense variables are filed as cheap. feral's
+port copied this verbatim.
+**Decision.** Quantize to `clamp(round(RMF), 1, 1e18)` in `i64`
+(`amf_quantize_score`, `crates/feral-ordering-core/src/quotient_graph/algo.rs`).
+This is a deliberate deviation from the MUMPS reference. Below `2^31` it
+is bit-identical to MUMPS. Above that, feral's AMF no longer reproduces
+MUMPS orderings.
+**Rejected.** Keeping the `/N` branch but routing large n away from AMF:
+that hides an ordering defect that also hits AMF users who pick it
+explicitly. Clamping overflowed scores to `i32::MAX - 1` (last bucket):
+monotone, but it throws away the order among saturated scores, which
+`select_pivot_amf` can compare exactly for free with `i64` keys.
+**Evidence.** `dev/research/issue-246-amf-quantization.md`. fhnw AMF
+nnz(L) 1.388e10 → 1.835e8 (AMD 4.369e8, MetisND 4.031e8), Σc² 1.49e15 →
+5.11e11. Primal2_1000 AMF is unchanged (1.802e8). Ordering time on fhnw
+goes from 39 s to 128 s (accepted). The AMF corpus oracle bounds feral's
+nnz_L from above, so it still holds where MUMPS itself inverts.
+Journal 2026-11-23-01.
+
+## 2026-11-24 — Symbolic-phase interrupt: a scoped thread-local `Interrupt` polled at safe points
+
+**Context.** PR #247 review: `symbolic_factorize_with_method` was one
+uninterruptible call. L2CTA3D's METIS never finished inside pounce's
+timeout, and fhnw's symbolic took 595 s against the 300 s cpo3 limit.
+**Decision.** `feral_ordering_core::interrupt::{Interrupt, scope, poll,
+check}`: a deadline and/or a cancel flag, installed in a thread-local for
+the duration of the call. It is polled at safe points (AMD/AMF every 64
+pivots; METIS/SCOTCH per recursion node, level, trial and FM pass; KaHIP
+per recursion node; MC64 every 64 columns; feral between stages and race
+arms). It is sticky within a scope. It surfaces as `OrderingError::Interrupted`
+/ `FeralError::Interrupted { stage }`. A single variant covers both deadline
+and cancel; the host asks its `Interrupt` which one fired.
+**Rejected.** An explicit `&Interrupt` parameter through every ordering
+helper: dozens of signature changes across five crates for the same
+behaviour. That is only needed if an ordering becomes multi-threaded, and the
+module docs say so. A `DeadlineExceeded` name (the reviewer's suggestion):
+wrong for a cancel flag. Polling inside the numeric phase: it needs its own
+safe-point analysis of the parallel driver, so it is out of scope.
+**Evidence.** dev/research/issue-246-symbolic-deadline.md. 1361/0 tests.
+fhnw Auto with 60 s stopped at 60.08 s; AutoRace with 30 s at 30.04 s;
+Primal2 MetisND with 10 s at 10.02 s.
+
+## 2026-11-24 — AutoRace races {Amd, MetisND, ScotchND, Amf} at n ≥ 1M
+
+**Context.** PR #247 review: at n ≥ 1M the two-arm race misses the best
+ordering. With the monotone AMF fix, AMF beats AMD on fhnw. pounce
+measured SCOTCH as best on L1_sixm250obs (158 GB predicted vs METIS 187,
+AMD 544).
+**Decision.** `race_candidates(n)`: `RACE_CANDIDATES_LARGE = {Amd, MetisND,
+ScotchND, Amf}` for `n >= RACE_LARGE_N = 1_000_000`, otherwise the measured
+`{Amd, MetisND}` pair. The small set is a prefix of the large one, so ties
+resolve as before. The user chose this scope (large n only) on 2026-11-24.
+**Rejected.** Adding Amf at every n: #208 recorded AMF as a race arm
+changing pounce's laptime outcome on a mid-sized collocation KKT.
+**Evidence.** fhnw-binschedule1 widened AutoRace: resolved Amf/LdltCompress,
+nnz(L) 2.716e8, predicted peak 4.27 GB (the issue's two-arm race picked
+AMD at 6.79 GB). Cost: 1294 s symbolic in this container vs the issue's
+476 s for the two-arm race; each arm recomputes MC64 for its LdltCompress
+pass (follow-up). A slow race can now be bounded with `Interrupt`.
+Unvalidated on pounce's L1_sixm* / L2CTA3D.
+
+## 2026-11-24 — `Auto`: `n > 100_000 && avg_deg < 5` → AMF (was AMD, #50)
+
+**Context.** Issue #246: on Primal2_1000 (n = 3.86M), `Auto` → AMD predicts
+an 8.30 GB peak and refactors in 999 s; AMF predicts 3.53 GB and refactors
+in 84 s with identical inertia. #50 chose AMD for this branch on powerflow22,
+when AMF still had the large-n quantization inversion (fixed in 0f6eb9c)
+and was not measured.
+**Decision.** Route the branch to `Amf` (commit 1de3977). With this, `Auto`
+resolves to AMF for every n > 0. The now-redundant rules are kept for a
+separate simplification decision.
+**Rejected.** Racing AMD against AMF in this branch: twice the symbolic cost
+on every large low-degree matrix, for a choice where AMF's fill was never
+worse on the five public LPs measured.
+**Evidence.** Maintainer-machine gate (PR #247 comment 7119267924):
+- powerflow22: refactor 0.69 s AMD vs 0.68–0.71 s AMF, peak RSS 3.94 vs
+  3.92 GB, inertia identical.
+- **PDE2_0000: AMF is ~15% slower on the first factor (1.47 s vs
+  1.28–1.38 s) and ~17% slower per refactor (1.11–1.12 s vs 0.95–0.96 s),
+  i.e. +0.16 s, with inertia identical.** This is a measured cost of this
+  decision, accepted against Primal2's 12× refactor speed-up.
+- laptime (#208) is unreachable (average degree > 7, n < 1M).
+
+The corpus subset (n > 100k, average degree < 5) and `amf_corpus_oracle.rs`
+were not run. See dev/research/issue-246-low-degree-routing.md "Gate results".

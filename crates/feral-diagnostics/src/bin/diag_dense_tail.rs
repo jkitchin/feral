@@ -61,6 +61,8 @@ fn configs() -> Vec<ConfigSpec> {
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
                 symbolic_profiler: None,
+                max_factor_bytes: None,
+                interrupt: None,
             },
         },
         ConfigSpec {
@@ -72,6 +74,8 @@ fn configs() -> Vec<ConfigSpec> {
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
                 symbolic_profiler: None,
+                max_factor_bytes: None,
+                interrupt: None,
             },
         },
         ConfigSpec {
@@ -83,6 +87,8 @@ fn configs() -> Vec<ConfigSpec> {
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
                 symbolic_profiler: None,
+                max_factor_bytes: None,
+                interrupt: None,
             },
         },
         ConfigSpec {
@@ -94,6 +100,8 @@ fn configs() -> Vec<ConfigSpec> {
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
                 symbolic_profiler: None,
+                max_factor_bytes: None,
+                interrupt: None,
             },
         },
         ConfigSpec {
@@ -105,6 +113,8 @@ fn configs() -> Vec<ConfigSpec> {
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
                 symbolic_profiler: None,
+                max_factor_bytes: None,
+                interrupt: None,
             },
         },
     ]
