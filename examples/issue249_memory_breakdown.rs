@@ -8,7 +8,10 @@
 //!
 //! Usage:
 //!   cargo run --release --example issue249_memory_breakdown -- \
-//!       <matrix.mtx> [amf|amd|metis|auto] [seq|par]
+//!       <matrix.mtx> [amf|amd|metis|auto] [seq|par] [predict]
+//!
+//! `predict` prints the model from the analysis alone and skips the
+//! numeric phase.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
@@ -124,6 +127,40 @@ fn main() {
         gb(base)
     );
 
+    if args.get(4).map(String::as_str) == Some("predict") {
+        // Analysis only: print the model without the numeric phase.
+        let sym = feral::symbolic::symbolic_factorize_with_method(
+            &a,
+            &feral::symbolic::SupernodeParams::default(),
+            method,
+        )
+        .expect("symbolic");
+        let w = sym.work_estimate();
+        let t = std::thread::available_parallelism().map_or(1, |n| n.get());
+        println!(
+            "old {:.3} | peak_bytes {:.3} | peak_bytes_parallel({t}) {:.3} GB | frontier {:?}",
+            gb(w.factor_bytes + w.peak_contrib_bytes),
+            gb(w.peak_bytes),
+            gb(w.peak_bytes_parallel(t)),
+            w.parallel_frontier_bytes.map(gb)
+        );
+        println!(
+            "  stored {:.3} index {:.3} analysis {:.3} workspace {:.3} shared {:.3} worker {:.3} \
+             running[0..5] {:?}",
+            gb(w.factor_stored_bytes),
+            gb(w.factor_index_bytes),
+            gb(w.analysis_bytes),
+            gb(w.workspace_bytes),
+            gb(w.parallel_shared_bytes),
+            gb(w.parallel_worker_bytes),
+            w.parallel_running_bytes
+                .iter()
+                .take(5)
+                .map(|&b| gb(b))
+                .collect::<Vec<_>>()
+        );
+        return;
+    }
     let mut s = Solver::new().with_ordering(method).with_parallel(par);
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let d2 = done.clone();
@@ -175,14 +212,15 @@ fn main() {
     };
     println!(
         "model: stored {:.3} + index {:.3} | analysis {:.3} | workspace {:.3} | \
-         numeric_peak {:.3} | frontier {:?} per_thread {:.3} shared {:.3}",
+         numeric_peak {:.3} | frontier {:?} worker {:.3} running(5) {:?} shared {:.3}",
         gb(w.factor_stored_bytes),
         gb(w.factor_index_bytes),
         gb(w.analysis_bytes),
         gb(w.workspace_bytes),
         gb(w.numeric_peak_bytes),
         w.parallel_frontier_bytes.map(gb),
-        gb(w.parallel_per_thread_bytes),
+        gb(w.parallel_worker_bytes),
+        w.parallel_running_bytes.get(4).copied().map(gb),
         gb(w.parallel_shared_bytes)
     );
     let predicted = if par {

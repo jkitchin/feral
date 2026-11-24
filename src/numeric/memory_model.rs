@@ -25,7 +25,8 @@
 
 use std::mem::size_of;
 
-use crate::numeric::contrib::{ContribBlock, Packed, Square};
+use crate::dense::factor::recycle_cap_limit;
+use crate::numeric::contrib::{ContribBlock, Packed};
 use crate::numeric::factorize::NodeFactors;
 use crate::symbolic::supernode::Supernode;
 use crate::symbolic::SymbolicFactorization;
@@ -49,12 +50,6 @@ pub(crate) fn node_value_bytes(sn: &Supernode) -> usize {
 /// the `NodeFactors` record in the factor's node vector.
 pub(crate) fn node_index_bytes(sn: &Supernode) -> usize {
     3 * sn.nrow * IB + 2 * sn.ncol * VB + size_of::<NodeFactors>()
-}
-
-/// Bytes of one live contribution block: its values (counted square, as
-/// [`Supernode::contrib_size`]) and its row indices.
-fn contrib_block_bytes(sn: &Supernode) -> usize {
-    sn.contrib_size() * VB + sn.contrib_nrow() * IB
 }
 
 /// Heap bytes held by an analysis, by capacity. A `Solver` keeps its
@@ -125,27 +120,67 @@ fn grow_pool(cap: usize, nrow: usize) -> usize {
     }
 }
 
-/// Sequential driver's numeric peak: walk the postorder, adding each
-/// node's stored factor and contribution block and the frontal pool's
-/// capacity, freeing children's blocks after their parent, and keep the
-/// largest total. Blocks are counted square (an upper bound on the
-/// packed blocks the sequential driver holds).
+/// Packed value entries of a node's contribution block.
+fn packed_len(sn: &Supernode) -> usize {
+    let c = sn.contrib_nrow();
+    c * (c + 1) / 2
+}
+
+/// Capacity (entries) of a block extracted through the single-slot
+/// contribution pool (`dense::factor::extract_contrib`): the pooled buffer
+/// when its capacity lies in `len..=recycle_cap_limit(len)`, else an exact
+/// allocation.
+fn pooled_block_cap(pool: Option<usize>, len: usize) -> usize {
+    match pool {
+        Some(cap) if (len..=recycle_cap_limit(len)).contains(&cap) => cap,
+        _ => len,
+    }
+}
+
+/// Largest bytes one live block of `sn` can hold whatever buffer it was
+/// recycled from: values up to `recycle_cap_limit` entries, plus rows.
+fn block_bytes_bound(sn: &Supernode) -> usize {
+    match packed_len(sn) {
+        0 => 0,
+        len => recycle_cap_limit(len) * VB + sn.contrib_nrow() * IB,
+    }
+}
+
+/// Sequential driver's numeric peak: walk the postorder as the driver
+/// does, adding each node's stored factor, its contribution block and the
+/// frontal pool's capacity, and keep the largest total. Children's blocks
+/// are consumed at their parent's assembly, each buffer passing into the
+/// single-slot contribution pool (dropping the one there); the node's own
+/// block is then extracted into the pooled buffer, keeping its capacity,
+/// so block capacities are simulated, not just their lengths.
 pub(crate) fn sequential_numeric_peak(sym: &SymbolicFactorization) -> usize {
     let sns = &sym.supernodes;
+    let mut cap_of = vec![0usize; sns.len()];
     let mut stored = 0usize;
     let mut live = 0usize;
-    let mut cap = 0usize;
+    let mut front_cap = 0usize;
+    let mut pool: Option<usize> = None;
     let mut peak = 0usize;
-    for sn in sns {
-        cap = grow_pool(cap, sn.nrow);
-        stored += node_value_bytes(sn) + node_index_bytes(sn);
-        live += contrib_block_bytes(sn);
-        peak = peak.max(stored + live + cap * VB);
+    for (k, sn) in sns.iter().enumerate() {
+        front_cap = grow_pool(front_cap, sn.nrow);
+        let held = |pool: Option<usize>| pool.map_or(0, |c| c * VB);
+        // Assembly: the front and every child's block are live.
+        peak = peak.max(stored + live + front_cap * VB + held(pool));
         for &c in &sn.children {
             if let Some(child) = sns.get(c) {
-                live -= contrib_block_bytes(child);
+                if packed_len(child) > 0 {
+                    live -= cap_of[c] * VB + child.contrib_nrow() * IB;
+                    pool = Some(cap_of[c]);
+                }
             }
         }
+        stored += node_value_bytes(sn) + node_index_bytes(sn);
+        let len = packed_len(sn);
+        if len > 0 {
+            cap_of[k] = pooled_block_cap(pool.take(), len);
+            live += cap_of[k] * VB + sn.contrib_nrow() * IB;
+        }
+        peak = peak.max(stored + live + front_cap * VB + held(pool));
     }
     peak
 }
@@ -159,12 +194,20 @@ pub(crate) struct ParallelModel {
     /// finished and waiting at once: the maximum-weight antichain of the
     /// task tree. Bounds the frontier under any schedule.
     pub frontier_bytes: usize,
-    /// Per running task: a worker's workspace (`row_map`, `build_seen`,
-    /// its contribution-slot vector, a frontal pool as large as the
-    /// sequential driver's) and the largest live-block peak inside one
-    /// task's inline subtree.
-    pub per_thread_bytes: usize,
+    /// `running_bytes[k]` bounds what `k + 1` workers hold beside the
+    /// factor and the frontier: each its fixed workspace (`row_map`,
+    /// `build_seen`, its contribution-slot vector), plus the `k + 1`
+    /// largest task frontal pools and the `k + 1` largest live-block
+    /// peaks inside one task. A worker's pool only grows to the largest
+    /// front of the tasks it ran, so distinct workers' pools are bounded
+    /// by distinct tasks'. Truncated to [`MAX_RUNNING`] entries.
+    pub running_bytes: Vec<usize>,
+    /// One worker's fixed workspace, for workers beyond `running_bytes`.
+    pub worker_fixed_bytes: usize,
 }
+
+/// Length cap of [`ParallelModel::running_bytes`].
+pub(crate) const MAX_RUNNING: usize = 1024;
 
 /// Build the parallel model from the task plan's shape. `tasks` lists,
 /// for each task root, its inline nodes in postorder followed by the
@@ -177,32 +220,39 @@ pub(crate) fn parallel_model(
     let sns = &sym.supernodes;
     let s = sns.len();
 
-    // Largest live-block peak inside one task: its inline nodes in
-    // postorder, freeing a child's block once its parent (inline or the
-    // root) has run. Children that are task roots of their own are
-    // frontier blocks, counted there.
+    // Per task: the live-block peak inside its inline subtree (in
+    // postorder, freeing a child's block once its parent has run;
+    // children that are task roots are frontier blocks, counted there),
+    // and the frontal pool its largest front needs (under twice that
+    // front, by the pool's doubling rule). Each block is counted at its
+    // largest possible capacity ([`block_bytes_bound`]): which buffer a
+    // worker recycles depends on the schedule.
     let mut is_inline_of = vec![false; s];
-    let mut max_task_peak = 0usize;
+    let mut task_peaks = Vec::with_capacity(tasks.len());
+    let mut task_pools = Vec::with_capacity(tasks.len());
     for &(root, owned) in tasks {
         for &k in owned {
             is_inline_of[k] = true;
         }
         let mut live = 0usize;
         let mut peak = 0usize;
+        let mut max_front = 0usize;
         for &k in owned.iter().chain(std::iter::once(&root)) {
             let sn = &sns[k];
-            live += contrib_block_bytes(sn);
+            max_front = max_front.max(sn.nrow * sn.nrow);
+            live += block_bytes_bound(sn);
             peak = peak.max(live);
             for &c in &sn.children {
                 if c < s && is_inline_of[c] {
-                    live -= contrib_block_bytes(&sns[c]);
+                    live -= block_bytes_bound(&sns[c]);
                 }
             }
         }
         for &k in owned {
             is_inline_of[k] = false;
         }
-        max_task_peak = max_task_peak.max(peak);
+        task_peaks.push(peak);
+        task_pools.push(2 * max_front * VB);
     }
 
     // Maximum-weight antichain of task-root blocks over the task tree:
@@ -211,26 +261,31 @@ pub(crate) fn parallel_model(
     let mut child_sum = vec![0usize; s];
     let mut frontier = 0usize;
     for &(root, _) in tasks {
-        let best = contrib_block_bytes(&sns[root]).max(child_sum[root]);
+        let best = block_bytes_bound(&sns[root]).max(child_sum[root]);
         match parent_task.get(root).copied().flatten() {
             Some(p) if p < s => child_sum[p] += best,
             _ => frontier += best,
         }
     }
 
-    let mut pool = 0usize;
-    for sn in sns {
-        pool = grow_pool(pool, sn.nrow);
+    let slot = size_of::<Option<ContribBlock<Packed>>>();
+    let worker_fixed = sym.n * IB + sym.n + s * slot;
+    task_peaks.sort_unstable_by(|a, b| b.cmp(a));
+    task_pools.sort_unstable_by(|a, b| b.cmp(a));
+    let mut running = Vec::with_capacity(tasks.len().min(MAX_RUNNING));
+    let mut acc = 0usize;
+    for (peak, pool) in task_peaks.iter().zip(&task_pools).take(MAX_RUNNING) {
+        acc += worker_fixed + peak + pool;
+        running.push(acc);
     }
-    let slot_sq = size_of::<Option<ContribBlock<Square>>>();
-    let per_thread = sym.n * IB + sym.n + s * slot_sq + pool * VB + max_task_peak;
     // Shared: contribution slots, result slots, and the task plan
     // (owned lists, parent/pending/flop arrays, is_root).
-    let shared = s * (slot_sq + size_of::<Option<NodeFactors>>()) + s * (3 * IB + 2 * IB + 1 + 8);
+    let shared = s * (slot + size_of::<Option<NodeFactors>>()) + s * (3 * IB + 2 * IB + 1 + 8);
 
     ParallelModel {
         shared_bytes: shared,
         frontier_bytes: frontier,
-        per_thread_bytes: per_thread,
+        running_bytes: running,
+        worker_fixed_bytes: worker_fixed,
     }
 }

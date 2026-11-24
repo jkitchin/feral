@@ -1749,6 +1749,21 @@ pub(crate) fn packed_lower_len(dim: usize, cols: usize) -> usize {
     cols * (2 * dim - cols + 1) / 2
 }
 
+/// Largest capacity (entries) of a pooled buffer that [`extract_contrib`]
+/// recycles for a block of `len` entries, and so the largest capacity any
+/// contribution block can have (issue #249): `len` plus an eighth, or
+/// plus [`RECYCLE_SMALL`] entries for small blocks. The memory model
+/// (`numeric::memory_model`) relies on this bound.
+#[inline]
+pub(crate) fn recycle_cap_limit(len: usize) -> usize {
+    len + (len / 8).max(RECYCLE_SMALL)
+}
+
+/// Slack (entries, 4 KiB) a recycled buffer may always carry, so small
+/// buffers keep being reused across fronts of nearby sizes (the
+/// malloc-amortising pool of issue #13 Phase C).
+pub(crate) const RECYCLE_SMALL: usize = 512;
+
 /// Extract the trailing `(n − offset)²` block of the `n × n` column-major
 /// `data` (lower triangle authoritative) in `layout`, into a buffer taken
 /// from `pool` (fresh if it is empty). An empty block takes nothing: it
@@ -1774,9 +1789,16 @@ fn extract_contrib(
     if len == 0 {
         return Vec::new();
     }
-    let mut contrib = pool.take().unwrap_or_default();
+    // Issue #249: recycle the pooled buffer only when it fits this block
+    // with little slack. A much larger buffer would pin its excess for the
+    // block's whole life (until the parent assembles it); a smaller one
+    // would be reallocated (moved) anyway, and `reserve` would double it.
+    // Otherwise free it and allocate exactly.
+    let mut contrib = match pool.take() {
+        Some(buf) if (len..=recycle_cap_limit(len)).contains(&buf.capacity()) => buf,
+        _ => Vec::with_capacity(len),
+    };
     contrib.clear();
-    contrib.reserve(len);
     {
         let spare = contrib.spare_capacity_mut();
         let mut at = 0;
@@ -1796,8 +1818,10 @@ fn extract_contrib(
         debug_assert_eq!(at, len);
     }
     let _pt_zf = phase_timing::start();
-    // SAFETY: the loop above initialized every element in 0..len of the
-    // spare capacity that `reserve(len)` guaranteed exists; `f64` has no
+    // SAFETY: `contrib` is empty with capacity >= len (a recycled buffer
+    // is taken only when its capacity is at least `len`, otherwise it is
+    // `with_capacity(len)`), and the loop above initialized every element
+    // in 0..len of that spare capacity; `f64` has no
     // Drop, so growing the length exposes only initialized values.
     // CONTRIBZEROFILL_NS brackets only this O(1) length carve-out.
     unsafe {

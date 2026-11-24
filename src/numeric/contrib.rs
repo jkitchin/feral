@@ -4,14 +4,13 @@
 //! the rows it does not eliminate) waits until its parent is assembled.
 //! Its storage is a type parameter ([`BlockLayout`]):
 //!
-//! - **Square** ([`Square`]): `c²` entries, the lower triangle carrying
-//!   the values. The parallel task-graph driver holds blocks this way, as
-//!   it always has.
+//! - **Square** (`Square`, test-only): `c²` entries, the lower triangle carrying
+//!   the values. No driver holds blocks this way since issue #249 (the
+//!   parallel task-graph driver did before); kept for the layout tests.
 //! - **Packed** ([`Packed`]): the lower triangle packed column-major,
-//!   `c·(c+1)/2` entries. The sequential drivers (the plain one, which the
-//!   parallel entry point also uses for a tree with too little task
-//!   parallelism, and the Schur one) hold blocks this way; the dense
-//!   kernel writes them so (`ContribLayout::PackedLower`).
+//!   `c·(c+1)/2` entries. Every multifrontal driver (sequential, Schur,
+//!   and the parallel task graph since issue #249) holds blocks this way;
+//!   the dense kernel writes them so (`ContribLayout::PackedLower`).
 //!
 //! **Accumulators** (sequential drivers only, opt-in
 //! `EarlyAssembly::WideParents`; `dev/research/wide-tree-contribution-memory.md`).
@@ -81,7 +80,9 @@ pub(crate) trait BlockLayout {
     fn column_start(dim: usize, j: usize) -> usize;
 }
 
-/// `dim × dim` column-major; the strict upper triangle is zero.
+/// `dim × dim` column-major; the strict upper triangle is zero. Test-only
+/// since issue #249 moved the parallel driver to [`Packed`].
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum Square {}
 
@@ -89,6 +90,7 @@ pub(crate) enum Square {}
 #[derive(Debug)]
 pub(crate) enum Packed {}
 
+#[cfg(test)]
 impl BlockLayout for Square {
     const KERNEL: ContribLayout = ContribLayout::Square;
     #[inline]
