@@ -1,98 +1,98 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-11-23T19:24:34Z
+Generated: 2026-11-24T01:13:35Z
 
 ## Latest Session
-File: dev/sessions/2026-11-23-01.md
+File: dev/sessions/2026-11-24-01.md
 ```
-# Session 2026-11-23-01
+# Session 2026-11-24-01
 
-**Benchmark caveat (read first):** this container has no KKT corpus
-(`data/matrices/` absent), so the bench covered only the 2 committed
-fixtures. The numbers below are not comparable to 2026-11-19-06's
-156 929-matrix run. No regression is shown, and none is ruled out on the
-corpus. The next session with the corpus must re-run the bench.
+**Benchmark caveat (read first):** no KKT corpus in this container
+(`data/matrices/` absent). The bench covered only the 2 committed fixtures,
+so it is not comparable to corpus runs.
 
 ## Goal
-Review issue #246 (Auto at n ≳ 1M: AMF symbolic OOM on fhnw-binschedule1;
-AMD 4× fill on Primal2_1000), diagnose it, and land step 1 of the fix.
+Address the pounce-side review on PR #247 (comment 7116780548): a time limit
+for the symbolic phase, wider AutoRace candidates at large n, and the memory
+caveat in the book. Continues session 2026-11-23-01 on the same branch.
 
 ## Accomplished
-- Reproduced both matrices without pounce: `dev/scripts/mps_to_kkt.py`
-  converts the Mittelmann MPS files to `[[I, Aᵀ], [A, −1e-8 I]]`. fhnw is
-  within 0.2% of the issue's KKT. Primal2 is n = 3.86M (pounce: 5.10M) and
-  takes the same routing branch.
-- Diagnosis. The fhnw abort is a bad AMF ordering: prefix nnz(L) 1.39e10
-  (AMD 4.37e8, MetisND 4.03e8), prefix RSS 1.3 GB. The cause is HAMF4's
-  non-monotone `RMF / N` quantization, which is verbatim MUMPS 5.8.2
-  (ana_orderings.F:4985-4994). Two inferences in the issue were wrong
-  (AutoRace never runs AMF; prefixes are O(n + nnz(A))).
-- 0f6eb9c: monotone `amf_quantize_score` (i64, clamp(round(rmf), 1, 1e18)).
-  Tests first: 2 of 3 hand-arithmetic unit tests failed on the old code
-  (3e9 → 1567) and pass after. The fixture-gated
-  `tests/issue246_amf_quantization.rs` gives AMF 183 467 409 ≤ AMD
-  436 861 025. `cargo test --workspace --release`: 1336 passed, 0 failed.
-- End to end, fhnw `Auto` now completes under 13 GB: Amf/LdltCompress,
-  nnz(L) 2.72e8, peak 4.27 GB, VmHWM 2.1 GB, 595 s.
-- Primal2: `Auto` → AMD reproduces the issue (3.69e8, 8.30 GB). Explicit
-  Amf gives 2.08e8 and 3.53 GB. AMF is unaffected by the fix.
-- Posted the diagnosis and the end-to-end result on issue #246. Installed
-  the pre-commit hooks (they were missing in this clone).
-- **Step 3 (8452d92): memory budget.** `SupernodeParams::max_factor_bytes`,
-  `Solver::with_max_factor_bytes`, and `FeralError::MemoryBudgetExceeded
-  { predicted_bytes, budget_bytes, stage }`. The check runs on the prefix's
-  factor bytes before `symbolic_finish` ("factor"), then on `peak_bytes`
-  after it ("peak"). Python gets `feral.MemoryBudgetExceeded`, and there is
-  a book section. Tests were written first against the hand oracle
-  tridiag(10) = 176 bytes; 4 new tests. Workspace: 1340 passed, 0 failed.
-  **Source-compat:** the new public field breaks full struct literals of
-  `SupernodeParams` (feral-diagnostics had five; fixed), and exhaustive
-  matches on `FeralError` need an arm. The CHANGELOG flags both.
-- **Step 2 DRAFT (1de3977): `n > 100k && avg_deg < 5` → AMF.** Across
-  five public LP KKTs in the regime, AMF fill is ≤ AMD everywhere (1.6–1.8×
-  lower on Primal2 and dlr1, within 0.6% on the network LPs). Primal2
-  sequential refactor: AMD 999 s vs AMF 84 s, identical exact inertia.
-  It is a separate commit so it can be dropped if the powerflow22 / PDE2
-  A/B regresses. There is no decisions.md entry until it is accepted.
-- **Finding (pre-existing):** measured memory high-water exceeds
+- 176c423: book table for real vs predicted memory (1.4–1.8× sequential,
+  ≈2.6× parallel) next to `max_factor_bytes`.
+- 0729754: research note and plan
+  (dev/research/issue-246-symbolic-deadline.md).
+- c69f7fe: **symbolic-phase interrupt.** `feral::Interrupt` (a deadline
+  and/or a cancel flag) is a scoped thread-local in feral-ordering-core,
+  polled at safe points:
+  - AMD/AMF every 64 pivots;
+  - METIS/SCOTCH per recursion node, level, trial and FM pass;
+  - KaHIP per recursion node;
+  - MC64 every 64 columns;
+  - between pipeline stages and race arms.
+
+  It returns `FeralError::Interrupted { stage }`, which `Solver::factor`
+  reports as `FatalError`. Wired through `SupernodeParams::interrupt`,
+  `Solver::with_interrupt` / `set_interrupt`, and
+  `*_order_interruptible` in each ordering crate.
+  - Both races used to swallow arm errors; they now propagate the interrupt.
+  - Tests first. cargo test --workspace --release: 1361 passed, 0 failed.
+  - fhnw `Auto` with a 60 s deadline stopped at 60.08 s, and `AutoRace`
+    with 30 s at 30.04 s. Primal2 MetisND with 10 s stopped at 10.02 s.
+- b9ad7cc: **AutoRace at n ≥ 1M** races {Amd, MetisND, ScotchND, Amf}.
+  - On fhnw it now picks Amf/LdltCompress (2.716e8 nnz, 4.27 GB peak). The
+    two-arm race picked AMD at 6.79 GB.
+  - The race took 1294 s vs 476 s (each arm recomputes MC64).
+
+## Benchmark Results
+```
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+```
 ```
 
 ## Git Status
 ```
-1de3977 DRAFT feat(ordering): route n>100k avg_deg<5 Auto to AMF (issue #246 step 2)
-68370f6 docs: research note and plan for issue #246 step 2 (low-degree routing)
-8452d92 feat(symbolic): max_factor_bytes memory budget (issue #246 step 3)
-7d4efe7 docs: research note and plan for issue #246 step 3 (memory budget)
-ef83385 session: 2026-11-23-01 checkpoint (issue #246 step 1)
+b9ad7cc feat(ordering): AutoRace races four orderings at n >= 1M (#246)
+c69f7fe feat: interrupt the symbolic phase with a deadline or cancel flag (#246)
+0729754 docs: research note and plan for interrupting the symbolic phase
+176c423 book: document real-vs-predicted memory gap next to max_factor_bytes
+5cb03f9 session: update 2026-11-23-01 checkpoint (issue #246 steps 2-3)
 ```
 
 ## Test Status
 ```
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 test numeric::solve::tests::cb_core_profitable_matches_the_plan_gate ... ok
 
-test result: ok. 490 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.46s
+test result: ok. 493 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.02s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-23-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-11-24-01.md)
 
 KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
   Inertia match: 1/1 (100.0%)
@@ -103,40 +103,41 @@ Sparse solver: 2/2 total
   Inertia match vs MUMPS: 2/2 (100.0%)
   Residual pass: 2/2 (100.0%)
   Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+Identical to 2026-11-23-01 (same 2 fixtures).
 
 ```
 
 ## Recent Decisions
-trigger fired. Retuning `DELAY_CHAIN_GROWTH`: there is no wrong answer to
-justify moving #221's tuning.
-**Evidence.** dev/research/qcqp1500-1nc-chain-cb-2026-11-19.md. Mutation-checked.
-`cargo test --release`: 1060/0.
+/ `FeralError::Interrupted { stage }`. A single variant covers both deadline
+and cancel; the host asks its `Interrupt` which one fired.
+**Rejected.** An explicit `&Interrupt` parameter through every ordering
+helper: dozens of signature changes across five crates for the same
+behaviour. That is only needed if an ordering becomes multi-threaded, and the
+module docs say so. A `DeadlineExceeded` name (the reviewer's suggestion):
+wrong for a cancel flag. Polling inside the numeric phase: it needs its own
+safe-point analysis of the parallel driver, so it is out of scope.
+**Evidence.** dev/research/issue-246-symbolic-deadline.md. 1361/0 tests.
+fhnw Auto with 60 s stopped at 60.08 s; AutoRace with 30 s at 30.04 s;
+Primal2 MetisND with 10 s at 10.02 s.
 
-## 2026-11-23 — AMF score quantization is monotone; drop MUMPS's `RMF / N` fall-through
+## 2026-11-24 — AutoRace races {Amd, MetisND, ScotchND, Amf} at n ≥ 1M
 
-**Context.** Issue #246: `Auto` → AMF on the fhnw-binschedule1 LP KKT
-(n = 1.9M) exhausts 11–13 GB in the symbolic phase. The AMF ordering's
-nnz(L) is 1.39e10, 32× AMD's. MUMPS 5.8.2 HAMF4 (`ana_orderings.F:4985-4994`)
-stores the fill score in a 32-bit `INTEGER`, and for `RMF >= huge-1` it
-stores `round(RMF / N)`. That map is not monotone: at n = 1.9M a score of
-3e9 becomes ~1.6e3, so near-dense variables are filed as cheap. feral's
-port copied this verbatim.
-**Decision.** Quantize to `clamp(round(RMF), 1, 1e18)` in `i64`
-(`amf_quantize_score`, `crates/feral-ordering-core/src/quotient_graph/algo.rs`).
-This is a deliberate deviation from the MUMPS reference. Below `2^31` it
-is bit-identical to MUMPS. Above that, feral's AMF no longer reproduces
-MUMPS orderings.
-**Rejected.** Keeping the `/N` branch but routing large n away from AMF:
-that hides an ordering defect that also hits AMF users who pick it
-explicitly. Clamping overflowed scores to `i32::MAX - 1` (last bucket):
-monotone, but it throws away the order among saturated scores, which
-`select_pivot_amf` can compare exactly for free with `i64` keys.
-**Evidence.** `dev/research/issue-246-amf-quantization.md`. fhnw AMF
-nnz(L) 1.388e10 → 1.835e8 (AMD 4.369e8, MetisND 4.031e8), Σc² 1.49e15 →
-5.11e11. Primal2_1000 AMF is unchanged (1.802e8). Ordering time on fhnw
-goes from 39 s to 128 s (accepted). The AMF corpus oracle bounds feral's
-nnz_L from above, so it still holds where MUMPS itself inverts.
-Journal 2026-11-23-01.
+**Context.** PR #247 review: at n ≥ 1M the two-arm race misses the best
+ordering. With the monotone AMF fix, AMF beats AMD on fhnw. pounce
+measured SCOTCH as best on L1_sixm250obs (158 GB predicted vs METIS 187,
+AMD 544).
+**Decision.** `race_candidates(n)`: `RACE_CANDIDATES_LARGE = {Amd, MetisND,
+ScotchND, Amf}` for `n >= RACE_LARGE_N = 1_000_000`, otherwise the measured
+`{Amd, MetisND}` pair. The small set is a prefix of the large one, so ties
+resolve as before. The user chose this scope (large n only) on 2026-11-24.
+**Rejected.** Adding Amf at every n: #208 recorded AMF as a race arm
+changing pounce's laptime outcome on a mid-sized collocation KKT.
+**Evidence.** fhnw-binschedule1 widened AutoRace: resolved Amf/LdltCompress,
+nnz(L) 2.716e8, predicted peak 4.27 GB (the issue's two-arm race picked
+AMD at 6.79 GB). Cost: 1294 s symbolic in this container vs the issue's
+476 s for the two-arm race; each arm recomputes MC64 for its LdltCompress
+pass (follow-up). A slow race can now be bounded with `Interrupt`.
+Unvalidated on pounce's L1_sixm* / L2CTA3D.
 
 ## Recent Tried-and-Rejected
 the contract for callers that use `SparseLu` as a rank-reveal probe. With
@@ -270,6 +271,7 @@ tests/issue227_never_golden.rs
 tests/issue227_reanalysis.rs
 tests/issue237_infnorm_reuse.rs
 tests/issue246_amf_quantization.rs
+tests/issue246_interrupt.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
